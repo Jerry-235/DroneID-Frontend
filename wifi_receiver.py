@@ -8,12 +8,14 @@ import argparse
 import json
 from pathlib import Path
 import socket as pysock
+from threading import Thread, Event
 
 from Library.utils import search_interfaces, get_iw_interfaces, extract_wifi_if_details, enable_monitor_mode, \
     set_interface_channel, cexec, enable_managed_mode
-from OpenDroneID.wifi_parser import oui_to_parser
+from OpenDroneID.wifi_parser import oui_to_parser, parse_nan_action_frame
 from scapy.all import *
 from scapy.layers.dot11 import Dot11EltVendorSpecific, Dot11, Dot11Elt
+from scapy.packet import Raw
 import zmq
 
 verbose = False
@@ -68,6 +70,22 @@ def _first_usb_wifi_iface() -> str | None:
 
     return None
 
+def channel_hopper(interface: str, channels: tuple[int, int], dwell_times: tuple[float, float], stop_evt: Event):
+    """
+    Bounce between two channels until stop_evt is set.
+    channels: (first_channel, second_channel)
+    dwell_times: seconds to stay on each channel in the same order.
+    """
+    idx = 0
+    while not stop_evt.is_set():
+        channel = channels[idx]
+        dwell = dwell_times[idx]
+        set_interface_channel(interface, channel)
+        end = time.time() + dwell
+        while time.time() < end and not stop_evt.is_set():
+            time.sleep(0.1)
+        idx = (idx + 1) % 2
+
 def pcapng_parser(filename: str):
     while True:
         for packet in PcapReader(filename):
@@ -83,28 +101,65 @@ def filter_frames(packet: Packet) -> None:
     global verbose
     macdb = {}
     pt = packet.getlayer(Dot11)
-    # subtype 0 = Management, 0x8 = Beacon, 0x13 = Action
-    # NAN Service Discovery Frames shall be encoded in 0x13 and contain DRI Info
-    # NAN Synchronization Beacon shall be encoded in 0x8 but doesn't contain DRI Info
-    # Broadcast Message can only happen on channel 6 and contains DRI Info
-    if pt is not None and pt.subtype in [0, 0x8, 0x13]:
-        if packet.haslayer(Dot11EltVendorSpecific):  # check vendor specific ID -> 221
+    # subtype 0x8 = Beacon, 0xD = Action (NAN Service Discovery)
+    # NAN Service Discovery Frames (Action 0xD) contain DRI Info in Service Descriptor
+    # NAN Synchronization Beacon (0x8) may contain DRI Info in Vendor Specific IE
+    # Broadcast Message (Beacon) can only happen on channel 6 and contains DRI Info
+    if pt is not None and pt.subtype in [0, 0x8, 0xD]:
+        mac = pt.addr2
+        macdb["DroneID"] = {}
+        macdb["DroneID"][mac] = []
+
+        parsed = False
+
+        # Path 1: Handle Vendor Specific IE (beacons and some other frames)
+        if packet.haslayer(Dot11EltVendorSpecific):
             vendor_spec: Dot11EltVendorSpecific = packet.getlayer(Dot11EltVendorSpecific)
-            mac = packet.payload.addr2
-            macdb["DroneID"] = {}
-            macdb["DroneID"][mac] = []
             while vendor_spec:
                 parser = oui_to_parser(vendor_spec.oui, vendor_spec.info)
                 if parser is not None:
                     if "DRI" in parser.msg:
                         macdb["DroneID"][mac] = parser.msg["DRI"]
+                        parsed = True
                     elif "Beacon" in parser.msg:
                         macdb["DroneID"][mac] = parser.msg["Beacon"]
-                    if socket:
-                        socket.send_string(json.dumps(macdb))
-                    if not socket or verbose:
-                        print(json.dumps(macdb))
-                break
+                        parsed = True
+                    break
+                # Try next vendor specific element
+                vendor_spec = vendor_spec.payload.getlayer(Dot11EltVendorSpecific) if vendor_spec.payload else None
+
+        # Path 2: Handle NAN Action frames (don't use Vendor Specific IE)
+        if not parsed and pt.subtype == 0xD:
+            try:
+                # For action frames, we need to get the payload after Dot11 header
+                raw_payload = None
+
+                # Try to get Raw layer first
+                if packet.haslayer(Raw):
+                    raw_payload = bytes(packet.getlayer(Raw).load)
+                else:
+                    # Get bytes after Dot11 header
+                    # Action frame body starts right after the MAC header (24 bytes from Dot11 start)
+                    raw_bytes = bytes(packet)
+                    dot11_start = raw_bytes.find(b'\xd0\x00')  # Action frame control
+                    if dot11_start >= 0:
+                        raw_payload = raw_bytes[dot11_start + 24:]
+
+                if raw_payload:
+                    result = parse_nan_action_frame(raw_payload)
+                    if result and "AdvData" in result:
+                        macdb["DroneID"][mac] = result
+                        parsed = True
+            except Exception as e:
+                if verbose:
+                    print(f"Error parsing NAN action frame: {e}")
+
+        # Output if we parsed something
+        if parsed:
+            if socket:
+                socket.send_string(json.dumps(macdb))
+            if not socket or verbose:
+                print(json.dumps(macdb))
 
 def main():
     global verbose
@@ -117,7 +172,21 @@ def main():
     aparse.add_argument("--interface", help="Define zmq host")
     aparse.add_argument("--pcap", help="Use pcap file")
     aparse.add_argument("-v", "--verbose", action="store_true", help="Print messages")
-    aparse.add_argument("-g", action="store_true", help="Use 5Ghz channel 149")
+    aparse.add_argument(
+        "-g",
+        action="store_true",
+        help="Use 5GHz channel 149 (enables 2.4/5GHz hopping unless --no-hop)",
+    )
+    aparse.add_argument(
+        "--no-hop",
+        action="store_true",
+        help="When -g is set, stay on 5GHz only (disable 5G/2.4GHz hopping)",
+    )
+    aparse.add_argument(
+        "--hop-cycle",
+        default="3,1",
+        help="Dwell times in seconds for 2.4GHz and 5GHz when hopping (format: twofour,five) [default: 3,1]",
+    )
     args = aparse.parse_args()
 
     # Runtime capability check (works with systemd AmbientCapabilities or setcap)
@@ -153,10 +222,14 @@ def main():
     if verbose:
         print(f"[auto] selected interface: {interface}")
 
-    if args.g:
-        channel = 149
-    else:
+    hop_thread = None
+    hop_stop_evt = None
+    hop_enabled = args.g and not args.no_hop
+    # When hopping, start on 2.4GHz to favor capture there; otherwise honor -g.
+    if hop_enabled:
         channel = 6
+    else:
+        channel = 149 if args.g else 6
 
     if interface is not None:
         i2d = extract_wifi_if_details(interface)
@@ -165,6 +238,25 @@ def main():
             exit(1)
         print(f"Setting wifi channel {channel}")
         set_interface_channel(interface, channel)
+
+        if hop_enabled:
+            try:
+                dwell_24g, dwell_5g = map(float, args.hop_cycle.split(","))
+            except ValueError:
+                print("Invalid --hop-cycle format, expected 'twofour,five' (e.g. 3,1)")
+                sys.exit(1)
+
+            print(
+                f"Channel hopping enabled: ch 6 ({dwell_24g}s) <-> ch 149 ({dwell_5g}s)"
+            )
+            hop_stop_evt = Event()
+            hop_thread = Thread(
+                target=channel_hopper,  # 2.4 first, then 5
+                args=(interface, (6, 149), (dwell_24g, dwell_5g), hop_stop_evt),
+                daemon=True,
+                name="chan_hopper",
+            )
+            hop_thread.start()
 
     zthread = None
     if args.zmq:
@@ -190,26 +282,28 @@ def main():
             s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             print("%s:" % s, *msg, end="\n", file=sys.stderr)
 
-        from threading import Thread
         zthread = Thread(target=zmq_thread, args=[socket], daemon=True, name='zmq')
         zthread.start()
 
     if interface is not None:
         sniffer = AsyncSniffer(
             iface=interface,
-            lfilter=lambda s: s.getlayer(Dot11).subtype == 0x8,
+            lfilter=lambda s: s.haslayer(Dot11) and s.getlayer(Dot11).subtype in [0x8, 0xD],
             prn=filter_frames,
+            store=False,  # Don't store packets in memory - prevents memory leak
         )
         sniffer.start()
         print(f"Starting sniffer on interface {interface}")
-        while True:
-            try:
-                sniffer.join()
+        try:
+            while True:
                 time.sleep(1)
-            except KeyboardInterrupt:
-                break
+        except KeyboardInterrupt:
+            pass
         print(f"Stopping sniffer on interface {interface}")
         sniffer.stop()
+        if hop_thread is not None and hop_stop_evt is not None:
+            hop_stop_evt.set()
+            hop_thread.join(timeout=2)
         if args.zmq:
             zthread.join()
         if interface is not None:
