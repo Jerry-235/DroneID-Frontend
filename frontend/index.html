@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DroneID — Live Map</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:            #0F1720;
+    --panel:         #16212C;
+    --panel-raised:  #1C2A38;
+    --hairline:      #263544;
+    --text:          #E6EDF3;
+    --text-muted:    #7C8B99;
+    --amber:         #E8A33D;   /* live drone / primary accent */
+    --amber-dim:     #7A5A28;
+    --cyan:          #4FD1C5;   /* operator position / links */
+    --red:           #E0645A;   /* dropped/error */
+    --radius: 3px;
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;margin:0;}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:'Inter',system-ui,sans-serif;
+    display:flex;
+    flex-direction:column;
+    overflow:hidden;
+  }
+  .topbar{
+    height:48px;
+    flex:0 0 auto;
+    display:flex;
+    align-items:center;
+    gap:16px;
+    padding:0 16px;
+    border-bottom:1px solid var(--hairline);
+    background:var(--panel);
+  }
+  .brand{
+    font-weight:700;
+    font-size:14px;
+    letter-spacing:0.02em;
+  }
+  .brand span{color:var(--amber);}
+  .status{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    font-size:12px;
+    color:var(--text-muted);
+    font-family:'IBM Plex Mono',monospace;
+  }
+  .dot{
+    width:8px;height:8px;border-radius:50%;
+    background:var(--red);
+    box-shadow:0 0 0 3px rgba(224,100,90,0.15);
+    transition:background .2s, box-shadow .2s;
+  }
+  .dot.connected{
+    background:var(--cyan);
+    box-shadow:0 0 0 3px rgba(79,209,197,0.15);
+  }
+  .count{
+    margin-left:auto;
+    font-size:12px;
+    color:var(--text-muted);
+    font-family:'IBM Plex Mono',monospace;
+  }
+  .count b{color:var(--text);font-weight:600;}
+  .main{
+    flex:1 1 auto;
+    display:flex;
+    min-height:0;
+  }
+  .sidebar{
+    width:300px;
+    flex:0 0 auto;
+    background:var(--panel);
+    border-right:1px solid var(--hairline);
+    overflow-y:auto;
+  }
+  .sidebar-empty{
+    padding:24px 16px;
+    color:var(--text-muted);
+    font-size:13px;
+    line-height:1.5;
+  }
+  .track-row{
+    padding:10px 14px;
+    border-bottom:1px solid var(--hairline);
+    cursor:pointer;
+    display:flex;
+    flex-direction:column;
+    gap:3px;
+  }
+  .track-row:hover{background:var(--panel-raised);}
+  .track-row.selected{background:var(--panel-raised);border-left:2px solid var(--amber);padding-left:12px;}
+  .track-row .row-top{
+    display:flex;
+    align-items:center;
+    gap:8px;
+  }
+  .status-chip{
+    width:7px;height:7px;border-radius:50%;flex:0 0 auto;
+  }
+  .status-chip.live{background:var(--amber);}
+  .status-chip.stale{background:var(--text-muted);}
+  .track-name{
+    font-size:13px;
+    font-weight:600;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+  .track-sub{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:11px;
+    color:var(--text-muted);
+    display:flex;
+    gap:10px;
+    flex-wrap:wrap;
+  }
+  #map{flex:1 1 auto;background:#0B121A;}
+
+  /* Leaflet overrides for dark theme */
+  .leaflet-container{background:#0B121A;}
+  .leaflet-popup-content-wrapper{
+    background:var(--panel-raised);
+    color:var(--text);
+    border-radius:var(--radius);
+    border:1px solid var(--hairline);
+  }
+  .leaflet-popup-tip{background:var(--panel-raised);}
+  .popup-title{font-weight:700;font-size:13px;margin-bottom:6px;}
+  .popup-row{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:11px;
+    color:var(--text-muted);
+    display:flex;
+    justify-content:space-between;
+    gap:12px;
+  }
+  .popup-row b{color:var(--text);font-weight:500;}
+
+  .drone-icon{
+    filter:drop-shadow(0 0 3px rgba(0,0,0,0.6));
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand">DRONE<span>ID</span> · LIVE</div>
+  <div class="status"><span class="dot" id="conn-dot"></span><span id="conn-label">connecting…</span></div>
+  <div class="count"><b id="track-count">0</b>&nbsp;tracked</div>
+</div>
+
+<div class="main">
+  <div class="sidebar" id="sidebar">
+    <div class="sidebar-empty">No detections yet. Waiting for data from the DroneID decoder…</div>
+  </div>
+  <div id="map"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const map = L.map('map', { zoomControl: true, attributionControl: true }).setView([20, 0], 2);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  maxZoom: 19,
+  attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+}).addTo(map);
+
+let hasCentered = false;
+const droneMarkers = new Map();   // key -> {marker, opMarker, link, data}
+let selectedKey = null;
+
+function droneIconSvg(color, heading) {
+  const rot = (heading === null || heading === undefined) ? 0 : heading;
+  return L.divIcon({
+    className: 'drone-icon',
+    html: `<svg width="26" height="26" viewBox="0 0 26 26" style="transform:rotate(${rot}deg)">
+      <polygon points="13,2 20,22 13,17 6,22" fill="${color}" stroke="#0B121A" stroke-width="1"/>
+    </svg>`,
+    iconSize: [26, 26],
+    iconAnchor: [13, 13]
+  });
+}
+
+function opIconSvg(color) {
+  return L.divIcon({
+    className: 'drone-icon',
+    html: `<svg width="16" height="16" viewBox="0 0 16 16">
+      <rect x="3" y="3" width="10" height="10" transform="rotate(45 8 8)" fill="none" stroke="${color}" stroke-width="2"/>
+    </svg>`,
+    iconSize: [16, 16],
+    iconAnchor: [8, 8]
+  });
+}
+
+function statusColor(status) {
+  if (status === 'live') return '#E8A33D';
+  if (status === 'stale') return '#7C8B99';
+  return '#E0645A';
+}
+
+function fmt(v, digits, suffix) {
+  if (v === null || v === undefined) return '—';
+  return v.toFixed(digits) + (suffix || '');
+}
+
+function upsertDrone(d) {
+  const color = statusColor(d.status);
+  let entry = droneMarkers.get(d.key);
+
+  const hasPos = d.lat !== null && d.lat !== undefined && d.lon !== null && d.lon !== undefined;
+
+  if (!entry) {
+    entry = { marker: null, opMarker: null, link: null, data: d };
+    droneMarkers.set(d.key, entry);
+  }
+  entry.data = d;
+
+  if (hasPos) {
+    const latlng = [d.lat, d.lon];
+    if (!entry.marker) {
+      entry.marker = L.marker(latlng, { icon: droneIconSvg(color, d.heading) }).addTo(map);
+      entry.marker.on('click', () => selectTrack(d.key));
+    } else {
+      entry.marker.setLatLng(latlng);
+      entry.marker.setIcon(droneIconSvg(color, d.heading));
+    }
+    entry.marker.bindPopup(popupHtml(d));
+    if (!hasCentered) {
+      map.setView(latlng, 14);
+      hasCentered = true;
+    }
+  }
+
+  if (d.op_lat !== null && d.op_lat !== undefined && d.op_lon !== null && d.op_lon !== undefined) {
+    const opLatlng = [d.op_lat, d.op_lon];
+    if (!entry.opMarker) {
+      entry.opMarker = L.marker(opLatlng, { icon: opIconSvg('#4FD1C5') }).addTo(map);
+      entry.opMarker.bindTooltip('Operator / ground station', { direction: 'top' });
+    } else {
+      entry.opMarker.setLatLng(opLatlng);
+    }
+    if (hasPos) {
+      const linePts = [[d.lat, d.lon], opLatlng];
+      if (!entry.link) {
+        entry.link = L.polyline(linePts, { color: '#4FD1C5', weight: 1, dashArray: '4,4', opacity: 0.5 }).addTo(map);
+      } else {
+        entry.link.setLatLngs(linePts);
+      }
+    }
+  }
+
+  renderSidebar();
+  if (selectedKey === d.key && entry.marker) {
+    entry.marker.openPopup();
+  }
+}
+
+function removeDrone(key) {
+  const entry = droneMarkers.get(key);
+  if (entry) {
+    if (entry.marker) map.removeLayer(entry.marker);
+    if (entry.opMarker) map.removeLayer(entry.opMarker);
+    if (entry.link) map.removeLayer(entry.link);
+    droneMarkers.delete(key);
+  }
+  renderSidebar();
+}
+
+function popupHtml(d) {
+  const name = d.nickname || d.serial || d.mac;
+  return `
+    <div class="popup-title">${escapeHtml(name)}</div>
+    <div class="popup-row"><span>MAC</span><b>${escapeHtml(d.mac || '—')}</b></div>
+    <div class="popup-row"><span>Serial</span><b>${escapeHtml(d.serial || '—')}</b></div>
+    <div class="popup-row"><span>Altitude</span><b>${fmt(d.alt,1,' m')}</b></div>
+    <div class="popup-row"><span>Height AGL</span><b>${fmt(d.height_agl,1,' m')}</b></div>
+    <div class="popup-row"><span>Heading</span><b>${fmt(d.heading,0,'°')}</b></div>
+    <div class="popup-row"><span>Speed</span><b>${fmt(d.speed,1,' m/s')}</b></div>
+    <div class="popup-row"><span>Status</span><b>${d.status}</b></div>
+  `;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function selectTrack(key) {
+  selectedKey = key;
+  const entry = droneMarkers.get(key);
+  if (entry && entry.marker) {
+    map.panTo(entry.marker.getLatLng());
+    entry.marker.openPopup();
+  }
+  renderSidebar();
+}
+
+function renderSidebar() {
+  const sidebar = document.getElementById('sidebar');
+  const entries = Array.from(droneMarkers.values()).sort((a, b) => (b.data.last_seen || 0) - (a.data.last_seen || 0));
+  document.getElementById('track-count').textContent = entries.length;
+
+  if (entries.length === 0) {
+    sidebar.innerHTML = '<div class="sidebar-empty">No detections yet. Waiting for data from the DroneID decoder…</div>';
+    return;
+  }
+
+  sidebar.innerHTML = entries.map(({ data: d }) => {
+    const name = d.nickname || d.serial || d.mac;
+    const sel = d.key === selectedKey ? ' selected' : '';
+    return `
+      <div class="track-row${sel}" data-key="${escapeHtml(d.key)}">
+        <div class="row-top">
+          <span class="status-chip ${d.status}"></span>
+          <span class="track-name">${escapeHtml(name)}</span>
+        </div>
+        <div class="track-sub">
+          <span>${escapeHtml(d.mac || '—')}</span>
+          <span>${fmt(d.alt,0,'m')}</span>
+          <span>${fmt(d.heading,0,'°')}</span>
+        </div>
+      </div>`;
+  }).join('');
+
+  sidebar.querySelectorAll('.track-row').forEach(row => {
+    row.addEventListener('click', () => selectTrack(row.dataset.key));
+  });
+}
+
+function setConnState(connected, label) {
+  document.getElementById('conn-dot').classList.toggle('connected', connected);
+  document.getElementById('conn-label').textContent = label;
+}
+
+function connectWs() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => setConnState(true, 'live');
+  ws.onclose = () => {
+    setConnState(false, 'reconnecting…');
+    setTimeout(connectWs, 2000);
+  };
+  ws.onerror = () => ws.close();
+
+  ws.onmessage = (evt) => {
+    const msg = JSON.parse(evt.data);
+    if (msg.type === 'snapshot') {
+      msg.drones.forEach(upsertDrone);
+    } else if (msg.type === 'update') {
+      upsertDrone(msg.drone);
+    } else if (msg.type === 'status') {
+      const entry = droneMarkers.get(msg.key);
+      if (entry) {
+        entry.data.status = msg.status;
+        upsertDrone(entry.data);
+      }
+    } else if (msg.type === 'dropped') {
+      removeDrone(msg.key);
+    }
+  };
+}
+
+connectWs();
+</script>
+</body>
+</html>
