@@ -24,8 +24,11 @@ from typing import Optional
 import zmq
 import zmq.asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+import db
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("droneid-frontend")
@@ -103,6 +106,7 @@ class DroneTrack:
 
     nickname: Optional[str] = None
     notes: Optional[str] = None
+    flight_id: Optional[int] = None  # current open flight row in the DB, if any
 
     first_seen: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
@@ -265,6 +269,8 @@ class TrackStore:
 
 
 store = TrackStore()
+catalog_nicknames: dict[str, str] = {}   # catalog_key -> user-assigned nickname, cached from DB
+active_flights: dict[str, int] = {}      # catalog_key -> currently-open flight row id
 
 
 class ConnectionManager:
@@ -368,6 +374,24 @@ def extract_bursts(data) -> list[tuple[Optional[str], list[dict]]]:
     return []
 
 
+async def persist_update(track: DroneTrack):
+    """Open a new flight the first time we see this catalog key in this
+    process's lifetime, otherwise append a point to the already-open flight.
+    Also refreshes the catalog row (mac/serial/registration/ua_type) and
+    applies any user-assigned nickname to the live track."""
+    key = track.key
+    # ensure the catalog row exists before a flight can reference it (FK)
+    await db.upsert_catalog(key, track.mac, track.serial, track.registration_id, track.ua_type, track.last_seen)
+    if key not in active_flights:
+        active_flights[key] = await db.start_flight(key, track.mac, track.serial, track.last_seen)
+    track.flight_id = active_flights[key]
+    await db.add_point(
+        track.flight_id, track.last_seen, track.lat, track.lon, track.alt,
+        track.height_agl, track.heading, track.speed, track.op_lat, track.op_lon,
+    )
+    track.nickname = catalog_nicknames.get(key)
+
+
 async def zmq_listener():
     ctx = zmq.asyncio.Context()
     sock = ctx.socket(zmq.SUB)
@@ -382,6 +406,7 @@ async def zmq_listener():
                 continue
             for mac, messages in extract_bursts(data):
                 track = store.apply_burst(mac, messages)
+                await persist_update(track)
                 await manager.broadcast({"type": "update", "drone": track.to_dict()})
         except Exception:
             log.exception("Error in zmq listener loop")
@@ -390,7 +415,8 @@ async def zmq_listener():
 
 async def stale_sweeper():
     """Periodically re-broadcast status transitions (live -> stale -> dropped)
-    so the UI can fade/remove icons even without new packets arriving."""
+    so the UI can fade/remove icons even without new packets arriving, and
+    close out the DB flight record once a track is dropped."""
     while True:
         await asyncio.sleep(5)
         now = time.time()
@@ -403,14 +429,23 @@ async def stale_sweeper():
                 await manager.broadcast({"type": "status", "key": key, "status": track.status()})
         for key in drop_keys:
             store.tracks.pop(key, None)
+            flight_id = active_flights.pop(key, None)
+            if flight_id is not None:
+                await db.end_flight(flight_id, now)
             await manager.broadcast({"type": "dropped", "key": key})
 
 
 app = FastAPI(title="DroneID Live Map")
 
 
+class RenameBody(BaseModel):
+    nickname: str
+
+
 @app.on_event("startup")
 async def startup():
+    db.init(os.environ.get("DRONEID_DB_PATH", os.path.join(os.path.dirname(__file__), "droneid.db")))
+    catalog_nicknames.update(await db.get_catalog())
     asyncio.create_task(zmq_listener())
     asyncio.create_task(stale_sweeper())
 
@@ -418,6 +453,48 @@ async def startup():
 @app.get("/api/drones")
 async def get_drones():
     return {"drones": store.snapshot()}
+
+
+@app.get("/api/drones/catalog")
+async def api_catalog():
+    """All known nicknames, keyed by catalog_key (serial, or MAC if no
+    serial has ever been seen for that drone)."""
+    return {"catalog": catalog_nicknames}
+
+
+@app.patch("/api/drones/{catalog_key}/name")
+async def api_rename_drone(catalog_key: str, body: RenameBody):
+    """Rename a drone. Applies retroactively: every past and future flight
+    for this catalog_key will show the new name, since the name is looked
+    up at query/display time rather than copied into flight rows."""
+    nickname = body.nickname.strip() or None
+    await db.rename_drone(catalog_key, nickname)
+    if nickname:
+        catalog_nicknames[catalog_key] = nickname
+    else:
+        catalog_nicknames.pop(catalog_key, None)
+    if catalog_key in store.tracks:
+        store.tracks[catalog_key].nickname = nickname
+        await manager.broadcast({"type": "update", "drone": store.tracks[catalog_key].to_dict()})
+    return {"ok": True, "catalog_key": catalog_key, "nickname": nickname}
+
+
+@app.get("/api/flights")
+async def api_list_flights(limit: int = 50, offset: int = 0):
+    """Past (and in-progress) flights, most recent first."""
+    return {"flights": await db.list_flights(limit, offset)}
+
+
+@app.get("/api/flights/{flight_id}")
+async def api_get_flight(flight_id: int):
+    """A single flight's metadata plus its full point-by-point path — this is
+    what both the historical playback view and 'show this live drone's path
+    so far' use (for an in-progress flight, points are returned up to now)."""
+    flight = await db.get_flight(flight_id)
+    if not flight:
+        return JSONResponse({"error": "flight not found"}, status_code=404)
+    points = await db.get_flight_points(flight_id)
+    return {"flight": flight, "points": points}
 
 
 @app.websocket("/ws")

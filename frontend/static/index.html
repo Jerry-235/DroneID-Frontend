@@ -17,7 +17,7 @@
     --text-muted:    #7C8B99;
     --amber:         #E8A33D;   /* live drone / primary accent */
     --amber-dim:     #7A5A28;
-    --cyan:          #4FD1C5;   /* operator position / links */
+    --cyan:          #4FD1C5;   /* operator position / history playback */
     --red:           #E0645A;   /* dropped/error */
     --radius: 3px;
   }
@@ -41,130 +41,116 @@
     border-bottom:1px solid var(--hairline);
     background:var(--panel);
   }
-  .brand{
-    font-weight:700;
-    font-size:14px;
-    letter-spacing:0.02em;
-  }
+  .brand{ font-weight:700; font-size:14px; letter-spacing:0.02em; }
   .brand span{color:var(--amber);}
+  .tabs{ display:flex; gap:2px; background:var(--bg); border-radius:var(--radius); padding:2px; }
+  .tab-btn{
+    background:transparent; border:none; color:var(--text-muted);
+    font-family:'Inter',sans-serif; font-size:12px; font-weight:600;
+    padding:5px 12px; border-radius:2px; cursor:pointer; letter-spacing:0.03em;
+  }
+  .tab-btn.active{ background:var(--panel-raised); color:var(--amber); }
   .status{
-    display:flex;
-    align-items:center;
-    gap:8px;
-    font-size:12px;
-    color:var(--text-muted);
-    font-family:'IBM Plex Mono',monospace;
+    display:flex; align-items:center; gap:8px;
+    font-size:12px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace;
   }
   .dot{
-    width:8px;height:8px;border-radius:50%;
-    background:var(--red);
-    box-shadow:0 0 0 3px rgba(224,100,90,0.15);
-    transition:background .2s, box-shadow .2s;
+    width:8px;height:8px;border-radius:50%; background:var(--red);
+    box-shadow:0 0 0 3px rgba(224,100,90,0.15); transition:background .2s, box-shadow .2s;
   }
-  .dot.connected{
-    background:var(--cyan);
-    box-shadow:0 0 0 3px rgba(79,209,197,0.15);
-  }
-  .count{
-    margin-left:auto;
-    font-size:12px;
-    color:var(--text-muted);
-    font-family:'IBM Plex Mono',monospace;
-  }
+  .dot.connected{ background:var(--cyan); box-shadow:0 0 0 3px rgba(79,209,197,0.15); }
+  .count{ margin-left:auto; font-size:12px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace; }
   .count b{color:var(--text);font-weight:600;}
-  .main{
-    flex:1 1 auto;
-    display:flex;
-    min-height:0;
-  }
+  .main{ flex:1 1 auto; display:flex; min-height:0; }
   .sidebar{
-    width:300px;
-    flex:0 0 auto;
-    background:var(--panel);
-    border-right:1px solid var(--hairline);
-    overflow-y:auto;
+    width:300px; flex:0 0 auto; background:var(--panel);
+    border-right:1px solid var(--hairline); overflow-y:auto;
   }
-  .sidebar-empty{
-    padding:24px 16px;
-    color:var(--text-muted);
-    font-size:13px;
-    line-height:1.5;
-  }
+  .sidebar-empty{ padding:24px 16px; color:var(--text-muted); font-size:13px; line-height:1.5; }
   .track-row{
-    padding:10px 14px;
-    border-bottom:1px solid var(--hairline);
-    cursor:pointer;
-    display:flex;
-    flex-direction:column;
-    gap:3px;
+    padding:10px 14px; border-bottom:1px solid var(--hairline); cursor:pointer;
+    display:flex; flex-direction:column; gap:3px;
   }
   .track-row:hover{background:var(--panel-raised);}
   .track-row.selected{background:var(--panel-raised);border-left:2px solid var(--amber);padding-left:12px;}
-  .track-row .row-top{
-    display:flex;
-    align-items:center;
-    gap:8px;
-  }
-  .status-chip{
-    width:7px;height:7px;border-radius:50%;flex:0 0 auto;
-  }
+  .track-row .row-top{ display:flex; align-items:center; gap:8px; }
+  .status-chip{ width:7px;height:7px;border-radius:50%;flex:0 0 auto; }
   .status-chip.live{background:var(--amber);}
   .status-chip.stale{background:var(--text-muted);}
   .track-name{
-    font-size:13px;
-    font-weight:600;
-    overflow:hidden;
-    text-overflow:ellipsis;
-    white-space:nowrap;
+    font-size:13px; font-weight:600; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; flex:1 1 auto;
   }
   .track-sub{
-    font-family:'IBM Plex Mono',monospace;
-    font-size:11px;
-    color:var(--text-muted);
-    display:flex;
-    gap:10px;
-    flex-wrap:wrap;
+    font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-muted);
+    display:flex; gap:10px; flex-wrap:wrap;
   }
+  .track-date{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-muted); }
+  .pencil-btn{
+    background:none; border:none; color:var(--text-muted); cursor:pointer;
+    padding:2px 4px; font-size:12px; flex:0 0 auto; opacity:0.6;
+  }
+  .pencil-btn:hover{opacity:1;color:var(--amber);}
+
+  .map-wrap{ flex:1 1 auto; display:flex; flex-direction:column; min-height:0; }
   #map{flex:1 1 auto;background:#0B121A;}
+
+  .scrubber-bar{
+    display:none; flex:0 0 auto; height:60px; background:var(--panel);
+    border-top:1px solid var(--hairline); padding:0 16px; align-items:center; gap:14px;
+  }
+  .scrubber-bar.show{display:flex;}
+  .scrub-btn{
+    background:var(--panel-raised); border:1px solid var(--hairline); color:var(--amber);
+    width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:12px;flex:0 0 auto;
+  }
+  .scrub-range{flex:1 1 auto;accent-color:var(--amber);}
+  .scrub-readout{
+    font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-muted);
+    display:flex; gap:14px; white-space:nowrap;
+  }
+  .scrub-readout b{color:var(--text);font-weight:500;}
 
   /* Leaflet overrides for dark theme */
   .leaflet-container{background:#0B121A;}
   .leaflet-popup-content-wrapper{
-    background:var(--panel-raised);
-    color:var(--text);
-    border-radius:var(--radius);
-    border:1px solid var(--hairline);
+    background:var(--panel-raised); color:var(--text);
+    border-radius:var(--radius); border:1px solid var(--hairline);
   }
   .leaflet-popup-tip{background:var(--panel-raised);}
-  .popup-title{font-weight:700;font-size:13px;margin-bottom:6px;}
+  .popup-title{font-weight:700;font-size:13px;margin-bottom:6px;display:flex;align-items:center;gap:6px;}
   .popup-row{
-    font-family:'IBM Plex Mono',monospace;
-    font-size:11px;
-    color:var(--text-muted);
-    display:flex;
-    justify-content:space-between;
-    gap:12px;
+    font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-muted);
+    display:flex; justify-content:space-between; gap:12px;
   }
   .popup-row b{color:var(--text);font-weight:500;}
-
-  .drone-icon{
-    filter:drop-shadow(0 0 3px rgba(0,0,0,0.6));
-  }
+  .drone-icon{ filter:drop-shadow(0 0 3px rgba(0,0,0,0.6)); }
 </style>
 </head>
 <body>
 
 <div class="topbar">
-  <div class="brand">DRONE<span>ID</span> · LIVE</div>
+  <div class="brand">DRONE<span>ID</span></div>
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-live">LIVE</button>
+    <button class="tab-btn" id="tab-history">HISTORY</button>
+  </div>
   <div class="status"><span class="dot" id="conn-dot"></span><span id="conn-label">connecting…</span></div>
-  <div class="count"><b id="track-count">0</b>&nbsp;tracked</div>
+  <div class="count"><b id="track-count">0</b>&nbsp;<span id="count-label">tracked</span></div>
 </div>
 
 <div class="main">
   <div class="sidebar" id="sidebar">
     <div class="sidebar-empty">No detections yet. Waiting for data from the DroneID decoder…</div>
   </div>
-  <div id="map"></div>
+  <div class="map-wrap">
+    <div id="map"></div>
+    <div class="scrubber-bar" id="scrubber">
+      <button class="scrub-btn" id="scrub-play">▶</button>
+      <input type="range" class="scrub-range" id="scrub-range" min="0" max="0" value="0">
+      <div class="scrub-readout" id="scrub-readout"></div>
+    </div>
+  </div>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
@@ -175,9 +161,15 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
   attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
 }).addTo(map);
 
+const liveLayer = L.layerGroup().addTo(map);
+const historyLayer = L.layerGroup();
+
 let hasCentered = false;
-const droneMarkers = new Map();   // key -> {marker, opMarker, link, data}
+let mode = 'live';               // 'live' | 'history'
+const droneMarkers = new Map();  // key -> {marker, opMarker, link, pathLine, path, flightId, flightLoading, data}
 let selectedKey = null;
+
+// ---------------- shared helpers ----------------
 
 function droneIconSvg(color, heading) {
   const rot = (heading === null || heading === undefined) ? 0 : heading;
@@ -186,8 +178,7 @@ function droneIconSvg(color, heading) {
     html: `<svg width="26" height="26" viewBox="0 0 26 26" style="transform:rotate(${rot}deg)">
       <polygon points="13,2 20,22 13,17 6,22" fill="${color}" stroke="#0B121A" stroke-width="1"/>
     </svg>`,
-    iconSize: [26, 26],
-    iconAnchor: [13, 13]
+    iconSize: [26, 26], iconAnchor: [13, 13]
   });
 }
 
@@ -197,8 +188,7 @@ function opIconSvg(color) {
     html: `<svg width="16" height="16" viewBox="0 0 16 16">
       <rect x="3" y="3" width="10" height="10" transform="rotate(45 8 8)" fill="none" stroke="${color}" stroke-width="2"/>
     </svg>`,
-    iconSize: [16, 16],
-    iconAnchor: [8, 8]
+    iconSize: [16, 16], iconAnchor: [8, 8]
   });
 }
 
@@ -213,101 +203,167 @@ function fmt(v, digits, suffix) {
   return v.toFixed(digits) + (suffix || '');
 }
 
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function fmtDateTime(unixSeconds) {
+  if (!unixSeconds) return '—';
+  return new Date(unixSeconds * 1000).toLocaleString();
+}
+
+function fmtDuration(startS, endS) {
+  const end = endS || (Date.now() / 1000);
+  const secs = Math.max(0, Math.round(end - startS));
+  const m = Math.floor(secs / 60), s = secs % 60;
+  return `${m}m ${s}s`;
+}
+
+async function renameDrone(catalogKey, currentName) {
+  const next = prompt('Name this drone (applies to all its flights, past and future):', currentName || '');
+  if (next === null) return;
+  const res = await fetch(`/api/drones/${encodeURIComponent(catalogKey)}/name`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nickname: next })
+  });
+  if (res.ok && mode === 'history') loadHistoryList();
+}
+
+// ---------------- LIVE mode ----------------
+
 function upsertDrone(d) {
   const color = statusColor(d.status);
   let entry = droneMarkers.get(d.key);
-
   const hasPos = d.lat !== null && d.lat !== undefined && d.lon !== null && d.lon !== undefined;
 
   if (!entry) {
-    entry = { marker: null, opMarker: null, link: null, data: d };
+    entry = { marker: null, opMarker: null, link: null, pathLine: null, path: [], flightId: null, flightLoading: false, data: d };
     droneMarkers.set(d.key, entry);
   }
   entry.data = d;
 
+  // backfill this flight's path once per flight_id (covers page load mid-flight)
+  if (d.flight_id && entry.flightId !== d.flight_id && !entry.flightLoading) {
+    entry.flightLoading = true;
+    entry.flightId = d.flight_id;
+    fetch(`/api/flights/${d.flight_id}`).then(r => r.json()).then(data => {
+      entry.path = (data.points || [])
+        .filter(p => p.lat !== null && p.lon !== null)
+        .map(p => [p.lat, p.lon]);
+      drawLivePath(entry, d.key);
+      entry.flightLoading = false;
+    }).catch(() => { entry.flightLoading = false; });
+  }
+
   if (hasPos) {
     const latlng = [d.lat, d.lon];
+    const last = entry.path[entry.path.length - 1];
+    if (!last || last[0] !== d.lat || last[1] !== d.lon) {
+      entry.path.push(latlng);
+      drawLivePath(entry, d.key);
+    }
     if (!entry.marker) {
-      entry.marker = L.marker(latlng, { icon: droneIconSvg(color, d.heading) }).addTo(map);
+      entry.marker = L.marker(latlng, { icon: droneIconSvg(color, d.heading) });
       entry.marker.on('click', () => selectTrack(d.key));
+      liveLayer.addLayer(entry.marker);
     } else {
       entry.marker.setLatLng(latlng);
       entry.marker.setIcon(droneIconSvg(color, d.heading));
     }
     entry.marker.bindPopup(popupHtml(d));
-    if (!hasCentered) {
-      map.setView(latlng, 14);
-      hasCentered = true;
-    }
+    if (!hasCentered) { map.setView(latlng, 14); hasCentered = true; }
   }
 
   if (d.op_lat !== null && d.op_lat !== undefined && d.op_lon !== null && d.op_lon !== undefined) {
     const opLatlng = [d.op_lat, d.op_lon];
     if (!entry.opMarker) {
-      entry.opMarker = L.marker(opLatlng, { icon: opIconSvg('#4FD1C5') }).addTo(map);
+      entry.opMarker = L.marker(opLatlng, { icon: opIconSvg('#4FD1C5') });
       entry.opMarker.bindTooltip('Operator / ground station', { direction: 'top' });
+      liveLayer.addLayer(entry.opMarker);
     } else {
       entry.opMarker.setLatLng(opLatlng);
     }
     if (hasPos) {
       const linePts = [[d.lat, d.lon], opLatlng];
       if (!entry.link) {
-        entry.link = L.polyline(linePts, { color: '#4FD1C5', weight: 1, dashArray: '4,4', opacity: 0.5 }).addTo(map);
+        entry.link = L.polyline(linePts, { color: '#4FD1C5', weight: 1, dashArray: '4,4', opacity: 0.5 });
+        liveLayer.addLayer(entry.link);
       } else {
         entry.link.setLatLngs(linePts);
       }
     }
   }
 
-  renderSidebar();
-  if (selectedKey === d.key && entry.marker) {
-    entry.marker.openPopup();
+  if (mode === 'live') renderSidebar();
+  if (selectedKey === d.key && entry.marker) entry.marker.openPopup();
+}
+
+function drawLivePath(entry, key) {
+  if (entry.path.length < 2) return;
+  const selected = key === selectedKey;
+  const style = { color: '#E8A33D', weight: selected ? 3 : 2, opacity: selected ? 0.9 : 0.5 };
+  if (!entry.pathLine) {
+    entry.pathLine = L.polyline(entry.path, style);
+    liveLayer.addLayer(entry.pathLine);
+  } else {
+    entry.pathLine.setLatLngs(entry.path);
+    entry.pathLine.setStyle(style);
   }
 }
 
 function removeDrone(key) {
   const entry = droneMarkers.get(key);
   if (entry) {
-    if (entry.marker) map.removeLayer(entry.marker);
-    if (entry.opMarker) map.removeLayer(entry.opMarker);
-    if (entry.link) map.removeLayer(entry.link);
+    if (entry.marker) liveLayer.removeLayer(entry.marker);
+    if (entry.opMarker) liveLayer.removeLayer(entry.opMarker);
+    if (entry.link) liveLayer.removeLayer(entry.link);
+    // leave the flight path visible but fade it to show it's no longer live
+    if (entry.pathLine) entry.pathLine.setStyle({ color: '#7C8B99', opacity: 0.35, weight: 2 });
     droneMarkers.delete(key);
   }
-  renderSidebar();
+  if (mode === 'live') renderSidebar();
 }
 
 function popupHtml(d) {
   const name = d.nickname || d.serial || d.mac;
+  const warn = d.raw_units_warning
+    ? `<div class="popup-row" style="color:#E8A33D"><span>⚠ alt/height/speed</span><b>unverified units</b></div>`
+    : '';
   return `
-    <div class="popup-title">${escapeHtml(name)}</div>
+    <div class="popup-title">${escapeHtml(name)} <button class="pencil-btn" onclick="renameDrone('${escapeHtml(d.key)}','${escapeHtml(name)}')">✎</button></div>
     <div class="popup-row"><span>MAC</span><b>${escapeHtml(d.mac || '—')}</b></div>
     <div class="popup-row"><span>Serial</span><b>${escapeHtml(d.serial || '—')}</b></div>
+    ${d.registration_id ? `<div class="popup-row"><span>Registration</span><b>${escapeHtml(d.registration_id)}</b></div>` : ''}
+    <div class="popup-row"><span>UA type</span><b>${escapeHtml(d.ua_type ?? '—')}</b></div>
     <div class="popup-row"><span>Altitude</span><b>${fmt(d.alt,1,' m')}</b></div>
     <div class="popup-row"><span>Height AGL</span><b>${fmt(d.height_agl,1,' m')}</b></div>
     <div class="popup-row"><span>Heading</span><b>${fmt(d.heading,0,'°')}</b></div>
     <div class="popup-row"><span>Speed</span><b>${fmt(d.speed,1,' m/s')}</b></div>
+    ${d.operator_id ? `<div class="popup-row"><span>Operator ID</span><b>${escapeHtml(d.operator_id)}</b></div>` : ''}
+    ${d.description ? `<div class="popup-row"><span>Self ID</span><b>${escapeHtml(d.description)}</b></div>` : ''}
     <div class="popup-row"><span>Status</span><b>${d.status}</b></div>
+    ${warn}
   `;
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
 function selectTrack(key) {
   selectedKey = key;
   const entry = droneMarkers.get(key);
-  if (entry && entry.marker) {
-    map.panTo(entry.marker.getLatLng());
-    entry.marker.openPopup();
+  if (entry) {
+    if (entry.marker) { map.panTo(entry.marker.getLatLng()); entry.marker.openPopup(); }
+    drawLivePath(entry, key);
   }
+  // dim every other track's path so the selected drone's route stands out
+  droneMarkers.forEach((e, k) => { if (k !== key) drawLivePath(e, k); });
   renderSidebar();
 }
 
-function renderSidebar() {
+function renderLiveSidebar() {
   const sidebar = document.getElementById('sidebar');
   const entries = Array.from(droneMarkers.values()).sort((a, b) => (b.data.last_seen || 0) - (a.data.last_seen || 0));
   document.getElementById('track-count').textContent = entries.length;
+  document.getElementById('count-label').textContent = 'tracked';
 
   if (entries.length === 0) {
     sidebar.innerHTML = '<div class="sidebar-empty">No detections yet. Waiting for data from the DroneID decoder…</div>';
@@ -322,6 +378,7 @@ function renderSidebar() {
         <div class="row-top">
           <span class="status-chip ${d.status}"></span>
           <span class="track-name">${escapeHtml(name)}</span>
+          <button class="pencil-btn" data-rename="${escapeHtml(d.key)}" data-name="${escapeHtml(name)}">✎</button>
         </div>
         <div class="track-sub">
           <span>${escapeHtml(d.mac || '—')}</span>
@@ -332,9 +389,171 @@ function renderSidebar() {
   }).join('');
 
   sidebar.querySelectorAll('.track-row').forEach(row => {
-    row.addEventListener('click', () => selectTrack(row.dataset.key));
+    row.addEventListener('click', (e) => {
+      if (e.target.dataset.rename) return; // pencil handles its own click below
+      selectTrack(row.dataset.key);
+    });
+  });
+  sidebar.querySelectorAll('[data-rename]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      renameDrone(btn.dataset.rename, btn.dataset.name);
+    });
   });
 }
+
+// ---------------- HISTORY mode ----------------
+
+let historyState = { flightId: null, points: [], marker: null, line: null, playing: false, timer: null };
+
+async function loadHistoryList() {
+  const sidebar = document.getElementById('sidebar');
+  sidebar.innerHTML = '<div class="sidebar-empty">Loading flights…</div>';
+  const res = await fetch('/api/flights?limit=100');
+  const data = await res.json();
+  const flights = data.flights || [];
+  document.getElementById('track-count').textContent = flights.length;
+  document.getElementById('count-label').textContent = 'flights';
+
+  if (flights.length === 0) {
+    sidebar.innerHTML = '<div class="sidebar-empty">No recorded flights yet.</div>';
+    return;
+  }
+
+  sidebar.innerHTML = flights.map(f => {
+    const sel = f.id === historyState.flightId ? ' selected' : '';
+    const inProgress = !f.ended_at;
+    return `
+      <div class="track-row${sel}" data-flight="${f.id}" data-key="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">
+        <div class="row-top">
+          <span class="status-chip ${inProgress ? 'live' : ''}" style="${inProgress ? '' : 'background:#3A4A5A'}"></span>
+          <span class="track-name">${escapeHtml(f.display_name)}</span>
+          <button class="pencil-btn" data-rename="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">✎</button>
+        </div>
+        <div class="track-sub">
+          <span class="track-date">${fmtDateTime(f.started_at)}</span>
+        </div>
+        <div class="track-sub">
+          <span>${fmtDuration(f.started_at, f.ended_at)}</span>
+          <span>${f.point_count} pts</span>
+          ${inProgress ? '<span style="color:#E8A33D">in progress</span>' : ''}
+        </div>
+      </div>`;
+  }).join('');
+
+  sidebar.querySelectorAll('.track-row').forEach(row => {
+    row.addEventListener('click', (e) => {
+      if (e.target.dataset.rename) return;
+      selectHistoryFlight(parseInt(row.dataset.flight, 10));
+    });
+  });
+  sidebar.querySelectorAll('[data-rename]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      renameDrone(btn.dataset.rename, btn.dataset.name);
+    });
+  });
+}
+
+async function selectHistoryFlight(flightId) {
+  stopPlayback();
+  historyLayer.clearLayers();
+  const res = await fetch(`/api/flights/${flightId}`);
+  const data = await res.json();
+  const points = (data.points || []).filter(p => p.lat !== null && p.lon !== null);
+  historyState = { flightId, points, marker: null, line: null, playing: false, timer: null };
+
+  const scrubber = document.getElementById('scrubber');
+  const range = document.getElementById('scrub-range');
+
+  if (points.length === 0) {
+    document.getElementById('scrub-readout').textContent = 'No position data recorded for this flight.';
+    scrubber.classList.add('show');
+    range.max = 0;
+    return;
+  }
+
+  const latlngs = points.map(p => [p.lat, p.lon]);
+  historyState.line = L.polyline(latlngs, { color: '#4FD1C5', weight: 3, opacity: 0.8 });
+  historyLayer.addLayer(historyState.line);
+  historyState.marker = L.marker(latlngs[0], { icon: droneIconSvg('#4FD1C5', points[0].heading) });
+  historyLayer.addLayer(historyState.marker);
+  map.fitBounds(historyState.line.getBounds(), { padding: [40, 40] });
+
+  range.max = points.length - 1;
+  range.value = 0;
+  scrubber.classList.add('show');
+  scrubToIndex(0);
+  loadHistoryList(); // refresh selection highlight
+}
+
+function scrubToIndex(idx) {
+  const p = historyState.points[idx];
+  if (!p) return;
+  historyState.marker.setLatLng([p.lat, p.lon]);
+  historyState.marker.setIcon(droneIconSvg('#4FD1C5', p.heading));
+  document.getElementById('scrub-readout').innerHTML = `
+    <span>${fmtDateTime(p.ts)}</span>
+    <span>alt <b>${fmt(p.alt,1,'m')}</b></span>
+    <span>hdg <b>${fmt(p.heading,0,'°')}</b></span>
+    <span>spd <b>${fmt(p.speed,1,'m/s')}</b></span>
+  `;
+}
+
+function stopPlayback() {
+  historyState.playing = false;
+  if (historyState.timer) clearInterval(historyState.timer);
+  document.getElementById('scrub-play').textContent = '▶';
+}
+
+function togglePlayback() {
+  if (!historyState.points.length) return;
+  if (historyState.playing) { stopPlayback(); return; }
+  historyState.playing = true;
+  document.getElementById('scrub-play').textContent = '⏸';
+  const range = document.getElementById('scrub-range');
+  historyState.timer = setInterval(() => {
+    let idx = parseInt(range.value, 10) + 1;
+    if (idx >= historyState.points.length) { stopPlayback(); return; }
+    range.value = idx;
+    scrubToIndex(idx);
+  }, 150);
+}
+
+document.getElementById('scrub-range').addEventListener('input', (e) => {
+  scrubToIndex(parseInt(e.target.value, 10));
+});
+document.getElementById('scrub-play').addEventListener('click', togglePlayback);
+
+// ---------------- mode switching ----------------
+
+function renderSidebar() {
+  if (mode === 'live') renderLiveSidebar(); else loadHistoryList();
+}
+
+function switchMode(next) {
+  if (mode === next) return;
+  mode = next;
+  document.getElementById('tab-live').classList.toggle('active', next === 'live');
+  document.getElementById('tab-history').classList.toggle('active', next === 'history');
+  document.getElementById('scrubber').classList.toggle('show', next === 'history' && historyState.points.length > 0);
+
+  if (next === 'live') {
+    map.removeLayer(historyLayer);
+    map.addLayer(liveLayer);
+    stopPlayback();
+    renderLiveSidebar();
+  } else {
+    map.removeLayer(liveLayer);
+    map.addLayer(historyLayer);
+    loadHistoryList();
+  }
+}
+
+document.getElementById('tab-live').addEventListener('click', () => switchMode('live'));
+document.getElementById('tab-history').addEventListener('click', () => switchMode('history'));
+
+// ---------------- websocket ----------------
 
 function setConnState(connected, label) {
   document.getElementById('conn-dot').classList.toggle('connected', connected);
@@ -346,10 +565,7 @@ function connectWs() {
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
 
   ws.onopen = () => setConnState(true, 'live');
-  ws.onclose = () => {
-    setConnState(false, 'reconnecting…');
-    setTimeout(connectWs, 2000);
-  };
+  ws.onclose = () => { setConnState(false, 'reconnecting…'); setTimeout(connectWs, 2000); };
   ws.onerror = () => ws.close();
 
   ws.onmessage = (evt) => {
@@ -360,10 +576,7 @@ function connectWs() {
       upsertDrone(msg.drone);
     } else if (msg.type === 'status') {
       const entry = droneMarkers.get(msg.key);
-      if (entry) {
-        entry.data.status = msg.status;
-        upsertDrone(entry.data);
-      }
+      if (entry) { entry.data.status = msg.status; upsertDrone(entry.data); }
     } else if (msg.type === 'dropped') {
       removeDrone(msg.key);
     }
