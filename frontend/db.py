@@ -54,6 +54,7 @@ def _connect(path: str = DB_PATH) -> sqlite3.Connection:
             serial        TEXT,
             started_at    REAL NOT NULL,
             ended_at      REAL,
+            last_point_at REAL,
             point_count   INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_flights_catalog ON flights(catalog_key, started_at);
@@ -70,6 +71,14 @@ def _connect(path: str = DB_PATH) -> sqlite3.Connection:
         """
     )
     conn.commit()
+
+    # migration: older DBs created before last_point_at existed
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(flights)").fetchall()]
+    if "last_point_at" not in cols:
+        conn.execute("ALTER TABLE flights ADD COLUMN last_point_at REAL")
+        conn.execute("UPDATE flights SET last_point_at = ended_at WHERE last_point_at IS NULL")
+        conn.commit()
+
     return conn
 
 
@@ -145,7 +154,13 @@ def _add_point(flight_id, ts, lat, lon, alt, height_agl, heading, speed, op_lat,
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (flight_id, ts, lat, lon, alt, height_agl, heading, speed, op_lat, op_lon),
     )
-    conn.execute("UPDATE flights SET point_count = point_count + 1 WHERE id = ?", (flight_id,))
+    # last_point_at reflects the actual span of received data; ended_at (set
+    # separately, on drop-detection) can lag well behind it since a flight
+    # isn't closed until DROP_AFTER_S of silence has passed.
+    conn.execute(
+        "UPDATE flights SET point_count = point_count + 1, last_point_at = ? WHERE id = ?",
+        (ts, flight_id),
+    )
     conn.commit()
 
 
@@ -159,7 +174,8 @@ def _list_flights(limit, offset):
     conn = _require_conn()
     rows = conn.execute(
         """
-        SELECT f.id, f.catalog_key, f.mac, f.serial, f.started_at, f.ended_at, f.point_count,
+        SELECT f.id, f.catalog_key, f.mac, f.serial, f.started_at, f.ended_at,
+               f.last_point_at, f.point_count,
                COALESCE(d.nickname, f.serial, f.mac, f.catalog_key) AS display_name
         FROM flights f
         LEFT JOIN drones d ON d.catalog_key = f.catalog_key
@@ -175,7 +191,8 @@ def _get_flight(flight_id):
     conn = _require_conn()
     row = conn.execute(
         """
-        SELECT f.id, f.catalog_key, f.mac, f.serial, f.started_at, f.ended_at, f.point_count,
+        SELECT f.id, f.catalog_key, f.mac, f.serial, f.started_at, f.ended_at,
+               f.last_point_at, f.point_count,
                COALESCE(d.nickname, f.serial, f.mac, f.catalog_key) AS display_name
         FROM flights f LEFT JOIN drones d ON d.catalog_key = f.catalog_key
         WHERE f.id = ?
