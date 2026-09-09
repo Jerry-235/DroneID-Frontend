@@ -105,6 +105,24 @@
   .settings-row:hover{background:var(--panel-raised);}
   .settings-row input{accent-color:var(--amber);width:14px;height:14px;flex:0 0 auto;}
   .settings-note{ padding:12px 14px; font-size:11px; color:var(--text-muted); line-height:1.5; }
+  .station-form{ padding:0 14px 14px; display:flex; flex-direction:column; gap:8px; }
+  .station-form input{
+    background:var(--bg); border:1px solid var(--hairline); color:var(--text);
+    font-family:'IBM Plex Mono',monospace; font-size:12px; padding:6px 8px; border-radius:var(--radius);
+    width:100%;
+  }
+  .station-form input:focus{ outline:none; border-color:var(--amber); }
+  .station-form-buttons{ display:flex; gap:8px; }
+  .settings-btn{
+    flex:1 1 auto; background:var(--amber); color:#0B121A; border:none;
+    font-family:'Inter',sans-serif; font-size:12px; font-weight:600;
+    padding:7px 10px; border-radius:var(--radius); cursor:pointer;
+  }
+  .settings-btn:hover{ opacity:0.9; }
+  .settings-btn-ghost{
+    background:transparent; color:var(--text-muted); border:1px solid var(--hairline);
+  }
+  .settings-btn-ghost:hover{ color:var(--text); border-color:var(--text-muted); }
   .popup-group-title{
     font-size:10px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
     color:var(--amber); margin:8px 0 4px; opacity:0.85;
@@ -203,11 +221,14 @@ L.control.layers({ 'Street': streetLayer, 'Satellite': satelliteLayer }, null, {
 
 const liveLayer = L.layerGroup().addTo(map);
 const historyLayer = L.layerGroup();
+const stationLayer = L.layerGroup().addTo(map);   // always visible, independent of live/history mode
 
 let hasCentered = false;
 let mode = 'live';               // 'live' | 'history'
 const droneMarkers = new Map();  // key -> {marker, opMarker, link, pathLine, path, flightId, flightLoading, pairColor, data}
 let selectedKey = null;
+let stationCoord = null;         // { lat, lon } — server-side "home point", null until set in Settings
+let stationMarker = null;
 
 // Each tracked drone gets a persistent color, used for its operator marker,
 // the dashed drone<->operator link, and a highlight ring on the drone icon
@@ -243,6 +264,63 @@ function opIconSvg(color) {
     </svg>`,
     iconSize: [16, 16], iconAnchor: [8, 8]
   });
+}
+
+function stationIconSvg() {
+  return L.divIcon({
+    className: 'drone-icon',
+    html: `<svg width="22" height="22" viewBox="0 0 22 22">
+      <circle cx="11" cy="11" r="9" fill="#1C2A38" stroke="#E6EDF3" stroke-width="2"/>
+      <circle cx="11" cy="11" r="3" fill="#E6EDF3"/>
+    </svg>`,
+    iconSize: [22, 22], iconAnchor: [11, 11]
+  });
+}
+
+// Haversine great-circle distance in meters — used for "distance to station".
+function haversineMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = deg => deg * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function fmtDistance(meters) {
+  if (meters < 1000) return `${meters.toFixed(0)} m`;
+  return `${(meters / 1000).toFixed(2)} km`;
+}
+
+function placeStationMarker() {
+  if (!stationCoord) {
+    if (stationMarker) { stationLayer.removeLayer(stationMarker); stationMarker = null; }
+    return;
+  }
+  const latlng = [stationCoord.lat, stationCoord.lon];
+  if (!stationMarker) {
+    stationMarker = L.marker(latlng, { icon: stationIconSvg() });
+    stationMarker.bindTooltip('Station', { direction: 'top' });
+    stationLayer.addLayer(stationMarker);
+  } else {
+    stationMarker.setLatLng(latlng);
+  }
+}
+
+async function loadStation() {
+  try {
+    const res = await fetch('/api/station');
+    const data = await res.json();
+    if (data && data.lat !== null && data.lat !== undefined && data.lon !== null && data.lon !== undefined) {
+      stationCoord = { lat: data.lat, lon: data.lon };
+      placeStationMarker();
+      // Station is the home point the map loads to — take priority over the
+      // "auto-center on first drone seen" fallback.
+      map.setView([data.lat, data.lon], 14);
+      hasCentered = true;
+    }
+  } catch (e) { /* no station set yet, or fetch failed — fall back silently */ }
 }
 
 function statusColor(status) {
@@ -320,12 +398,14 @@ const FIELD_DEFS = {
     { key: 'baro_accuracy',       label: 'Baro Accuracy' },
     { key: 'speed_accuracy',      label: 'Speed Accuracy' },
     { key: 'loc_timestamp',       label: 'Timestamp' },
+    { key: 'station_distance',    label: 'Distance to Station', formatter: fmtDistance },
   ],
   'Operator': [
     { key: 'op_location_type',       label: 'Op Location Type' },
     { key: 'op_classification_type', label: 'Op Classification Type' },
     { key: 'op_lat',                 label: 'Operator Latitude',  digits: 7, unit: '' },
     { key: 'op_lon',                 label: 'Operator Longitude', digits: 7, unit: '' },
+    { key: 'op_station_distance',    label: 'Distance to Station', formatter: fmtDistance },
   ],
 };
 
@@ -337,9 +417,9 @@ const FIELD_DEFAULTS = {
     op_status: true, height_type: false, heading: true, speed: true, vert_speed: true,
     lat: true, lon: true, pressure_altitude: false, alt: false, height_agl: true,
     vertical_accuracy: false, horizontal_accuracy: false, baro_accuracy: false,
-    speed_accuracy: false, loc_timestamp: false,
+    speed_accuracy: false, loc_timestamp: false, station_distance: true,
   },
-  'Operator': { op_location_type: true, op_classification_type: true, op_lat: true, op_lon: true },
+  'Operator': { op_location_type: true, op_classification_type: true, op_lat: true, op_lon: true, op_station_distance: true },
 };
 
 const FIELD_SETTINGS_KEY = 'droneid_field_toggles_v1';
@@ -383,6 +463,14 @@ function fieldValue(d, key) {
       return Math.max(0, d.point_ts - d.started_at);
     }
     return null;
+  }
+  if (key === 'station_distance') {
+    if (!stationCoord || d.lat === null || d.lat === undefined || d.lon === null || d.lon === undefined) return null;
+    return haversineMeters(stationCoord.lat, stationCoord.lon, d.lat, d.lon);
+  }
+  if (key === 'op_station_distance') {
+    if (!stationCoord || d.op_lat === null || d.op_lat === undefined || d.op_lon === null || d.op_lon === undefined) return null;
+    return haversineMeters(stationCoord.lat, stationCoord.lon, d.op_lat, d.op_lon);
   }
   return d[key];
 }
@@ -432,7 +520,28 @@ function refreshOpenInfoBoxes() {
 
 function renderSettingsPanel() {
   const sidebar = document.getElementById('sidebar');
-  let html = '<div class="settings-note">Choose which fields appear in the info box shown when you click a drone on the map or scrub through its history. Applies everywhere — not per-drone.</div>';
+  let html = `
+    <div class="settings-group-title" style="border-top:none;">Station</div>
+    <div class="settings-note">
+      Set this device's fixed reference location. It's stored on the server —
+      the same for every browser/device that opens this app — and the map
+      loads centered here every time.
+    </div>
+    <div class="station-form">
+      <input id="station-lat" type="number" step="any" placeholder="Latitude"
+             value="${stationCoord ? stationCoord.lat : ''}">
+      <input id="station-lon" type="number" step="any" placeholder="Longitude"
+             value="${stationCoord ? stationCoord.lon : ''}">
+      <div class="station-form-buttons">
+        <button id="station-save" class="settings-btn">Save</button>
+        <button id="station-clear" class="settings-btn settings-btn-ghost">Clear</button>
+      </div>
+      <div class="settings-note" id="station-status">${stationCoord
+        ? `Currently set: ${stationCoord.lat.toFixed(6)}, ${stationCoord.lon.toFixed(6)}`
+        : 'Not set yet.'}</div>
+    </div>`;
+
+  html += '<div class="settings-note">Choose which fields appear in the info box shown when you click a drone on the map or scrub through its history. Applies everywhere — not per-drone.</div>';
   Object.keys(FIELD_DEFS).forEach(group => {
     html += `<div class="settings-group-title">${escapeHtml(group)}</div>`;
     html += FIELD_DEFS[group].map(f => {
@@ -445,12 +554,52 @@ function renderSettingsPanel() {
     }).join('');
   });
   sidebar.innerHTML = html;
+
   sidebar.querySelectorAll('input[type=checkbox]').forEach(cb => {
     cb.addEventListener('change', () => {
       fieldSettings[cb.dataset.group][cb.dataset.key] = cb.checked;
       saveFieldSettings();
       refreshOpenInfoBoxes();
     });
+  });
+
+  document.getElementById('station-save').addEventListener('click', async () => {
+    const lat = parseFloat(document.getElementById('station-lat').value);
+    const lon = parseFloat(document.getElementById('station-lon').value);
+    const statusEl = document.getElementById('station-status');
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      statusEl.textContent = 'Enter a valid latitude and longitude.';
+      return;
+    }
+    try {
+      const res = await fetch('/api/station', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lat, lon }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        statusEl.textContent = data.error || 'Could not save station location.';
+        return;
+      }
+      stationCoord = { lat, lon };
+      placeStationMarker();
+      map.setView([lat, lon], 14);
+      refreshOpenInfoBoxes();
+      renderSettingsPanel();
+    } catch (e) {
+      statusEl.textContent = 'Could not reach the server.';
+    }
+  });
+
+  document.getElementById('station-clear').addEventListener('click', async () => {
+    try {
+      await fetch('/api/station', { method: 'DELETE' });
+      stationCoord = null;
+      placeStationMarker();
+      refreshOpenInfoBoxes();
+      renderSettingsPanel();
+    } catch (e) { /* ignore */ }
   });
 }
 
@@ -918,8 +1067,9 @@ function connectWs() {
 }
 
 connectWs();
+loadStation();
 
-// Ticks any currently-open popup once a second so "Tracked Time" counts up up
+// Ticks any currently-open popup once a second so "Tracked Time" counts up
 // live even between bursts, without waiting on new data to arrive.
 setInterval(() => {
   if (mode === 'live' && selectedKey) refreshOpenInfoBoxes();

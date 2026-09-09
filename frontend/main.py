@@ -498,12 +498,46 @@ class RenameBody(BaseModel):
     nickname: str
 
 
+class StationBody(BaseModel):
+    lat: float
+    lon: float
+
+
 @app.on_event("startup")
 async def startup():
     db.init(os.environ.get("DRONEID_DB_PATH", os.path.join(os.path.dirname(__file__), "droneid.db")))
     catalog_nicknames.update(await db.get_catalog())
     asyncio.create_task(zmq_listener())
     asyncio.create_task(stale_sweeper())
+
+
+@app.get("/api/station")
+async def api_get_station():
+    """The station/home-point location, stored server-side (not per-browser)
+    so it's the same on every device that opens this app. None for both
+    fields if it hasn't been set yet."""
+    raw = await db.get_setting("station")
+    if not raw:
+        return {"lat": None, "lon": None}
+    try:
+        data = json.loads(raw)
+        return {"lat": data.get("lat"), "lon": data.get("lon")}
+    except (json.JSONDecodeError, AttributeError):
+        return {"lat": None, "lon": None}
+
+
+@app.put("/api/station")
+async def api_set_station(body: StationBody):
+    if not (-90 <= body.lat <= 90) or not (-180 <= body.lon <= 180):
+        return JSONResponse({"error": "lat/lon out of range"}, status_code=400)
+    await db.set_setting("station", json.dumps({"lat": body.lat, "lon": body.lon}))
+    return {"ok": True, "lat": body.lat, "lon": body.lon}
+
+
+@app.delete("/api/station")
+async def api_delete_station():
+    await db.delete_setting("station")
+    return {"ok": True}
 
 
 @app.get("/api/drones")

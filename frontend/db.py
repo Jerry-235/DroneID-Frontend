@@ -1,7 +1,7 @@
 """
 Persistence layer for DroneID frontend.
 
-Three tables:
+Four tables:
   - drones        catalog: one row per canonical identity (catalog_key),
                    holds the user-assigned nickname plus slowly-changing
                    attributes (mac, serial, ua_type, protocol_version...).
@@ -15,6 +15,10 @@ Three tables:
                    per-message-instance field (op_status, accuracies, etc.)
                    so historical playback can show the same level of detail
                    as the live view.
+  - app_settings  small generic key/value store for app-wide config that
+                   isn't per-drone — currently just the station location.
+                   Server-side (not localStorage) so it's the same for every
+                   browser/device that opens this app, per spec.
 
 Plain sqlite3 (stdlib, no extra dependency), single connection, serialized
 through an asyncio.Lock + to_thread since this is a single-operator, small-
@@ -91,6 +95,11 @@ def _connect(path: str = DB_PATH) -> sqlite3.Connection:
             {point_cols_sql}
         );
         CREATE INDEX IF NOT EXISTS idx_points_flight ON track_points(flight_id, ts);
+
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        );
         """
     )
     conn.commit()
@@ -305,3 +314,37 @@ async def get_flight_points(flight_id):
 
 async def flights_for_catalog_key(catalog_key, limit=20):
     return await run(_search_flights_for_catalog_key, catalog_key, limit)
+
+
+def _get_setting(key):
+    conn = _require_conn()
+    row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def _set_setting(key, value):
+    conn = _require_conn()
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value),
+    )
+    conn.commit()
+
+
+def _delete_setting(key):
+    conn = _require_conn()
+    conn.execute("DELETE FROM app_settings WHERE key = ?", (key,))
+    conn.commit()
+
+
+async def get_setting(key):
+    return await run(_get_setting, key)
+
+
+async def set_setting(key, value):
+    await run(_set_setting, key, value)
+
+
+async def delete_setting(key):
+    await run(_delete_setting, key)
