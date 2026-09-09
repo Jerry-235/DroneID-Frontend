@@ -204,17 +204,30 @@ const historyLayer = L.layerGroup();
 
 let hasCentered = false;
 let mode = 'live';               // 'live' | 'history'
-const droneMarkers = new Map();  // key -> {marker, opMarker, link, pathLine, path, flightId, flightLoading, data}
+const droneMarkers = new Map();  // key -> {marker, opMarker, link, pathLine, path, flightId, flightLoading, pairColor, data}
 let selectedKey = null;
+
+// Each tracked drone gets a persistent color, used for its operator marker,
+// the dashed drone<->operator link, and a highlight ring on the drone icon
+// when either half of the pair is selected — keeps the pairing visually
+// obvious even with several drones/operators on screen at once.
+const PAIR_COLORS = ['#4FD1C5', '#E8A33D', '#C77DFF', '#63B3ED', '#F6AD55', '#68D391', '#F687B3', '#90CDF4'];
+let pairColorIndex = 0;
+function nextPairColor() {
+  const c = PAIR_COLORS[pairColorIndex % PAIR_COLORS.length];
+  pairColorIndex++;
+  return c;
+}
 
 // ---------------- shared helpers ----------------
 
-function droneIconSvg(color, heading) {
+function droneIconSvg(color, heading, haloColor) {
   const rot = (heading === null || heading === undefined) ? 0 : heading;
+  const halo = haloColor ? `<circle cx="13" cy="13" r="11" fill="none" stroke="${haloColor}" stroke-width="2.5"/>` : '';
   return L.divIcon({
     className: 'drone-icon',
     html: `<svg width="26" height="26" viewBox="0 0 26 26" style="transform:rotate(${rot}deg)">
-      <polygon points="13,2 20,22 13,17 6,22" fill="${color}" stroke="#0B121A" stroke-width="1"/>
+      ${halo}<polygon points="13,2 20,22 13,17 6,22" fill="${color}" stroke="#0B121A" stroke-width="1"/>
     </svg>`,
     iconSize: [26, 26], iconAnchor: [13, 13]
   });
@@ -262,8 +275,9 @@ function fmtDuration(startS, lastPointS) {
 
 // ---------------- field-toggle settings (Settings tab) ----------------
 // Defines every metric the info box can show, grouped exactly as requested:
-// Basic ID + Location/Vector Message currently render on the drone icon;
-// System Message fields are ready here for the operator icon that's next.
+// Basic ID + Location/Vector Message render on the drone popup; System
+// Message renders on the operator popup only. "General" isn't a Remote ID
+// message — it just holds the live status indicator as its own toggle.
 const FIELD_DEFS = {
   'Basic ID': [
     { key: 'protocol_version', label: 'Protocol Version' },
@@ -295,6 +309,24 @@ const FIELD_DEFS = {
     { key: 'op_lat',                 label: 'Operator Latitude',  digits: 7, unit: '' },
     { key: 'op_lon',                 label: 'Operator Longitude', digits: 7, unit: '' },
   ],
+  'General': [
+    { key: 'status', label: 'Status' },
+  ],
+};
+
+// Requested defaults: everything else in Basic ID / Location-Vector starts
+// OFF. System Message isn't covered by that list — defaulted ON so the new
+// operator popup isn't empty out of the box; flip in Settings if unwanted.
+const FIELD_DEFAULTS = {
+  'Basic ID': { protocol_version: false, serial: true, ua_type: false, id: true, mac: true },
+  'Location/Vector Message': {
+    op_status: true, height_type: false, heading: true, speed: true, vert_speed: true,
+    lat: true, lon: true, pressure_altitude: false, alt: false, height_agl: true,
+    vertical_accuracy: false, horizontal_accuracy: false, baro_accuracy: false,
+    speed_accuracy: false, loc_timestamp: false,
+  },
+  'System Message': { op_location_type: true, op_classification_type: true, op_lat: true, op_lon: true },
+  'General': { status: true },
 };
 
 const FIELD_SETTINGS_KEY = 'droneid_field_toggles_v1';
@@ -303,7 +335,7 @@ function defaultFieldSettings() {
   const s = {};
   Object.keys(FIELD_DEFS).forEach(g => {
     s[g] = {};
-    FIELD_DEFS[g].forEach(f => { s[g][f.key] = true; });
+    FIELD_DEFS[g].forEach(f => { s[g][f.key] = !!(FIELD_DEFAULTS[g] && FIELD_DEFAULTS[g][f.key]); });
   });
   return s;
 }
@@ -360,7 +392,10 @@ function renderInfoBox(d, groups) {
 function refreshOpenInfoBoxes() {
   if (mode === 'live' && selectedKey) {
     const entry = droneMarkers.get(selectedKey);
-    if (entry && entry.marker) entry.marker.setPopupContent(popupHtml(entry.data));
+    if (entry) {
+      if (entry.marker) entry.marker.setPopupContent(popupHtml(entry.data));
+      if (entry.opMarker) entry.opMarker.setPopupContent(operatorPopupHtml(entry.data));
+    }
   }
   if (mode === 'history' && historyState.marker) {
     const range = document.getElementById('scrub-range');
@@ -412,7 +447,10 @@ function upsertDrone(d) {
   const hasPos = d.lat !== null && d.lat !== undefined && d.lon !== null && d.lon !== undefined;
 
   if (!entry) {
-    entry = { marker: null, opMarker: null, link: null, pathLine: null, path: [], flightId: null, flightLoading: false, data: d };
+    entry = {
+      marker: null, opMarker: null, link: null, pathLine: null, path: [],
+      flightId: null, flightLoading: false, pairColor: nextPairColor(), data: d,
+    };
     droneMarkers.set(d.key, entry);
   }
   entry.data = d;
@@ -443,34 +481,46 @@ function upsertDrone(d) {
       liveLayer.addLayer(entry.marker);
     } else {
       entry.marker.setLatLng(latlng);
-      entry.marker.setIcon(droneIconSvg(color, d.heading));
     }
+    updateDroneIcon(entry, d.key);
     entry.marker.bindPopup(popupHtml(d));
     if (!hasCentered) { map.setView(latlng, 14); hasCentered = true; }
   }
 
+  // Operator marker only appears once a valid (non 0,0) operator location has
+  // been received — parse_latlon on the backend already nulls out 0,0.
   if (d.op_lat !== null && d.op_lat !== undefined && d.op_lon !== null && d.op_lon !== undefined) {
     const opLatlng = [d.op_lat, d.op_lon];
     if (!entry.opMarker) {
-      entry.opMarker = L.marker(opLatlng, { icon: opIconSvg('#4FD1C5') });
+      entry.opMarker = L.marker(opLatlng, { icon: opIconSvg(entry.pairColor) });
       entry.opMarker.bindTooltip('Operator / ground station', { direction: 'top' });
+      entry.opMarker.on('click', () => selectOperator(d.key));
       liveLayer.addLayer(entry.opMarker);
     } else {
       entry.opMarker.setLatLng(opLatlng);
+      entry.opMarker.setIcon(opIconSvg(entry.pairColor));
     }
+    entry.opMarker.bindPopup(operatorPopupHtml(d));
     if (hasPos) {
       const linePts = [[d.lat, d.lon], opLatlng];
       if (!entry.link) {
-        entry.link = L.polyline(linePts, { color: '#4FD1C5', weight: 1, dashArray: '4,4', opacity: 0.5 });
+        entry.link = L.polyline(linePts, { color: entry.pairColor, weight: 1, dashArray: '4,4', opacity: 0.6 });
         liveLayer.addLayer(entry.link);
       } else {
         entry.link.setLatLngs(linePts);
+        entry.link.setStyle({ color: entry.pairColor });
       }
     }
   }
 
   if (mode === 'live') renderSidebar();
   if (selectedKey === d.key && entry.marker) entry.marker.openPopup();
+}
+
+function updateDroneIcon(entry, key) {
+  if (!entry.marker) return;
+  const halo = (key === selectedKey) ? entry.pairColor : null;
+  entry.marker.setIcon(droneIconSvg(statusColor(entry.data.status), entry.data.heading, halo));
 }
 
 function drawLivePath(entry, key) {
@@ -511,10 +561,20 @@ function popupHtml(d) {
   ].join('');
   return `
     <div class="popup-title">${escapeHtml(name)} <button class="pencil-btn" onclick="renameDrone('${escapeHtml(d.key)}','${escapeHtml(name)}')">✎</button></div>
-    ${renderInfoBox(d, ['Basic ID', 'Location/Vector Message'])}
+    ${renderInfoBox(d, ['General', 'Basic ID', 'Location/Vector Message'])}
     ${extras}
-    <div class="popup-row"><span>Status</span><b>${d.status}</b></div>
     ${warn}
+  `;
+}
+
+function operatorPopupHtml(d) {
+  const name = d.nickname || d.serial || d.mac;
+  return `
+    <div class="popup-title">Operator — ${escapeHtml(name)}</div>
+    <div class="popup-row"><span>Serial</span><b>${escapeHtml(d.serial || '—')}</b></div>
+    <div class="popup-row"><span>ID</span><b>${escapeHtml(d.serial || d.mac || '—')}</b></div>
+    <div class="popup-row"><span>MAC</span><b>${escapeHtml(d.mac || '—')}</b></div>
+    ${renderInfoBox(d, ['System Message'])}
   `;
 }
 
@@ -525,8 +585,25 @@ function selectTrack(key) {
     if (entry.marker) { map.panTo(entry.marker.getLatLng()); entry.marker.openPopup(); }
     drawLivePath(entry, key);
   }
-  // dim every other track's path so the selected drone's route stands out
-  droneMarkers.forEach((e, k) => { if (k !== key) drawLivePath(e, k); });
+  // dim every other track's path so the selected drone's route stands out,
+  // and refresh every drone icon's halo ring (only the selected one keeps it)
+  droneMarkers.forEach((e, k) => { drawLivePath(e, k); updateDroneIcon(e, k); });
+  renderSidebar();
+}
+
+function selectOperator(key) {
+  selectedKey = key;
+  const entry = droneMarkers.get(key);
+  if (entry) {
+    if (entry.opMarker) entry.opMarker.openPopup();
+    if (entry.marker && entry.opMarker) {
+      map.fitBounds(L.latLngBounds([entry.marker.getLatLng(), entry.opMarker.getLatLng()]), { padding: [60, 60] });
+    } else if (entry.opMarker) {
+      map.panTo(entry.opMarker.getLatLng());
+    }
+    drawLivePath(entry, key);
+  }
+  droneMarkers.forEach((e, k) => { drawLivePath(e, k); updateDroneIcon(e, k); });
   renderSidebar();
 }
 
