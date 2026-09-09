@@ -396,6 +396,14 @@ function fmtTrackedTime(totalSeconds) {
   return `${hours}h ${mins}m`;
 }
 
+function fmtLastSeen(secondsSinceLastPoint) {
+  // "live" for the first 5s after a packet, then counts up the same way as
+  // Tracked Time — until either a new point resets it back to "live" or the
+  // track times out and disappears entirely.
+  if (secondsSinceLastPoint < 5) return 'live';
+  return fmtTrackedTime(secondsSinceLastPoint);
+}
+
 // ---------------- field-toggle settings (Settings tab) ----------------
 // Defines every metric the info box can show. Group names here are the
 // display names used in both the Settings panel and the popups: "Basic"
@@ -411,6 +419,7 @@ const FIELD_DEFS = {
     { key: 'mac',              label: 'MAC' },
     { key: 'status',           label: 'Status' },
     { key: 'tracked_time',     label: 'Tracked Time', formatter: fmtTrackedTime },
+    { key: 'last_seen_elapsed', label: 'Last Seen',   formatter: fmtLastSeen },
   ],
   'Drone': [
     { key: 'op_status',           label: 'Op Status' },
@@ -442,7 +451,7 @@ const FIELD_DEFS = {
 // Requested defaults: everything else in Basic/Drone starts OFF. Operator
 // (System Message) defaults ON.
 const FIELD_DEFAULTS = {
-  'Basic': { protocol_version: false, serial: true, ua_type: false, id: true, mac: true, status: true, tracked_time: true },
+  'Basic': { protocol_version: false, serial: true, ua_type: false, id: true, mac: true, status: true, tracked_time: true, last_seen_elapsed: true },
   'Drone': {
     op_status: true, height_type: false, heading: true, speed: true, vert_speed: true,
     lat: true, lon: true, pressure_altitude: false, alt: false, height_agl: true,
@@ -493,6 +502,14 @@ function fieldValue(d, key) {
       return Math.max(0, d.point_ts - d.started_at);
     }
     return null;
+  }
+  if (key === 'last_seen_elapsed') {
+    // Live-only concept: time since the most recent data point for this
+    // track. Not meaningful in history playback (every scrubbed point IS
+    // "current" at that moment), so it naturally falls through to null there
+    // since historyPointData() never sets last_seen.
+    if (d.last_seen === null || d.last_seen === undefined) return null;
+    return Math.max(0, (Date.now() / 1000) - d.last_seen);
   }
   if (key === 'station_distance') {
     if (!stationCoord || d.lat === null || d.lat === undefined || d.lon === null || d.lon === undefined) return null;
