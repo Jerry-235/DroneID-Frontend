@@ -104,6 +104,20 @@ class DroneTrack:
     op_lat: Optional[float] = None    # operator/ground-station position
     op_lon: Optional[float] = None
 
+    # additional Remote ID fields, requested for the field-toggle settings menu
+    protocol_version: Optional[str] = None
+    vert_speed: Optional[float] = None
+    pressure_altitude: Optional[float] = None
+    vertical_accuracy: Optional[str] = None
+    horizontal_accuracy: Optional[str] = None
+    baro_accuracy: Optional[str] = None
+    speed_accuracy: Optional[str] = None
+    op_status: Optional[str] = None
+    height_type: Optional[str] = None
+    loc_timestamp: Optional[object] = None  # raw value, string or number depending on source
+    op_location_type: Optional[str] = None
+    op_classification_type: Optional[str] = None
+
     nickname: Optional[str] = None
     notes: Optional[str] = None
     flight_id: Optional[int] = None  # current open flight row in the DB, if any
@@ -178,8 +192,16 @@ class TrackStore:
         for key in ("Location/Vector Message", "Location Vector"):
             if key in msg:
                 loc = msg[key]
-                # newer/raw shape nests the actual fields under "coord"
-                return loc.get("coord", loc)
+                coord = loc.get("coord")
+                if coord:
+                    # newer/raw shape nests direction/speed/lat/lon/alt under
+                    # "coord" but keeps op_status/height_type/protocol_version
+                    # at the outer level — merge so both are visible, with
+                    # coord's values winning on any overlapping key.
+                    merged = dict(loc)
+                    merged.update(coord)
+                    return merged
+                return loc
         return None
 
     @staticmethod
@@ -209,10 +231,12 @@ class TrackStore:
             track.registration_id = registration
 
         for msg in messages:
-            if "Basic ID" in msg and track.ua_type is None:
-                ua = msg["Basic ID"].get("ua_type")
-                if ua is not None:
-                    track.ua_type = ua
+            if "Basic ID" in msg:
+                b = msg["Basic ID"]
+                if track.ua_type is None and b.get("ua_type") is not None:
+                    track.ua_type = b.get("ua_type")
+                if b.get("protocol_version"):
+                    track.protocol_version = b.get("protocol_version")
 
             if "Operator ID" in msg:
                 op_id = msg["Operator ID"].get("id")
@@ -254,12 +278,43 @@ class TrackStore:
                 if heading is not None:
                     track.heading = heading
 
+                vspeed = clean_float(loc.get("vert_speed"))
+                if vspeed is not None:
+                    track.vert_speed = vspeed
+                pa = clean_float(loc.get("pressure_altitude"))
+                if pa is not None:
+                    track.pressure_altitude = pa
+                if loc.get("protocol_version"):
+                    track.protocol_version = loc.get("protocol_version")
+                # accuracy/status/type fields are categorical (e.g. "<1 m",
+                # "Airborne") — pass through as-is, no numeric conversion.
+                if loc.get("vertical_accuracy"):
+                    track.vertical_accuracy = loc.get("vertical_accuracy")
+                if loc.get("horizontal_accuracy"):
+                    track.horizontal_accuracy = loc.get("horizontal_accuracy")
+                if loc.get("baro_accuracy"):
+                    track.baro_accuracy = loc.get("baro_accuracy")
+                if loc.get("speed_accuracy"):
+                    track.speed_accuracy = loc.get("speed_accuracy")
+                if loc.get("op_status"):
+                    track.op_status = loc.get("op_status")
+                if loc.get("height_type"):
+                    track.height_type = loc.get("height_type")
+                if loc.get("timestamp") is not None:
+                    track.loc_timestamp = loc.get("timestamp")
+
             sysm = self._get_system(msg)
             if sysm:
                 op_lat = parse_latlon(sysm.get("latitude"))
                 op_lon = parse_latlon(sysm.get("longitude"))
                 if op_lat is not None and op_lon is not None and not (op_lat == 0 and op_lon == 0):
                     track.op_lat, track.op_lon = op_lat, op_lon
+                if sysm.get("operator_location_type"):
+                    track.op_location_type = sysm.get("operator_location_type")
+                if sysm.get("classification_type"):
+                    track.op_classification_type = sysm.get("classification_type")
+                if sysm.get("protocol_version") and not track.protocol_version:
+                    track.protocol_version = sysm.get("protocol_version")
 
         track.touch()
         return track
@@ -377,18 +432,19 @@ def extract_bursts(data) -> list[tuple[Optional[str], list[dict]]]:
 async def persist_update(track: DroneTrack):
     """Open a new flight the first time we see this catalog key in this
     process's lifetime, otherwise append a point to the already-open flight.
-    Also refreshes the catalog row (mac/serial/registration/ua_type) and
-    applies any user-assigned nickname to the live track."""
+    Also refreshes the catalog row (mac/serial/registration/ua_type/protocol
+    version) and applies any user-assigned nickname to the live track."""
     key = track.key
     # ensure the catalog row exists before a flight can reference it (FK)
-    await db.upsert_catalog(key, track.mac, track.serial, track.registration_id, track.ua_type, track.last_seen)
+    await db.upsert_catalog(
+        key, track.mac, track.serial, track.registration_id,
+        track.ua_type, track.protocol_version, track.last_seen,
+    )
     if key not in active_flights:
         active_flights[key] = await db.start_flight(key, track.mac, track.serial, track.last_seen)
     track.flight_id = active_flights[key]
-    await db.add_point(
-        track.flight_id, track.last_seen, track.lat, track.lon, track.alt,
-        track.height_agl, track.heading, track.speed, track.op_lat, track.op_lon,
-    )
+    point_fields = {c: getattr(track, c, None) for c in db.POINT_COLUMNS}
+    await db.add_point(track.flight_id, track.last_seen, point_fields)
     track.nickname = catalog_nicknames.get(key)
 
 

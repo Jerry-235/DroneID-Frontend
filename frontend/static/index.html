@@ -92,6 +92,23 @@
   }
   .pencil-btn:hover{opacity:1;color:var(--amber);}
 
+  .settings-group-title{
+    padding:12px 14px 4px; font-size:11px; font-weight:700; letter-spacing:0.05em;
+    color:var(--amber); text-transform:uppercase; border-top:1px solid var(--hairline);
+  }
+  .settings-group-title:first-child{border-top:none;margin-top:0;}
+  .settings-row{
+    display:flex; align-items:center; gap:8px; padding:5px 14px; cursor:pointer; font-size:12px;
+  }
+  .settings-row:hover{background:var(--panel-raised);}
+  .settings-row input{accent-color:var(--amber);width:14px;height:14px;flex:0 0 auto;}
+  .settings-note{ padding:12px 14px; font-size:11px; color:var(--text-muted); line-height:1.5; }
+  .popup-group-title{
+    font-size:10px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+    color:var(--amber); margin:8px 0 4px; opacity:0.85;
+  }
+  .popup-group-title:first-of-type{margin-top:2px;}
+
   .map-wrap{ flex:1 1 auto; display:flex; flex-direction:column; min-height:0; }
   #map{flex:1 1 auto;background:#DDE3E8;}
 
@@ -145,6 +162,7 @@
   <div class="tabs">
     <button class="tab-btn active" id="tab-live">LIVE</button>
     <button class="tab-btn" id="tab-history">HISTORY</button>
+    <button class="tab-btn" id="tab-settings">SETTINGS</button>
   </div>
   <div class="status"><span class="dot" id="conn-dot"></span><span id="conn-label">connecting…</span></div>
   <div class="count"><b id="track-count">0</b>&nbsp;<span id="count-label">tracked</span></div>
@@ -240,6 +258,139 @@ function fmtDuration(startS, lastPointS) {
   const secs = Math.max(0, Math.round(end - startS));
   const m = Math.floor(secs / 60), s = secs % 60;
   return `${m}m ${s}s`;
+}
+
+// ---------------- field-toggle settings (Settings tab) ----------------
+// Defines every metric the info box can show, grouped exactly as requested:
+// Basic ID + Location/Vector Message currently render on the drone icon;
+// System Message fields are ready here for the operator icon that's next.
+const FIELD_DEFS = {
+  'Basic ID': [
+    { key: 'protocol_version', label: 'Protocol Version' },
+    { key: 'serial',           label: 'Serial Number' },
+    { key: 'ua_type',          label: 'UA Type' },
+    { key: 'id',               label: 'ID' },
+    { key: 'mac',              label: 'MAC' },
+  ],
+  'Location/Vector Message': [
+    { key: 'op_status',           label: 'Op Status' },
+    { key: 'height_type',         label: 'Height Type' },
+    { key: 'heading',             label: 'Direction',          digits: 0, unit: '°' },
+    { key: 'speed',               label: 'Horiz Speed',        digits: 1, unit: ' m/s' },
+    { key: 'vert_speed',          label: 'Vert Speed',         digits: 1, unit: ' m/s' },
+    { key: 'lat',                 label: 'Latitude',           digits: 7, unit: '' },
+    { key: 'lon',                 label: 'Longitude',          digits: 7, unit: '' },
+    { key: 'pressure_altitude',   label: 'Pressure Altitude',  digits: 1, unit: ' m' },
+    { key: 'alt',                 label: 'Geodetic Altitude',  digits: 1, unit: ' m' },
+    { key: 'height_agl',          label: 'Height AGL',         digits: 1, unit: ' m' },
+    { key: 'vertical_accuracy',   label: 'Vertical Accuracy' },
+    { key: 'horizontal_accuracy', label: 'Horizontal Accuracy' },
+    { key: 'baro_accuracy',       label: 'Baro Accuracy' },
+    { key: 'speed_accuracy',      label: 'Speed Accuracy' },
+    { key: 'loc_timestamp',       label: 'Timestamp' },
+  ],
+  'System Message': [
+    { key: 'op_location_type',       label: 'Op Location Type' },
+    { key: 'op_classification_type', label: 'Op Classification Type' },
+    { key: 'op_lat',                 label: 'Operator Latitude',  digits: 7, unit: '' },
+    { key: 'op_lon',                 label: 'Operator Longitude', digits: 7, unit: '' },
+  ],
+};
+
+const FIELD_SETTINGS_KEY = 'droneid_field_toggles_v1';
+
+function defaultFieldSettings() {
+  const s = {};
+  Object.keys(FIELD_DEFS).forEach(g => {
+    s[g] = {};
+    FIELD_DEFS[g].forEach(f => { s[g][f.key] = true; });
+  });
+  return s;
+}
+
+function loadFieldSettings() {
+  const defaults = defaultFieldSettings();
+  try {
+    const raw = localStorage.getItem(FIELD_SETTINGS_KEY);
+    if (!raw) return defaults;
+    const parsed = JSON.parse(raw);
+    Object.keys(defaults).forEach(g => { Object.assign(defaults[g], parsed[g] || {}); });
+  } catch (e) { /* corrupt/unavailable storage — fall back to defaults */ }
+  return defaults;
+}
+
+function saveFieldSettings() {
+  try { localStorage.setItem(FIELD_SETTINGS_KEY, JSON.stringify(fieldSettings)); } catch (e) { /* ignore */ }
+}
+
+let fieldSettings = loadFieldSettings();
+
+function fieldValue(d, key) {
+  if (key === 'id') return (d.serial !== null && d.serial !== undefined) ? d.serial : d.mac;
+  return d[key];
+}
+
+function fieldDisplay(fdef, value) {
+  if (value === null || value === undefined || value === '') return '—';
+  if (fdef.digits !== undefined) {
+    const n = Number(value);
+    return Number.isFinite(n) ? fmt(n, fdef.digits, fdef.unit || '') : escapeHtml(String(value));
+  }
+  return escapeHtml(String(value));
+}
+
+// Renders the toggle-controlled field groups for the info box. `groups` is
+// which message-type sections to include (drone icon: Basic ID + Location/
+// Vector Message; a future operator icon would pass System Message instead).
+function renderInfoBox(d, groups) {
+  let html = '';
+  groups.forEach(g => {
+    const settings = fieldSettings[g] || {};
+    const defs = (FIELD_DEFS[g] || []).filter(f => settings[f.key]);
+    if (!defs.length) return;
+    html += `<div class="popup-group-title">${escapeHtml(g)}</div>`;
+    html += defs.map(f => {
+      const val = fieldValue(d, f.key);
+      return `<div class="popup-row"><span>${escapeHtml(f.label)}</span><b>${fieldDisplay(f, val)}</b></div>`;
+    }).join('');
+  });
+  return html;
+}
+
+function refreshOpenInfoBoxes() {
+  if (mode === 'live' && selectedKey) {
+    const entry = droneMarkers.get(selectedKey);
+    if (entry && entry.marker) entry.marker.setPopupContent(popupHtml(entry.data));
+  }
+  if (mode === 'history' && historyState.marker) {
+    const range = document.getElementById('scrub-range');
+    const idx = range ? parseInt(range.value, 10) || 0 : 0;
+    historyState.marker.setPopupContent(historyPopupHtml(idx));
+  }
+}
+
+function renderSettingsPanel() {
+  const sidebar = document.getElementById('sidebar');
+  let html = '<div class="settings-note">Choose which fields appear in the info box shown when you click a drone on the map or scrub through its history. Applies everywhere — not per-drone.</div>';
+  Object.keys(FIELD_DEFS).forEach(group => {
+    html += `<div class="settings-group-title">${escapeHtml(group)}</div>`;
+    html += FIELD_DEFS[group].map(f => {
+      const checked = fieldSettings[group][f.key] ? 'checked' : '';
+      return `
+        <label class="settings-row">
+          <input type="checkbox" data-group="${escapeHtml(group)}" data-key="${escapeHtml(f.key)}" ${checked}>
+          <span>${escapeHtml(f.label)}</span>
+        </label>`;
+    }).join('');
+  });
+  sidebar.innerHTML = html;
+  sidebar.querySelectorAll('input[type=checkbox]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      fieldSettings[cb.dataset.group][cb.dataset.key] = cb.checked;
+      saveFieldSettings();
+      refreshOpenInfoBoxes();
+    });
+  });
 }
 
 async function renameDrone(catalogKey, currentName) {
@@ -353,18 +504,15 @@ function popupHtml(d) {
   const warn = d.raw_units_warning
     ? `<div class="popup-row" style="color:#E8A33D"><span>⚠ alt/height/speed</span><b>unverified units</b></div>`
     : '';
+  const extras = [
+    d.registration_id ? `<div class="popup-row"><span>Registration</span><b>${escapeHtml(d.registration_id)}</b></div>` : '',
+    d.operator_id ? `<div class="popup-row"><span>Operator ID</span><b>${escapeHtml(d.operator_id)}</b></div>` : '',
+    d.description ? `<div class="popup-row"><span>Self ID</span><b>${escapeHtml(d.description)}</b></div>` : '',
+  ].join('');
   return `
     <div class="popup-title">${escapeHtml(name)} <button class="pencil-btn" onclick="renameDrone('${escapeHtml(d.key)}','${escapeHtml(name)}')">✎</button></div>
-    <div class="popup-row"><span>MAC</span><b>${escapeHtml(d.mac || '—')}</b></div>
-    <div class="popup-row"><span>Serial</span><b>${escapeHtml(d.serial || '—')}</b></div>
-    ${d.registration_id ? `<div class="popup-row"><span>Registration</span><b>${escapeHtml(d.registration_id)}</b></div>` : ''}
-    <div class="popup-row"><span>UA type</span><b>${escapeHtml(d.ua_type ?? '—')}</b></div>
-    <div class="popup-row"><span>Altitude</span><b>${fmt(d.alt,1,' m')}</b></div>
-    <div class="popup-row"><span>Height AGL</span><b>${fmt(d.height_agl,1,' m')}</b></div>
-    <div class="popup-row"><span>Heading</span><b>${fmt(d.heading,0,'°')}</b></div>
-    <div class="popup-row"><span>Speed</span><b>${fmt(d.speed,1,' m/s')}</b></div>
-    ${d.operator_id ? `<div class="popup-row"><span>Operator ID</span><b>${escapeHtml(d.operator_id)}</b></div>` : ''}
-    ${d.description ? `<div class="popup-row"><span>Self ID</span><b>${escapeHtml(d.description)}</b></div>` : ''}
+    ${renderInfoBox(d, ['Basic ID', 'Location/Vector Message'])}
+    ${extras}
     <div class="popup-row"><span>Status</span><b>${d.status}</b></div>
     ${warn}
   `;
@@ -427,7 +575,35 @@ function renderLiveSidebar() {
 
 // ---------------- HISTORY mode ----------------
 
-let historyState = { flightId: null, points: [], marker: null, line: null, playing: false, timer: null };
+let historyState = { flightId: null, flightMeta: null, points: [], marker: null, line: null, playing: false, timer: null };
+
+function historyPointData(idx) {
+  const p = historyState.points[idx] || {};
+  const f = historyState.flightMeta || {};
+  return {
+    mac: f.mac, serial: f.serial, ua_type: f.ua_type,
+    protocol_version: p.protocol_version || f.protocol_version,
+    registration_id: f.registration_id,
+    op_status: p.op_status, height_type: p.height_type,
+    heading: p.heading, speed: p.speed, vert_speed: p.vert_speed,
+    lat: p.lat, lon: p.lon,
+    pressure_altitude: p.pressure_altitude, alt: p.alt, height_agl: p.height_agl,
+    vertical_accuracy: p.vertical_accuracy, horizontal_accuracy: p.horizontal_accuracy,
+    baro_accuracy: p.baro_accuracy, speed_accuracy: p.speed_accuracy,
+    loc_timestamp: p.loc_timestamp,
+    op_location_type: p.op_location_type, op_classification_type: p.op_classification_type,
+    op_lat: p.op_lat, op_lon: p.op_lon,
+  };
+}
+
+function historyPopupHtml(idx) {
+  const d = historyPointData(idx);
+  const name = historyState.flightMeta ? historyState.flightMeta.display_name : '';
+  return `
+    <div class="popup-title">${escapeHtml(name)}</div>
+    ${renderInfoBox(d, ['Basic ID', 'Location/Vector Message'])}
+  `;
+}
 
 async function loadHistoryList() {
   const sidebar = document.getElementById('sidebar');
@@ -484,7 +660,7 @@ async function selectHistoryFlight(flightId) {
   const res = await fetch(`/api/flights/${flightId}`);
   const data = await res.json();
   const points = (data.points || []).filter(p => p.lat !== null && p.lon !== null);
-  historyState = { flightId, points, marker: null, line: null, playing: false, timer: null };
+  historyState = { flightId, flightMeta: data.flight || null, points, marker: null, line: null, playing: false, timer: null };
 
   const scrubber = document.getElementById('scrubber');
   const range = document.getElementById('scrub-range');
@@ -500,6 +676,7 @@ async function selectHistoryFlight(flightId) {
   historyState.line = L.polyline(latlngs, { color: '#4FD1C5', weight: 3, opacity: 0.8 });
   historyLayer.addLayer(historyState.line);
   historyState.marker = L.marker(latlngs[0], { icon: droneIconSvg('#4FD1C5', points[0].heading) });
+  historyState.marker.bindPopup(historyPopupHtml(0));
   historyLayer.addLayer(historyState.marker);
   map.fitBounds(historyState.line.getBounds(), { padding: [40, 40] });
 
@@ -507,6 +684,7 @@ async function selectHistoryFlight(flightId) {
   range.value = 0;
   scrubber.classList.add('show');
   scrubToIndex(0);
+  historyState.marker.openPopup();
   loadHistoryList(); // refresh selection highlight
 }
 
@@ -515,6 +693,7 @@ function scrubToIndex(idx) {
   if (!p) return;
   historyState.marker.setLatLng([p.lat, p.lon]);
   historyState.marker.setIcon(droneIconSvg('#4FD1C5', p.heading));
+  historyState.marker.setPopupContent(historyPopupHtml(idx));
   document.getElementById('scrub-readout').innerHTML = `
     <span>${fmtDateTime(p.ts)}</span>
     <span>alt <b>${fmt(p.alt,1,'m')}</b></span>
@@ -551,7 +730,10 @@ document.getElementById('scrub-play').addEventListener('click', togglePlayback);
 // ---------------- mode switching ----------------
 
 function renderSidebar() {
-  if (mode === 'live') renderLiveSidebar(); else loadHistoryList();
+  if (mode === 'live') renderLiveSidebar();
+  else if (mode === 'history') loadHistoryList();
+  // 'settings' mode renders its own panel via renderSettingsPanel() and is
+  // untouched by live/history data updates.
 }
 
 function switchMode(next) {
@@ -559,6 +741,7 @@ function switchMode(next) {
   mode = next;
   document.getElementById('tab-live').classList.toggle('active', next === 'live');
   document.getElementById('tab-history').classList.toggle('active', next === 'history');
+  document.getElementById('tab-settings').classList.toggle('active', next === 'settings');
   document.getElementById('scrubber').classList.toggle('show', next === 'history' && historyState.points.length > 0);
 
   if (next === 'live') {
@@ -566,15 +749,21 @@ function switchMode(next) {
     map.addLayer(liveLayer);
     stopPlayback();
     renderLiveSidebar();
-  } else {
+  } else if (next === 'history') {
     map.removeLayer(liveLayer);
     map.addLayer(historyLayer);
     loadHistoryList();
+  } else if (next === 'settings') {
+    stopPlayback();
+    document.getElementById('track-count').textContent = '';
+    document.getElementById('count-label').textContent = 'settings';
+    renderSettingsPanel();
   }
 }
 
 document.getElementById('tab-live').addEventListener('click', () => switchMode('live'));
 document.getElementById('tab-history').addEventListener('click', () => switchMode('history'));
+document.getElementById('tab-settings').addEventListener('click', () => switchMode('settings'));
 
 // ---------------- websocket ----------------
 

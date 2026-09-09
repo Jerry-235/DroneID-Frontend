@@ -3,13 +3,18 @@ Persistence layer for DroneID frontend.
 
 Three tables:
   - drones        catalog: one row per canonical identity (catalog_key),
-                   holds the user-assigned nickname. catalog_key is the same
-                   "serial if known, else MAC" key Approach A already uses in
-                   TrackStore, so renaming here instantly relabels every past
-                   and future flight for that drone — nickname is joined in at
-                   query time, never copied into flight/point rows.
+                   holds the user-assigned nickname plus slowly-changing
+                   attributes (mac, serial, ua_type, protocol_version...).
+                   catalog_key is the same "serial if known, else MAC" key
+                   Approach A uses in TrackStore, so renaming here instantly
+                   relabels every past and future flight for that drone —
+                   nickname is joined in at query time, never copied into
+                   flight/point rows.
   - flights       one row per contiguous detection session for a catalog_key.
-  - track_points  timestamped samples belonging to a flight.
+  - track_points  timestamped samples belonging to a flight, including every
+                   per-message-instance field (op_status, accuracies, etc.)
+                   so historical playback can show the same level of detail
+                   as the live view.
 
 Plain sqlite3 (stdlib, no extra dependency), single connection, serialized
 through an asyncio.Lock + to_thread since this is a single-operator, small-
@@ -27,14 +32,33 @@ DB_PATH = os.environ.get("DRONEID_DB_PATH", "droneid.db")
 _lock = asyncio.Lock()
 _conn: Optional[sqlite3.Connection] = None
 
+# Columns on track_points beyond (flight_id, ts) — kept as a list so
+# add_point/get_flight_points can build their SQL generically instead of
+# growing an ever-longer positional parameter list every time a new Remote ID
+# field gets surfaced in the UI.
+POINT_COLUMNS = [
+    "lat", "lon", "alt", "height_agl", "heading", "speed",
+    "op_lat", "op_lon",
+    "vert_speed", "pressure_altitude",
+    "vertical_accuracy", "horizontal_accuracy", "baro_accuracy", "speed_accuracy",
+    "op_status", "height_type", "loc_timestamp", "protocol_version",
+    "op_location_type", "op_classification_type",
+]
+
 
 def _connect(path: str = DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+
+    point_cols_sql = ",\n            ".join(f"{c} TEXT" if c not in (
+        "lat", "lon", "alt", "height_agl", "heading", "speed", "op_lat", "op_lon",
+        "vert_speed", "pressure_altitude",
+    ) else f"{c} REAL" for c in POINT_COLUMNS)
+
     conn.executescript(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS drones (
             catalog_key   TEXT PRIMARY KEY,
             nickname      TEXT,
@@ -43,6 +67,7 @@ def _connect(path: str = DB_PATH) -> sqlite3.Connection:
             serial        TEXT,
             registration_id TEXT,
             ua_type       TEXT,
+            protocol_version TEXT,
             first_seen    REAL,
             last_seen     REAL
         );
@@ -63,21 +88,32 @@ def _connect(path: str = DB_PATH) -> sqlite3.Connection:
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             flight_id   INTEGER NOT NULL REFERENCES flights(id),
             ts          REAL NOT NULL,
-            lat REAL, lon REAL, alt REAL, height_agl REAL,
-            heading REAL, speed REAL,
-            op_lat REAL, op_lon REAL
+            {point_cols_sql}
         );
         CREATE INDEX IF NOT EXISTS idx_points_flight ON track_points(flight_id, ts);
         """
     )
     conn.commit()
 
-    # migration: older DBs created before last_point_at existed
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(flights)").fetchall()]
-    if "last_point_at" not in cols:
+    # ---- migrations for DBs created before a given column existed ----
+    flight_cols = [r[1] for r in conn.execute("PRAGMA table_info(flights)").fetchall()]
+    if "last_point_at" not in flight_cols:
         conn.execute("ALTER TABLE flights ADD COLUMN last_point_at REAL")
         conn.execute("UPDATE flights SET last_point_at = ended_at WHERE last_point_at IS NULL")
-        conn.commit()
+
+    drone_cols = [r[1] for r in conn.execute("PRAGMA table_info(drones)").fetchall()]
+    if "protocol_version" not in drone_cols:
+        conn.execute("ALTER TABLE drones ADD COLUMN protocol_version TEXT")
+
+    point_cols = [r[1] for r in conn.execute("PRAGMA table_info(track_points)").fetchall()]
+    for c in POINT_COLUMNS:
+        if c not in point_cols:
+            coltype = "REAL" if c in (
+                "lat", "lon", "alt", "height_agl", "heading", "speed", "op_lat", "op_lon",
+                "vert_speed", "pressure_altitude",
+            ) else "TEXT"
+            conn.execute(f"ALTER TABLE track_points ADD COLUMN {c} {coltype}")
+    conn.commit()
 
     return conn
 
@@ -103,20 +139,25 @@ async def run(fn, *args):
 
 # ---- sync implementations (always called via run()/to_thread) ----
 
-def _upsert_catalog(catalog_key, mac, serial, registration_id, ua_type, ts):
+def _upsert_catalog(catalog_key, mac, serial, registration_id, ua_type, protocol_version, ts):
     conn = _require_conn()
     conn.execute(
         """
-        INSERT INTO drones (catalog_key, mac, serial, registration_id, ua_type, first_seen, last_seen)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO drones (catalog_key, mac, serial, registration_id, ua_type, protocol_version, first_seen, last_seen)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(catalog_key) DO UPDATE SET
             mac=excluded.mac,
             serial=COALESCE(excluded.serial, drones.serial),
             registration_id=COALESCE(excluded.registration_id, drones.registration_id),
             ua_type=COALESCE(excluded.ua_type, drones.ua_type),
+            protocol_version=COALESCE(excluded.protocol_version, drones.protocol_version),
             last_seen=excluded.last_seen
         """,
-        (catalog_key, mac, serial, registration_id, str(ua_type) if ua_type is not None else None, ts, ts),
+        (
+            catalog_key, mac, serial, registration_id,
+            str(ua_type) if ua_type is not None else None,
+            protocol_version, ts, ts,
+        ),
     )
     conn.commit()
 
@@ -147,12 +188,14 @@ def _start_flight(catalog_key, mac, serial, ts) -> int:
     return cur.lastrowid
 
 
-def _add_point(flight_id, ts, lat, lon, alt, height_agl, heading, speed, op_lat, op_lon):
+def _add_point(flight_id, ts, fields: dict):
     conn = _require_conn()
+    cols = ["flight_id", "ts"] + POINT_COLUMNS
+    vals = [flight_id, ts] + [fields.get(c) for c in POINT_COLUMNS]
+    placeholders = ",".join(["?"] * len(cols))
     conn.execute(
-        """INSERT INTO track_points (flight_id, ts, lat, lon, alt, height_agl, heading, speed, op_lat, op_lon)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (flight_id, ts, lat, lon, alt, height_agl, heading, speed, op_lat, op_lon),
+        f"INSERT INTO track_points ({','.join(cols)}) VALUES ({placeholders})",
+        vals,
     )
     # last_point_at reflects the actual span of received data; ended_at (set
     # separately, on drop-detection) can lag well behind it since a flight
@@ -193,6 +236,7 @@ def _get_flight(flight_id):
         """
         SELECT f.id, f.catalog_key, f.mac, f.serial, f.started_at, f.ended_at,
                f.last_point_at, f.point_count,
+               d.ua_type, d.protocol_version, d.registration_id,
                COALESCE(d.nickname, f.serial, f.mac, f.catalog_key) AS display_name
         FROM flights f LEFT JOIN drones d ON d.catalog_key = f.catalog_key
         WHERE f.id = ?
@@ -204,9 +248,9 @@ def _get_flight(flight_id):
 
 def _get_flight_points(flight_id):
     conn = _require_conn()
+    cols = ["ts"] + POINT_COLUMNS
     rows = conn.execute(
-        """SELECT ts, lat, lon, alt, height_agl, heading, speed, op_lat, op_lon
-           FROM track_points WHERE flight_id = ? ORDER BY ts ASC""",
+        f"SELECT {','.join(cols)} FROM track_points WHERE flight_id = ? ORDER BY ts ASC",
         (flight_id,),
     ).fetchall()
     return [dict(r) for r in rows]
@@ -223,8 +267,8 @@ def _search_flights_for_catalog_key(catalog_key, limit):
 
 # ---- async-facing API ----
 
-async def upsert_catalog(catalog_key, mac, serial, registration_id, ua_type, ts=None):
-    await run(_upsert_catalog, catalog_key, mac, serial, registration_id, ua_type, ts or time.time())
+async def upsert_catalog(catalog_key, mac, serial, registration_id, ua_type, protocol_version, ts=None):
+    await run(_upsert_catalog, catalog_key, mac, serial, registration_id, ua_type, protocol_version, ts or time.time())
 
 
 async def rename_drone(catalog_key, nickname):
@@ -239,8 +283,8 @@ async def start_flight(catalog_key, mac, serial, ts=None) -> int:
     return await run(_start_flight, catalog_key, mac, serial, ts or time.time())
 
 
-async def add_point(flight_id, ts, lat, lon, alt, height_agl, heading, speed, op_lat, op_lon):
-    await run(_add_point, flight_id, ts, lat, lon, alt, height_agl, heading, speed, op_lat, op_lon)
+async def add_point(flight_id, ts, fields: dict):
+    await run(_add_point, flight_id, ts, fields)
 
 
 async def end_flight(flight_id, ts=None):
