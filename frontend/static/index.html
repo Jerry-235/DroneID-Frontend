@@ -87,6 +87,26 @@
     font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-muted);
     display:flex; gap:10px; flex-wrap:wrap;
   }
+  .track-op-row{
+    margin-top:8px; padding-top:7px; border-top:1px solid var(--hairline);
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+  }
+  .track-op-indicator{
+    display:flex; align-items:center; gap:5px;
+    font-size:10px; font-family:'IBM Plex Mono',monospace; color:var(--cyan);
+  }
+  .op-dot{
+    width:6px; height:6px; border-radius:50%; background:var(--cyan);
+    box-shadow:0 0 6px var(--cyan); flex:0 0 auto;
+    animation:op-pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes op-pulse{ 0%,100%{opacity:1;} 50%{opacity:0.4;} }
+  .focus-op-btn{
+    background:rgba(79,209,197,0.1); color:var(--cyan); border:1px solid rgba(79,209,197,0.35);
+    font-size:10px; font-weight:600; padding:3px 8px; border-radius:var(--radius); cursor:pointer;
+    font-family:'Inter',sans-serif; flex:0 0 auto;
+  }
+  .focus-op-btn:hover{ background:rgba(79,209,197,0.2); }
   .track-date{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-muted); }
   .pencil-btn{
     background:none; border:none; color:var(--text-muted); cursor:pointer;
@@ -166,6 +186,11 @@
     border-radius:var(--radius); border:1px solid var(--hairline);
   }
   .leaflet-popup-tip{background:var(--panel-raised);}
+  .popup-badge-row{ margin-bottom:6px; }
+  .popup-badge{
+    display:inline-block; padding:2px 7px; border-radius:3px; border:1px solid;
+    font-size:10px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase;
+  }
   .popup-title{font-weight:700;font-size:13px;margin-bottom:6px;display:flex;align-items:center;gap:6px;}
   .popup-row{
     font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-muted);
@@ -507,8 +532,8 @@ function refreshOpenInfoBoxes() {
   if (mode === 'live' && selectedKey) {
     const entry = droneMarkers.get(selectedKey);
     if (entry) {
-      if (entry.marker) entry.marker.setPopupContent(popupHtml(entry.data));
-      if (entry.opMarker) entry.opMarker.setPopupContent(operatorPopupHtml(entry.data));
+      if (entry.marker) entry.marker.setPopupContent(popupHtml(entry.data, entry.pairColor));
+      if (entry.opMarker) entry.opMarker.setPopupContent(operatorPopupHtml(entry.data, entry.pairColor));
     }
   }
   if (mode === 'history' && historyState.marker) {
@@ -658,7 +683,7 @@ function upsertDrone(d) {
       entry.marker.setLatLng(latlng);
     }
     updateDroneIcon(entry, d.key);
-    entry.marker.bindPopup(popupHtml(d));
+    entry.marker.bindPopup(popupHtml(d, entry.pairColor));
     if (!hasCentered) { map.setView(latlng, 14); hasCentered = true; }
   }
 
@@ -675,7 +700,7 @@ function upsertDrone(d) {
       entry.opMarker.setLatLng(opLatlng);
       entry.opMarker.setIcon(opIconSvg(entry.pairColor));
     }
-    entry.opMarker.bindPopup(operatorPopupHtml(d));
+    entry.opMarker.bindPopup(operatorPopupHtml(d, entry.pairColor));
     if (hasPos) {
       const linePts = [[d.lat, d.lon], opLatlng];
       if (!entry.link) {
@@ -724,7 +749,21 @@ function removeDrone(key) {
   if (mode === 'live') renderSidebar();
 }
 
-function popupHtml(d) {
+function hexToRgba(hex, alpha) {
+  const h = (hex || '#7C8B99').replace('#', '');
+  const r = parseInt(h.substring(0, 2), 16);
+  const g = parseInt(h.substring(2, 4), 16);
+  const b = parseInt(h.substring(4, 6), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+function popupBadgeHtml(label, color) {
+  const bg = hexToRgba(color, 0.13);
+  const border = hexToRgba(color, 0.45);
+  return `<div class="popup-badge-row"><span class="popup-badge" style="background:${bg};color:${color};border-color:${border};">${escapeHtml(label)}</span></div>`;
+}
+
+function popupHtml(d, color) {
   const name = d.nickname || d.serial || d.mac;
   const warn = d.raw_units_warning
     ? `<div class="popup-row" style="color:#E8A33D"><span>⚠ alt/height/speed</span><b>unverified units</b></div>`
@@ -735,6 +774,7 @@ function popupHtml(d) {
     d.description ? `<div class="popup-row"><span>Self ID</span><b>${escapeHtml(d.description)}</b></div>` : '',
   ].join('');
   return `
+    ${popupBadgeHtml('AIRCRAFT', color || '#E8A33D')}
     <div class="popup-title">${escapeHtml(name)} <button class="pencil-btn" onclick="renameDrone('${escapeHtml(d.key)}','${escapeHtml(name)}')">✎</button></div>
     ${renderInfoBox(d, ['Basic', 'Drone'])}
     ${extras}
@@ -742,10 +782,11 @@ function popupHtml(d) {
   `;
 }
 
-function operatorPopupHtml(d) {
+function operatorPopupHtml(d, color) {
   const name = d.nickname || d.serial || d.mac;
   return `
-    <div class="popup-title">Operator — ${escapeHtml(name)}</div>
+    ${popupBadgeHtml('OPERATOR', color || '#4FD1C5')}
+    <div class="popup-title">${escapeHtml(name)}</div>
     <div class="popup-row"><span>Serial</span><b>${escapeHtml(d.serial || '—')}</b></div>
     <div class="popup-row"><span>ID</span><b>${escapeHtml(d.serial || d.mac || '—')}</b></div>
     <div class="popup-row"><span>MAC</span><b>${escapeHtml(d.mac || '—')}</b></div>
@@ -796,6 +837,7 @@ function renderLiveSidebar() {
   sidebar.innerHTML = entries.map(({ data: d }) => {
     const name = d.nickname || d.serial || d.mac;
     const sel = d.key === selectedKey ? ' selected' : '';
+    const hasOp = d.op_lat !== null && d.op_lat !== undefined && d.op_lon !== null && d.op_lon !== undefined;
     return `
       <div class="track-row${sel}" data-key="${escapeHtml(d.key)}">
         <div class="row-top">
@@ -808,12 +850,17 @@ function renderLiveSidebar() {
           <span>${fmt(d.alt,0,'m')}</span>
           <span>${fmt(d.heading,0,'°')}</span>
         </div>
+        ${hasOp ? `
+        <div class="track-op-row">
+          <span class="track-op-indicator"><span class="op-dot"></span>Operator Detected</span>
+          <button class="focus-op-btn" data-focus-op="${escapeHtml(d.key)}">Focus Op</button>
+        </div>` : ''}
       </div>`;
   }).join('');
 
   sidebar.querySelectorAll('.track-row').forEach(row => {
     row.addEventListener('click', (e) => {
-      if (e.target.dataset.rename) return; // pencil handles its own click below
+      if (e.target.dataset.rename || e.target.dataset.focusOp) return; // buttons handle their own clicks below
       selectTrack(row.dataset.key);
     });
   });
@@ -821,6 +868,12 @@ function renderLiveSidebar() {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       renameDrone(btn.dataset.rename, btn.dataset.name);
+    });
+  });
+  sidebar.querySelectorAll('[data-focus-op]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      selectOperator(btn.dataset.focusOp);
     });
   });
 }
@@ -856,6 +909,7 @@ function historyPopupHtml(idx) {
   const d = historyPointData(idx);
   const name = historyState.flightMeta ? historyState.flightMeta.display_name : '';
   return `
+    ${popupBadgeHtml('AIRCRAFT', '#4FD1C5')}
     <div class="popup-title">${escapeHtml(name)}</div>
     ${renderInfoBox(d, ['Basic', 'Drone'])}
   `;
