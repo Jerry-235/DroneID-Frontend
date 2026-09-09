@@ -275,6 +275,19 @@ function fmtDuration(startS, lastPointS) {
   return `${m}m ${s}s`;
 }
 
+function fmtTrackedTime(totalSeconds) {
+  // Seconds only until a minute is up, then Mm Ss, overflowing to Hh Mm
+  // (dropping seconds) once it's been tracked an hour or more.
+  const s = Math.max(0, Math.floor(totalSeconds));
+  if (s < 60) return `${s}s`;
+  const totalMinutes = Math.floor(s / 60);
+  const secs = s % 60;
+  if (totalMinutes < 60) return `${totalMinutes}m ${secs}s`;
+  const hours = Math.floor(totalMinutes / 60);
+  const mins = totalMinutes % 60;
+  return `${hours}h ${mins}m`;
+}
+
 // ---------------- field-toggle settings (Settings tab) ----------------
 // Defines every metric the info box can show. Group names here are the
 // display names used in both the Settings panel and the popups: "Basic"
@@ -289,6 +302,7 @@ const FIELD_DEFS = {
     { key: 'id',               label: 'ID' },
     { key: 'mac',              label: 'MAC' },
     { key: 'status',           label: 'Status' },
+    { key: 'tracked_time',     label: 'Tracked Time', formatter: fmtTrackedTime },
   ],
   'Drone': [
     { key: 'op_status',           label: 'Op Status' },
@@ -318,7 +332,7 @@ const FIELD_DEFS = {
 // Requested defaults: everything else in Basic/Drone starts OFF. Operator
 // (System Message) defaults ON.
 const FIELD_DEFAULTS = {
-  'Basic': { protocol_version: false, serial: true, ua_type: false, id: true, mac: true, status: true },
+  'Basic': { protocol_version: false, serial: true, ua_type: false, id: true, mac: true, status: true, tracked_time: true },
   'Drone': {
     op_status: true, height_type: false, heading: true, speed: true, vert_speed: true,
     lat: true, lon: true, pressure_altitude: false, alt: false, height_agl: true,
@@ -358,11 +372,24 @@ let fieldSettings = loadFieldSettings();
 
 function fieldValue(d, key) {
   if (key === 'id') return (d.serial !== null && d.serial !== undefined) ? d.serial : d.mac;
+  if (key === 'tracked_time') {
+    // Live: ticks up from when this track/flight started, relative to now.
+    if (d.first_seen !== null && d.first_seen !== undefined) {
+      return Math.max(0, (Date.now() / 1000) - d.first_seen);
+    }
+    // History playback: static elapsed time from flight start to the
+    // currently-scrubbed point, not tied to wall-clock "now".
+    if (d.started_at !== null && d.started_at !== undefined && d.point_ts !== null && d.point_ts !== undefined) {
+      return Math.max(0, d.point_ts - d.started_at);
+    }
+    return null;
+  }
   return d[key];
 }
 
 function fieldDisplay(fdef, value) {
   if (value === null || value === undefined || value === '') return '—';
+  if (fdef.formatter) return escapeHtml(fdef.formatter(value));
   if (fdef.digits !== undefined) {
     const n = Number(value);
     return Number.isFinite(n) ? fmt(n, fdef.digits, fdef.unit || '') : escapeHtml(String(value));
@@ -660,6 +687,10 @@ function historyPointData(idx) {
     mac: f.mac, serial: f.serial, ua_type: f.ua_type,
     protocol_version: p.protocol_version || f.protocol_version,
     registration_id: f.registration_id,
+    // no live "status" or ticking "tracked_time" in playback — instead,
+    // tracked_time here shows elapsed time from flight start to this
+    // scrubbed point (started_at/point_ts below), computed statically.
+    started_at: f.started_at, point_ts: p.ts,
     op_status: p.op_status, height_type: p.height_type,
     heading: p.heading, speed: p.speed, vert_speed: p.vert_speed,
     lat: p.lat, lon: p.lon,
@@ -887,6 +918,12 @@ function connectWs() {
 }
 
 connectWs();
+
+// Ticks any currently-open popup once a second so "Tracked Time" counts up
+// live even between bursts, without waiting on new data to arrive.
+setInterval(() => {
+  if (mode === 'live' && selectedKey) refreshOpenInfoBoxes();
+}, 1000);
 </script>
 </body>
 </html>
