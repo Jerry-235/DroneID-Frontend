@@ -93,20 +93,24 @@
   }
   .track-op-indicator{
     display:flex; align-items:center; gap:5px;
-    font-size:10px; font-family:'IBM Plex Mono',monospace; color:var(--cyan);
+    font-size:10px; font-family:'IBM Plex Mono',monospace; color:var(--text-muted);
   }
+  .track-op-indicator.op-yes{ color:#34D399; }
   .op-dot{
-    width:6px; height:6px; border-radius:50%; background:var(--cyan);
-    box-shadow:0 0 6px var(--cyan); flex:0 0 auto;
+    width:6px; height:6px; border-radius:50%; background:var(--text-muted);
+    flex:0 0 auto;
+  }
+  .op-dot.op-yes{
+    background:#34D399; box-shadow:0 0 6px #34D399;
     animation:op-pulse 1.6s ease-in-out infinite;
   }
   @keyframes op-pulse{ 0%,100%{opacity:1;} 50%{opacity:0.4;} }
   .focus-op-btn{
-    background:rgba(79,209,197,0.1); color:var(--cyan); border:1px solid rgba(79,209,197,0.35);
+    background:rgba(52,211,153,0.1); color:#34D399; border:1px solid rgba(52,211,153,0.35);
     font-size:10px; font-weight:600; padding:3px 8px; border-radius:var(--radius); cursor:pointer;
     font-family:'Inter',sans-serif; flex:0 0 auto;
   }
-  .focus-op-btn:hover{ background:rgba(79,209,197,0.2); }
+  .focus-op-btn:hover{ background:rgba(52,211,153,0.2); }
   .track-date{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-muted); }
   .pencil-btn{
     background:none; border:none; color:var(--text-muted); cursor:pointer;
@@ -850,11 +854,12 @@ function renderLiveSidebar() {
           <span>${fmt(d.alt,0,'m')}</span>
           <span>${fmt(d.heading,0,'°')}</span>
         </div>
-        ${hasOp ? `
         <div class="track-op-row">
-          <span class="track-op-indicator"><span class="op-dot"></span>Operator Detected</span>
-          <button class="focus-op-btn" data-focus-op="${escapeHtml(d.key)}">Focus Op</button>
-        </div>` : ''}
+          <span class="track-op-indicator${hasOp ? ' op-yes' : ''}">
+            <span class="op-dot${hasOp ? ' op-yes' : ''}"></span>${hasOp ? 'Operator Detected' : 'No Operator Detected'}
+          </span>
+          ${hasOp ? `<button class="focus-op-btn" data-focus-op="${escapeHtml(d.key)}">Focus Op</button>` : ''}
+        </div>
       </div>`;
   }).join('');
 
