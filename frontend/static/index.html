@@ -257,6 +257,8 @@ let mode = 'live';               // 'live' | 'history'
 const droneMarkers = new Map();  // key -> {marker, opMarker, link, pathLine, path, flightId, flightLoading, pairColor, data}
 let selectedKey = null;
 let selectedTarget = null; // 'drone' | 'operator' — which marker of the pair is focused
+let suppressPopupClose = false; // true while we're closing a popup ourselves, so the
+                                 // popupclose handler doesn't mistake it for the user hitting X
 let stationCoord = null;         // { lat, lon } — server-side "home point", null until set in Settings
 let stationMarker = null;
 
@@ -700,12 +702,24 @@ function upsertDrone(d) {
     if (!entry.marker) {
       entry.marker = L.marker(latlng, { icon: droneIconSvg(color, d.heading) });
       entry.marker.on('click', () => selectTrack(d.key));
+      // Leaflet's default autoClose would silently close this popup whenever
+      // a different marker's popup opens, which fights with our own
+      // drone<->operator swap logic — we manage closing explicitly instead.
+      entry.marker.on('popupclose', () => {
+        if (suppressPopupClose) return;
+        if (selectedKey === d.key && selectedTarget === 'drone') {
+          selectedKey = null;
+          selectedTarget = null;
+          droneMarkers.forEach((e, k) => { drawLivePath(e, k); updateDroneIcon(e, k); });
+          renderSidebar();
+        }
+      });
       liveLayer.addLayer(entry.marker);
     } else {
       entry.marker.setLatLng(latlng);
     }
     updateDroneIcon(entry, d.key);
-    entry.marker.bindPopup(popupHtml(d, entry.pairColor));
+    entry.marker.bindPopup(popupHtml(d, entry.pairColor), { autoClose: false });
     if (selectedKey === d.key && selectedTarget === 'drone') entry.marker.openPopup();
     if (!hasCentered) { map.setView(latlng, 14); hasCentered = true; }
   }
@@ -718,12 +732,21 @@ function upsertDrone(d) {
       entry.opMarker = L.marker(opLatlng, { icon: opIconSvg(entry.pairColor) });
       entry.opMarker.bindTooltip('Operator / ground station', { direction: 'top' });
       entry.opMarker.on('click', () => selectOperator(d.key));
+      entry.opMarker.on('popupclose', () => {
+        if (suppressPopupClose) return;
+        if (selectedKey === d.key && selectedTarget === 'operator') {
+          selectedKey = null;
+          selectedTarget = null;
+          droneMarkers.forEach((e, k) => { drawLivePath(e, k); updateDroneIcon(e, k); });
+          renderSidebar();
+        }
+      });
       liveLayer.addLayer(entry.opMarker);
     } else {
       entry.opMarker.setLatLng(opLatlng);
       entry.opMarker.setIcon(opIconSvg(entry.pairColor));
     }
-    entry.opMarker.bindPopup(operatorPopupHtml(d, entry.pairColor));
+    entry.opMarker.bindPopup(operatorPopupHtml(d, entry.pairColor), { autoClose: false });
     if (selectedKey === d.key && selectedTarget === 'operator') entry.opMarker.openPopup();
     if (hasPos) {
       const linePts = [[d.lat, d.lon], opLatlng];
@@ -810,14 +833,23 @@ function operatorPopupHtml(d, color) {
   return `
     ${popupBadgeHtml('OPERATOR', color || '#4FD1C5')}
     <div class="popup-title">${escapeHtml(name)}</div>
-    <div class="popup-row"><span>Serial</span><b>${escapeHtml(d.serial || '—')}</b></div>
-    <div class="popup-row"><span>ID</span><b>${escapeHtml(d.serial || d.mac || '—')}</b></div>
-    <div class="popup-row"><span>MAC</span><b>${escapeHtml(d.mac || '—')}</b></div>
-    ${renderInfoBox(d, ['Operator'])}
+    ${renderInfoBox(d, ['Basic', 'Operator'])}
   `;
 }
 
+function closeEntryPopups(entry) {
+  if (!entry) return;
+  suppressPopupClose = true;
+  if (entry.marker && entry.marker.isPopupOpen()) entry.marker.closePopup();
+  if (entry.opMarker && entry.opMarker.isPopupOpen()) entry.opMarker.closePopup();
+  suppressPopupClose = false;
+}
+
 function selectTrack(key) {
+  const prevEntry = selectedKey ? droneMarkers.get(selectedKey) : null;
+  if (prevEntry && (selectedKey !== key || selectedTarget !== 'drone')) {
+    closeEntryPopups(prevEntry);
+  }
   selectedKey = key;
   selectedTarget = 'drone';
   const entry = droneMarkers.get(key);
@@ -832,6 +864,10 @@ function selectTrack(key) {
 }
 
 function selectOperator(key) {
+  const prevEntry = selectedKey ? droneMarkers.get(selectedKey) : null;
+  if (prevEntry && (selectedKey !== key || selectedTarget !== 'operator')) {
+    closeEntryPopups(prevEntry);
+  }
   selectedKey = key;
   selectedTarget = 'operator';
   const entry = droneMarkers.get(key);
