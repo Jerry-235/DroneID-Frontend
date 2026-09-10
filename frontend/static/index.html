@@ -569,8 +569,8 @@ function refreshOpenInfoBoxes() {
 
 function renderSettingsPanel() {
   const sidebar = document.getElementById('sidebar');
-  let html = `
-    <div class="settings-group-title" style="border-top:none;">Station</div>
+  const stationHtml = `
+    <div class="settings-group-title">Station</div>
     <div class="settings-note">
       Set this device's fixed reference location. It's stored on the server —
       the same for every browser/device that opens this app — and the map
@@ -590,7 +590,7 @@ function renderSettingsPanel() {
         : 'Not set yet.'}</div>
     </div>`;
 
-  html += '<div class="settings-note">Choose which fields appear in the info box shown when you click a drone on the map or scrub through its history. Applies everywhere — not per-drone.</div>';
+  let html = '<div class="settings-note" style="padding-top:12px;">Choose which fields appear in the info box shown when you click a drone on the map or scrub through its history. Applies everywhere — not per-drone.</div>';
   Object.keys(FIELD_DEFS).forEach(group => {
     html += `<div class="settings-group-title">${escapeHtml(group)}</div>`;
     html += FIELD_DEFS[group].map(f => {
@@ -602,6 +602,7 @@ function renderSettingsPanel() {
         </label>`;
     }).join('');
   });
+  html += stationHtml;
   sidebar.innerHTML = html;
 
   sidebar.querySelectorAll('input[type=checkbox]').forEach(cb => {
