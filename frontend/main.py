@@ -23,6 +23,7 @@ from typing import Optional
 
 import zmq
 import zmq.asyncio
+import zmq.utils.monitor
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -34,8 +35,53 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("droneid-frontend")
 
 ZMQ_ADDR = os.environ.get("DRONEID_ZMQ_ADDR", "tcp://127.0.0.1:4224")
+# Raw per-sniffer ports, per bkerler/DroneID's own defaults — subscribed to
+# here only for health/liveness monitoring (is each sniffer process actually
+# publishing), not for parsing: the decoder's unified output above is still
+# the only source used for actual drone data.
+BT_ZMQ_ADDR = os.environ.get("DRONEID_BT_ZMQ_ADDR", "tcp://127.0.0.1:4222")
+WIFI_ZMQ_ADDR = os.environ.get("DRONEID_WIFI_ZMQ_ADDR", "tcp://127.0.0.1:4223")
 STALE_AFTER_S = float(os.environ.get("DRONEID_STALE_AFTER_S", "45"))
 DROP_AFTER_S = float(os.environ.get("DRONEID_DROP_AFTER_S", "300"))
+HEALTH_TIMEOUT_S = float(os.environ.get("DRONEID_HEALTH_TIMEOUT_S", "12"))
+
+# Two independent signals per channel:
+#  - connection_state: real TCP-level connect/disconnect, from ZMQ's socket
+#    monitor — tells us whether the remote process is actually up and its
+#    PUB socket reachable, regardless of whether it has anything to say.
+#  - last_message_at: when a message was last actually received, used to
+#    tell "connected but idle" apart from "connected and actively sending".
+CONNECTED = "connected"
+DISCONNECTED = "disconnected"
+connection_state = {"zmq": DISCONNECTED, "bluetooth": DISCONNECTED, "wifi": DISCONNECTED}
+last_message_at = {"zmq": None, "bluetooth": None, "wifi": None}
+
+
+def compute_health(now: Optional[float] = None) -> dict:
+    """Returns {"zmq": ..., "bluetooth": ..., "wifi": ...} each one of
+    "green" (connected + actively receiving), "yellow" (connected but no
+    message within HEALTH_TIMEOUT_S — process alive, just idle), or "red"
+    (not connected — process unreachable/dead). ZMQ never reports yellow:
+    it's just connected-and-flowing (green) or not (red), since that channel
+    is our own data pipeline rather than a sniffer we're merely watching."""
+    now = now if now is not None else time.time()
+
+    def status_for(channel: str, use_freshness: bool) -> str:
+        if connection_state.get(channel) != CONNECTED:
+            return "red"
+        if not use_freshness:
+            return "green"
+        ts = last_message_at.get(channel)
+        if ts is not None and (now - ts) < HEALTH_TIMEOUT_S:
+            return "green"
+        return "yellow"
+
+    return {
+        "zmq": status_for("zmq", use_freshness=False),
+        "bluetooth": status_for("bluetooth", use_freshness=True),
+        "wifi": status_for("wifi", use_freshness=True),
+    }
+
 
 # Remote ID sentinel values that mean "no data", not a literal reading.
 UNKNOWN_STRINGS = {"unknown", "undefined", "invalid"}
@@ -448,15 +494,52 @@ async def persist_update(track: DroneTrack):
     track.nickname = catalog_nicknames.get(key)
 
 
+async def watch_connection_state(monitor, channel: str):
+    """Reads events off an already-attached ZMQ socket monitor. Must be
+    given the monitor socket itself (from get_monitor_socket(), called
+    synchronously before the owning socket's connect()) rather than
+    attaching it here, since asyncio.create_task() doesn't run its coroutine
+    body until the next loop iteration — too late to guarantee catching the
+    very first CONNECTED event if attached inside the task itself."""
+    while True:
+        try:
+            msg = await monitor.recv_multipart()
+            event = zmq.utils.monitor.parse_monitor_message(msg)
+            ev = event.get("event")
+            if ev == zmq.EVENT_CONNECTED:
+                connection_state[channel] = CONNECTED
+            elif ev in (zmq.EVENT_DISCONNECTED, zmq.EVENT_CLOSED, zmq.EVENT_CONNECT_RETRIED):
+                connection_state[channel] = DISCONNECTED
+        except Exception:
+            log.exception("Error reading connection-monitor events for %s", channel)
+            await asyncio.sleep(1)
+
+
+def attach_connection_monitor(sock, channel: str):
+    """Call before sock.connect() so the monitor is guaranteed in place in
+    time to catch the first CONNECTED event. If this fails for any reason,
+    the channel just stays "disconnected"/red rather than crashing the app —
+    worth checking the logs if that happens, since it means this signal
+    isn't available on this pyzmq/platform."""
+    try:
+        monitor = sock.get_monitor_socket()
+    except Exception:
+        log.exception("Could not attach connection monitor for %s — its health dot will stay red", channel)
+        return
+    asyncio.create_task(watch_connection_state(monitor, channel))
+
+
 async def zmq_listener():
     ctx = zmq.asyncio.Context()
     sock = ctx.socket(zmq.SUB)
+    attach_connection_monitor(sock, "zmq")
     sock.connect(ZMQ_ADDR)
     sock.setsockopt(zmq.SUBSCRIBE, b"")
     log.info("Subscribed to DroneID decoder at %s", ZMQ_ADDR)
     while True:
         try:
             raw = await sock.recv()
+            last_message_at["zmq"] = time.time()
             data = parse_message_payload(raw)
             if data is None:
                 continue
@@ -467,6 +550,34 @@ async def zmq_listener():
         except Exception:
             log.exception("Error in zmq listener loop")
             await asyncio.sleep(1)
+
+
+async def sniffer_health_listener(addr: str, channel: str):
+    """Health-only subscription to a raw sniffer's ZMQ port (bluetooth_
+    receiver.py on 4222, wifi_receiver.py on 4223 by default). Doesn't parse
+    content — tracks both the TCP-level connection state (process alive?)
+    and message arrival timing (actively sending vs. idle)."""
+    ctx = zmq.asyncio.Context()
+    sock = ctx.socket(zmq.SUB)
+    attach_connection_monitor(sock, channel)
+    sock.connect(addr)
+    sock.setsockopt(zmq.SUBSCRIBE, b"")
+    log.info("Health-monitoring %s sniffer at %s", channel, addr)
+    while True:
+        try:
+            await sock.recv()
+            last_message_at[channel] = time.time()
+        except Exception:
+            log.exception("Error in %s health listener", channel)
+            await asyncio.sleep(1)
+
+
+async def health_broadcaster():
+    """Pushes ZMQ/Bluetooth/WiFi health to connected clients periodically,
+    independent of whether any drone data is actually flowing."""
+    while True:
+        await asyncio.sleep(5)
+        await manager.broadcast({"type": "health", "health": compute_health()})
 
 
 async def stale_sweeper():
@@ -508,6 +619,9 @@ async def startup():
     db.init(os.environ.get("DRONEID_DB_PATH", os.path.join(os.path.dirname(__file__), "droneid.db")))
     catalog_nicknames.update(await db.get_catalog())
     asyncio.create_task(zmq_listener())
+    asyncio.create_task(sniffer_health_listener(BT_ZMQ_ADDR, "bluetooth"))
+    asyncio.create_task(sniffer_health_listener(WIFI_ZMQ_ADDR, "wifi"))
+    asyncio.create_task(health_broadcaster())
     asyncio.create_task(stale_sweeper())
 
 
@@ -543,6 +657,13 @@ async def api_delete_station():
 @app.get("/api/drones")
 async def get_drones():
     return {"drones": store.snapshot()}
+
+
+@app.get("/api/health")
+async def get_health():
+    """Liveness of the ZMQ decoder feed and the two raw sniffers, each based
+    on whether a message has arrived within the last HEALTH_TIMEOUT_S."""
+    return {"health": compute_health()}
 
 
 @app.get("/api/drones/catalog")
@@ -591,7 +712,9 @@ async def api_get_flight(flight_id: int):
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
-        await websocket.send_text(json.dumps({"type": "snapshot", "drones": store.snapshot()}))
+        await websocket.send_text(json.dumps({
+            "type": "snapshot", "drones": store.snapshot(), "health": compute_health(),
+        }))
         while True:
             await websocket.receive_text()  # client doesn't send anything meaningful; just keep alive
     except WebSocketDisconnect:

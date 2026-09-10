@@ -59,6 +59,29 @@
     box-shadow:0 0 0 3px rgba(224,100,90,0.15); transition:background .2s, box-shadow .2s;
   }
   .dot.connected{ background:var(--cyan); box-shadow:0 0 0 3px rgba(79,209,197,0.15); }
+  .dot.health-ok{ background:#34D399; box-shadow:0 0 0 3px rgba(52,211,153,0.15); }
+  .dot.health-yellow{ background:var(--amber); box-shadow:0 0 0 3px rgba(232,163,61,0.15); }
+  .health-group{
+    display:flex; align-items:center; gap:12px;
+    font-size:11px; font-family:'IBM Plex Mono',monospace; color:var(--text-muted);
+  }
+  .health-item{ display:flex; align-items:center; gap:6px; position:relative; cursor:default; }
+  .health-tooltip{
+    display:none;
+    position:absolute; top:100%; left:50%; transform:translateX(-50%);
+    margin-top:10px; width:230px; z-index:2000;
+    background:var(--panel-raised); border:1px solid var(--hairline); border-radius:var(--radius);
+    padding:10px 12px; box-shadow:0 10px 24px rgba(0,0,0,0.5);
+    font-family:'Inter',sans-serif; font-size:11px; line-height:1.6; color:var(--text);
+    text-transform:none; letter-spacing:normal; cursor:auto;
+  }
+  .health-item:hover .health-tooltip,
+  .health-item:focus .health-tooltip,
+  .health-item:focus-within .health-tooltip{ display:block; }
+  .health-tooltip .tt-title{ font-weight:700; margin-bottom:6px; color:var(--text); }
+  .health-tooltip .tt-row{ display:flex; align-items:center; gap:7px; margin-top:4px; }
+  .health-tooltip .tt-dot{ width:7px; height:7px; border-radius:50%; flex:0 0 auto; }
+  @media (max-width: 640px){ .health-group{ display:none; } }
   .count{ margin-left:auto; font-size:12px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace; }
   .count b{color:var(--text);font-weight:600;}
   .main{ flex:1 1 auto; display:flex; min-height:0; }
@@ -214,6 +237,34 @@
     <button class="tab-btn" id="tab-settings">SETTINGS</button>
   </div>
   <div class="status"><span class="dot" id="conn-dot"></span><span id="conn-label">connecting…</span></div>
+  <div class="health-group">
+    <span class="health-item" tabindex="0">
+      <span class="dot" id="health-zmq-dot"></span>ZMQ
+      <div class="health-tooltip">
+        <div class="tt-title">ZMQ Decoder</div>
+        <div class="tt-row"><span class="tt-dot" style="background:#34D399;"></span>Green — connected, receiving data</div>
+        <div class="tt-row"><span class="tt-dot" style="background:#E0645A;"></span>Red — not connected to zmq_decoder.py</div>
+      </div>
+    </span>
+    <span class="health-item" tabindex="0">
+      <span class="dot" id="health-bluetooth-dot"></span>Bluetooth
+      <div class="health-tooltip">
+        <div class="tt-title">Bluetooth Sniffer</div>
+        <div class="tt-row"><span class="tt-dot" style="background:#34D399;"></span>Green — connected, receiving data</div>
+        <div class="tt-row"><span class="tt-dot" style="background:#E8A33D;"></span>Yellow — connected, idle (no recent detections)</div>
+        <div class="tt-row"><span class="tt-dot" style="background:#E0645A;"></span>Red — bluetooth_receiver.py unreachable</div>
+      </div>
+    </span>
+    <span class="health-item" tabindex="0">
+      <span class="dot" id="health-wifi-dot"></span>WiFi
+      <div class="health-tooltip">
+        <div class="tt-title">WiFi Sniffer</div>
+        <div class="tt-row"><span class="tt-dot" style="background:#34D399;"></span>Green — connected, receiving data</div>
+        <div class="tt-row"><span class="tt-dot" style="background:#E8A33D;"></span>Yellow — connected, idle (no recent detections)</div>
+        <div class="tt-row"><span class="tt-dot" style="background:#E0645A;"></span>Red — wifi_receiver.py unreachable</div>
+      </div>
+    </span>
+  </div>
   <div class="count"><b id="track-count">0</b>&nbsp;<span id="count-label">tracked</span></div>
 </div>
 
@@ -1160,18 +1211,33 @@ function setConnState(connected, label) {
   document.getElementById('conn-label').textContent = label;
 }
 
+function applyHealth(health) {
+  ['zmq', 'bluetooth', 'wifi'].forEach(ch => {
+    const dot = document.getElementById(`health-${ch}-dot`);
+    if (!dot) return;
+    const state = (health && health[ch]) || 'red';
+    dot.classList.toggle('health-ok', state === 'green');
+    dot.classList.toggle('health-yellow', state === 'yellow');
+  });
+}
+
 function connectWs() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
 
   ws.onopen = () => setConnState(true, 'live');
-  ws.onclose = () => { setConnState(false, 'reconnecting…'); setTimeout(connectWs, 2000); };
+  ws.onclose = () => {
+    setConnState(false, 'reconnecting…');
+    applyHealth({}); // unknown until we reconnect and hear otherwise
+    setTimeout(connectWs, 2000);
+  };
   ws.onerror = () => ws.close();
 
   ws.onmessage = (evt) => {
     const msg = JSON.parse(evt.data);
     if (msg.type === 'snapshot') {
       msg.drones.forEach(upsertDrone);
+      applyHealth(msg.health);
     } else if (msg.type === 'update') {
       upsertDrone(msg.drone);
     } else if (msg.type === 'status') {
@@ -1179,6 +1245,8 @@ function connectWs() {
       if (entry) { entry.data.status = msg.status; upsertDrone(entry.data); }
     } else if (msg.type === 'dropped') {
       removeDrone(msg.key);
+    } else if (msg.type === 'health') {
+      applyHealth(msg.health);
     }
   };
 }

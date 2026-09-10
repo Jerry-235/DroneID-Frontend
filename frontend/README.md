@@ -21,6 +21,40 @@ in the `zmq_decoder.py -v` terminal. Override with:
 export DRONEID_ZMQ_ADDR=tcp://127.0.0.1:4224
 ```
 
+The app also connects to the two raw sniffer ports directly — `tcp://127.0.0.1:4222`
+(bluetooth_receiver.py) and `tcp://127.0.0.1:4223` (wifi_receiver.py) — purely
+to show health/liveness for each in the top bar (ZMQ / Bluetooth / WiFi
+indicators). It doesn't parse anything from these two; all actual drone data
+still comes from the decoder's unified output above. Override if needed:
+
+```bash
+export DRONEID_BT_ZMQ_ADDR=tcp://127.0.0.1:4222
+export DRONEID_WIFI_ZMQ_ADDR=tcp://127.0.0.1:4223
+export DRONEID_HEALTH_TIMEOUT_S=12   # seconds of silence before green -> yellow
+```
+
+Each of the three health dots is one of three states:
+- **Red** — not connected. For Bluetooth/WiFi this means that sniffer process
+  appears to be down or unreachable (detected via ZMQ's socket-monitor
+  connect/disconnect events, not just "have we heard anything" — so it can
+  tell "dead" apart from "alive but quiet"). For ZMQ, same idea against the
+  decoder.
+- **Yellow** (Bluetooth/WiFi only) — connected, but no message in the last
+  `DRONEID_HEALTH_TIMEOUT_S` seconds. The process is up, just idle (e.g. no
+  drones currently in range).
+- **Green** — connected and a message arrived recently. ZMQ only ever shows
+  green or red (it's your own data pipeline, not a sniffer to merely watch).
+
+**Worth verifying on your machine**: the connect/disconnect detection relies
+on pyzmq's socket monitor API (`get_monitor_socket()` + parsing
+`EVENT_CONNECTED`/`EVENT_DISCONNECTED`/`EVENT_CONNECT_RETRIED`). I couldn't
+test this against a real ZMQ instance in the environment this was built in
+— if a health dot stays red even with its sniffer definitely running, check
+the app's logs for "Could not attach connection monitor" and let me know;
+that would mean this signal isn't available the way I expected on your
+pyzmq version and needs a fallback.
+```
+
 ## Install & run
 
 ```bash
@@ -108,6 +142,9 @@ Then, in the browser:
   others.
 
 ## New API surface
+
+- `GET  /api/health` — `{"health": {"zmq": "green"|"red", "bluetooth": "green"|"yellow"|"red", "wifi": "green"|"yellow"|"red"}}`,
+  same data the top bar's ZMQ/Bluetooth/WiFi dots use.
 
 - `GET  /api/flights?limit=&offset=` — flight list, most recent first.
 - `GET  /api/flights/{id}` — one flight's metadata + full point list.
