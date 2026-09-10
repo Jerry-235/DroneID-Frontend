@@ -1256,6 +1256,8 @@ loadStation();
 
 // Ticks any currently-open popup once a second so "Tracked Time" counts up
 // live even between bursts, without waiting on new data to arrive.
+
+
 setInterval(() => {
   if (mode === 'live' && selectedKey) refreshOpenInfoBoxes();
 }, 1000);
