@@ -766,12 +766,19 @@ function upsertDrone(d) {
           renderSidebar();
         }
       });
+      // Bind the popup ONCE, here, at creation. Re-binding on every burst
+      // (as this used to do) recreates the Popup's DOM/close-button each
+      // time — if that happened to land right as you clicked the X, or
+      // right as you clicked the marker to open it, the click could miss
+      // or get silently undone. Content updates below use setPopupContent
+      // instead, which only touches the text, never the popup object itself.
+      entry.marker.bindPopup(popupHtml(d, entry.pairColor), { autoClose: false });
       liveLayer.addLayer(entry.marker);
     } else {
       entry.marker.setLatLng(latlng);
+      entry.marker.setPopupContent(popupHtml(d, entry.pairColor));
     }
     updateDroneIcon(entry, d.key);
-    entry.marker.bindPopup(popupHtml(d, entry.pairColor), { autoClose: false });
     if (selectedKey === d.key && selectedTarget === 'drone') entry.marker.openPopup();
     if (!hasCentered) { map.setView(latlng, 14); hasCentered = true; }
   }
@@ -793,12 +800,13 @@ function upsertDrone(d) {
           renderSidebar();
         }
       });
+      entry.opMarker.bindPopup(operatorPopupHtml(d, entry.pairColor), { autoClose: false });
       liveLayer.addLayer(entry.opMarker);
     } else {
       entry.opMarker.setLatLng(opLatlng);
       entry.opMarker.setIcon(opIconSvg(entry.pairColor));
+      entry.opMarker.setPopupContent(operatorPopupHtml(d, entry.pairColor));
     }
-    entry.opMarker.bindPopup(operatorPopupHtml(d, entry.pairColor), { autoClose: false });
     if (selectedKey === d.key && selectedTarget === 'operator') entry.opMarker.openPopup();
     if (hasPos) {
       const linePts = [[d.lat, d.lon], opLatlng];
@@ -1256,8 +1264,6 @@ loadStation();
 
 // Ticks any currently-open popup once a second so "Tracked Time" counts up
 // live even between bursts, without waiting on new data to arrive.
-
-
 setInterval(() => {
   if (mode === 'live' && selectedKey) refreshOpenInfoBoxes();
 }, 1000);
