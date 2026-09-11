@@ -620,6 +620,23 @@ function refreshOpenInfoBoxes() {
 
 function renderSettingsPanel() {
   const sidebar = document.getElementById('sidebar');
+  const debugHtml = `
+    <div class="settings-group-title" style="border-top:none;">Debug</div>
+    <div class="settings-note">
+      Injects one synthetic drone (orbiting the station if set, otherwise a
+      default location) through the real live pipeline — same code path as
+      actual ZMQ data — for exercising the map, popups, and history without
+      RF hardware. It decays and drops on its own after Stop, same as a real
+      signal loss, rather than being force-removed.
+    </div>
+    <div class="station-form">
+      <div class="station-form-buttons">
+        <button id="test-drone-start" class="settings-btn">Start Test Drone</button>
+        <button id="test-drone-stop" class="settings-btn settings-btn-ghost">Stop</button>
+      </div>
+      <div class="settings-note" id="test-drone-status">Checking status…</div>
+    </div>`;
+
   const stationHtml = `
     <div class="settings-group-title">Station</div>
     <div class="settings-note">
@@ -641,7 +658,8 @@ function renderSettingsPanel() {
         : 'Not set yet.'}</div>
     </div>`;
 
-  let html = '<div class="settings-note" style="padding-top:12px;">Choose which fields appear in the info box shown when you click a drone on the map or scrub through its history. Applies everywhere — not per-drone.</div>';
+  let html = debugHtml;
+  html += '<div class="settings-note">Choose which fields appear in the info box shown when you click a drone on the map or scrub through its history. Applies everywhere — not per-drone.</div>';
   Object.keys(FIELD_DEFS).forEach(group => {
     html += `<div class="settings-group-title">${escapeHtml(group)}</div>`;
     html += FIELD_DEFS[group].map(f => {
@@ -662,6 +680,27 @@ function renderSettingsPanel() {
       saveFieldSettings();
       refreshOpenInfoBoxes();
     });
+  });
+
+  async function refreshTestDroneStatus() {
+    const statusEl = document.getElementById('test-drone-status');
+    try {
+      const res = await fetch('/api/test/drone/status');
+      const data = await res.json();
+      statusEl.textContent = data.running ? 'Running — check the Live tab.' : 'Stopped.';
+    } catch (e) {
+      statusEl.textContent = 'Could not reach the server.';
+    }
+  }
+  refreshTestDroneStatus();
+
+  document.getElementById('test-drone-start').addEventListener('click', async () => {
+    await fetch('/api/test/drone/start', { method: 'POST' });
+    refreshTestDroneStatus();
+  });
+  document.getElementById('test-drone-stop').addEventListener('click', async () => {
+    await fetch('/api/test/drone/stop', { method: 'POST' });
+    refreshTestDroneStatus();
   });
 
   document.getElementById('station-save').addEventListener('click', async () => {
@@ -736,9 +775,15 @@ function upsertDrone(d) {
     entry.flightLoading = true;
     entry.flightId = d.flight_id;
     fetch(`/api/flights/${d.flight_id}`).then(r => r.json()).then(data => {
-      entry.path = (data.points || [])
+      const fetched = (data.points || [])
         .filter(p => p.lat !== null && p.lon !== null)
         .map(p => [p.lat, p.lon]);
+      // This fetch is async, so by the time it resolves, live bursts may
+      // already have pushed newer points into entry.path — merge rather
+      // than overwrite, or those would be silently dropped from the trail.
+      const already = new Set(fetched.map(p => p[0] + ',' + p[1]));
+      const liveOnly = entry.path.filter(p => !already.has(p[0] + ',' + p[1]));
+      entry.path = fetched.concat(liveOnly);
       drawLivePath(entry, d.key);
       entry.flightLoading = false;
     }).catch(() => { entry.flightLoading = false; });
@@ -853,6 +898,14 @@ function removeDrone(key) {
     // leave the flight path visible but fade it to show it's no longer live
     if (entry.pathLine) entry.pathLine.setStyle({ color: '#7C8B99', opacity: 0.35, weight: 2 });
     droneMarkers.delete(key);
+  }
+  // Otherwise selectedKey/selectedTarget would keep pointing at a track that
+  // no longer exists — harmless (guarded elsewhere with droneMarkers.get()
+  // checks) but leaves sidebar highlighting stuck until something else gets
+  // selected.
+  if (selectedKey === key) {
+    selectedKey = null;
+    selectedTarget = null;
   }
   if (mode === 'live') renderSidebar();
 }
@@ -1263,6 +1316,13 @@ function connectWs() {
   ws.onmessage = (evt) => {
     const msg = JSON.parse(evt.data);
     if (msg.type === 'snapshot') {
+      // Authoritative: prune any marker for a drone that dropped while we
+      // were disconnected (a plain reconnect gap doesn't send 'dropped'
+      // events for what happened in between), then apply what's current.
+      const freshKeys = new Set(msg.drones.map(d => d.key));
+      Array.from(droneMarkers.keys()).forEach(k => {
+        if (!freshKeys.has(k)) removeDrone(k);
+      });
       msg.drones.forEach(upsertDrone);
       applyHealth(msg.health);
     } else if (msg.type === 'update') {

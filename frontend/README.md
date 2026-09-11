@@ -143,6 +143,14 @@ Then, in the browser:
 
 ## New API surface
 
+- `POST /api/test/drone/start` / `POST /api/test/drone/stop` / `GET /api/test/drone/status`
+  — a synthetic orbiting test drone (with an operator position), fed through
+  the exact same apply_burst/persist_update/broadcast pipeline as real ZMQ
+  data. Toggle it from Settings > Debug. Useful for exercising the live map,
+  popups, path trail, and history without RF hardware. Stopping it doesn't
+  force-remove it — it decays through the normal stale/drop timeouts like a
+  real signal loss would, so that lifecycle gets exercised too.
+
 - `GET  /api/health` — `{"health": {"zmq": "green"|"red", "bluetooth": "green"|"yellow"|"red", "wifi": "green"|"yellow"|"red"}}`,
   same data the top bar's ZMQ/Bluetooth/WiFi dots use.
 

@@ -16,6 +16,7 @@ No persistence yet (that's the next phase) — this is the live-view slice.
 import asyncio
 import json
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass, field, asdict
@@ -580,6 +581,88 @@ async def health_broadcaster():
         await manager.broadcast({"type": "health", "health": compute_health()})
 
 
+# ---- synthetic test drone, for exercising the real pipeline without RF hardware ----
+
+TEST_DRONE_MAC = "aa:bb:cc:dd:ee:ff"
+TEST_DRONE_SERIAL = "TEST1DRONE0000001"
+TEST_DEFAULT_ORIGIN = (37.7749, -122.4194)  # used only if no station is configured
+
+test_drone_running = False
+
+
+def _test_drone_burst(t: float, origin_lat: float, origin_lon: float) -> list[dict]:
+    """One synthetic decoded-message burst, shaped exactly like a real
+    zmq_decoder.py burst (standalone {"MAC": ...} element + Basic ID +
+    Location/Vector Message + System Message + Self ID), so it exercises the
+    identical extraction/correlation path as real data — this is what makes
+    it useful for finding real bugs rather than just a UI mockup. Orbits a
+    center point (the configured station if there is one) with a slowly
+    wandering operator position nearby."""
+    angle = (t / 20.0) * 2 * math.pi  # ~20s per lap
+    radius_deg = 0.003  # roughly ~300m
+    lat = origin_lat + radius_deg * math.sin(angle)
+    lon = origin_lon + radius_deg * math.cos(angle)
+    heading = round((math.degrees(angle) + 90) % 360)
+    speed = 8.0 + 2.0 * math.sin(t / 5.0)
+    vert_speed = 0.3 * math.cos(t / 4.0)
+    alt = 80.0 + 15.0 * math.sin(t / 7.0)
+    height_agl = alt - 10.0
+    op_lat = origin_lat + 0.0006 * math.sin(t / 13.0)
+    op_lon = origin_lon + 0.0006 * math.cos(t / 13.0)
+
+    return [
+        {"MAC": TEST_DRONE_MAC},
+        {"Basic ID": {
+            "protocol_version": "F3411.22", "id_type": "Serial Number (ANSI/CTA-2063-A)",
+            "id": TEST_DRONE_SERIAL, "ua_type": 2,
+        }},
+        {"Location/Vector Message": {
+            "protocol_version": "F3411.22", "op_status": "Airborne", "height_type": "AGL",
+            "direction": heading, "speed": f"{speed:.1f} m/s", "vert_speed": f"{vert_speed:.1f} m/s",
+            "latitude": f"{lat:.7f}", "longitude": f"{lon:.7f}",
+            "pressure_altitude": "Undefined", "geodetic_altitude": f"{alt:.1f} m",
+            "height_agl": f"{height_agl:.1f} m",
+            "vertical_accuracy": "<10 m", "horizontal_accuracy": "<1 m",
+            "baro_accuracy": "<10 m", "speed_accuracy": "<0.3 m/s",
+            "timestamp": "synthetic",
+        }},
+        {"System Message": {
+            "operator_location_type": "Dynamic", "classification_type": "Test",
+            "latitude": op_lat, "longitude": op_lon,
+            "geodetic_altitude": "0.0 m", "protocol_version": "F3411.22",
+        }},
+        {"Self ID": {
+            "protocol_version": "F3411.22", "text_type": "Text Description",
+            "text": "SYNTHETIC TEST DRONE — for debugging only, not a real detection",
+        }},
+    ]
+
+
+async def test_drone_simulator():
+    global test_drone_running
+    origin_lat, origin_lon = TEST_DEFAULT_ORIGIN
+    raw = await db.get_setting("station")
+    if raw:
+        try:
+            data = json.loads(raw)
+            if data.get("lat") is not None and data.get("lon") is not None:
+                origin_lat, origin_lon = data["lat"], data["lon"]
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    log.info("Test drone simulator started, orbiting (%s, %s)", origin_lat, origin_lon)
+    t0 = time.time()
+    try:
+        while test_drone_running:
+            messages = _test_drone_burst(time.time() - t0, origin_lat, origin_lon)
+            mac, cleaned = _burst_from_message_list(messages)
+            track = store.apply_burst(mac, cleaned)
+            await persist_update(track)
+            await manager.broadcast({"type": "update", "drone": track.to_dict()})
+            await asyncio.sleep(1.5)
+    finally:
+        log.info("Test drone simulator stopped")
+
+
 async def stale_sweeper():
     """Periodically re-broadcast status transitions (live -> stale -> dropped)
     so the UI can fade/remove icons even without new packets arriving, and
@@ -664,6 +747,34 @@ async def get_health():
     """Liveness of the ZMQ decoder feed and the two raw sniffers, each based
     on whether a message has arrived within the last HEALTH_TIMEOUT_S."""
     return {"health": compute_health()}
+
+
+@app.post("/api/test/drone/start")
+async def start_test_drone():
+    """Starts a synthetic orbiting test drone (with an operator position)
+    fed through the exact same apply_burst/persist_update/broadcast pipeline
+    as real ZMQ data — for exercising the live map without RF hardware."""
+    global test_drone_running
+    if test_drone_running:
+        return {"ok": True, "already_running": True}
+    test_drone_running = True
+    asyncio.create_task(test_drone_simulator())
+    return {"ok": True}
+
+
+@app.post("/api/test/drone/stop")
+async def stop_test_drone():
+    """Stops feeding new bursts. Left to decay naturally through the normal
+    stale/drop timeouts rather than force-removed, so that lifecycle gets
+    exercised too instead of skipped."""
+    global test_drone_running
+    test_drone_running = False
+    return {"ok": True}
+
+
+@app.get("/api/test/drone/status")
+async def test_drone_status():
+    return {"running": test_drone_running}
 
 
 @app.get("/api/drones/catalog")
