@@ -753,7 +753,7 @@ function upsertDrone(d) {
     }
     if (!entry.marker) {
       entry.marker = L.marker(latlng, { icon: droneIconSvg(color, d.heading) });
-      entry.marker.on('click', () => selectTrack(d.key));
+      entry.marker.on('click', () => selectTrack(d.key, { fromMapClick: true }));
       // Leaflet's default autoClose would silently close this popup whenever
       // a different marker's popup opens, which fights with our own
       // drone<->operator swap logic — we manage closing explicitly instead.
@@ -773,10 +773,12 @@ function upsertDrone(d) {
       // or get silently undone. Content updates below use setPopupContent
       // instead, which only touches the text, never the popup object itself.
       entry.marker.bindPopup(popupHtml(d, entry.pairColor), { autoClose: false });
+      entry.marker.bindTooltip(droneTooltipText(d), { direction: 'top' });
       liveLayer.addLayer(entry.marker);
     } else {
       entry.marker.setLatLng(latlng);
       entry.marker.setPopupContent(popupHtml(d, entry.pairColor));
+      entry.marker.setTooltipContent(droneTooltipText(d));
     }
     updateDroneIcon(entry, d.key);
     if (selectedKey === d.key && selectedTarget === 'drone') entry.marker.openPopup();
@@ -790,7 +792,7 @@ function upsertDrone(d) {
     if (!entry.opMarker) {
       entry.opMarker = L.marker(opLatlng, { icon: opIconSvg(entry.pairColor) });
       entry.opMarker.bindTooltip('Operator / ground station', { direction: 'top' });
-      entry.opMarker.on('click', () => selectOperator(d.key));
+      entry.opMarker.on('click', () => selectOperator(d.key, { fromMapClick: true }));
       entry.opMarker.on('popupclose', () => {
         if (suppressPopupClose) return;
         if (selectedKey === d.key && selectedTarget === 'operator') {
@@ -869,6 +871,10 @@ function popupBadgeHtml(label, color) {
   return `<div class="popup-badge-row"><span class="popup-badge" style="background:${bg};color:${color};border-color:${border};">${escapeHtml(label)}</span></div>`;
 }
 
+function droneTooltipText(d) {
+  return escapeHtml(d.nickname || d.serial || d.mac || 'Unknown aircraft');
+}
+
 function popupHtml(d, color) {
   const name = d.nickname || d.serial || d.mac;
   const warn = d.raw_units_warning
@@ -905,7 +911,8 @@ function closeEntryPopups(entry) {
   suppressPopupClose = false;
 }
 
-function selectTrack(key) {
+function selectTrack(key, opts) {
+  const fromMapClick = !!(opts && opts.fromMapClick);
   const prevEntry = selectedKey ? droneMarkers.get(selectedKey) : null;
   if (prevEntry && (selectedKey !== key || selectedTarget !== 'drone')) {
     closeEntryPopups(prevEntry);
@@ -914,7 +921,18 @@ function selectTrack(key) {
   selectedTarget = 'drone';
   const entry = droneMarkers.get(key);
   if (entry) {
-    if (entry.marker) { map.panTo(entry.marker.getLatLng()); entry.marker.openPopup(); }
+    if (entry.marker) {
+      map.panTo(entry.marker.getLatLng());
+      // When the click came from the marker itself, Leaflet's own built-in
+      // click-to-open handling (wired up automatically by bindPopup) is
+      // already about to run right after this handler, for this same click
+      // event. Calling openPopup() ourselves here too would make its "is it
+      // already open?" check see a popup we just opened and toggle it
+      // straight back closed — that's what made clicking the drone feel
+      // unreliable. So: let Leaflet open it in that case; only open it
+      // ourselves when we got here some other way (sidebar row, etc.).
+      if (!fromMapClick) entry.marker.openPopup();
+    }
     drawLivePath(entry, key);
   }
   // dim every other track's path so the selected drone's route stands out,
@@ -923,7 +941,8 @@ function selectTrack(key) {
   renderSidebar();
 }
 
-function selectOperator(key) {
+function selectOperator(key, opts) {
+  const fromMapClick = !!(opts && opts.fromMapClick);
   const prevEntry = selectedKey ? droneMarkers.get(selectedKey) : null;
   if (prevEntry && (selectedKey !== key || selectedTarget !== 'operator')) {
     closeEntryPopups(prevEntry);
@@ -932,7 +951,7 @@ function selectOperator(key) {
   selectedTarget = 'operator';
   const entry = droneMarkers.get(key);
   if (entry) {
-    if (entry.opMarker) entry.opMarker.openPopup();
+    if (entry.opMarker && !fromMapClick) entry.opMarker.openPopup();
     if (entry.marker && entry.opMarker) {
       map.fitBounds(L.latLngBounds([entry.marker.getLatLng(), entry.opMarker.getLatLng()]), { padding: [60, 60] });
     } else if (entry.opMarker) {
