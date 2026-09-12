@@ -132,6 +132,16 @@
   .history-track-btn.active{
     background:rgba(79,209,197,0.12); color:var(--cyan); border-color:rgba(79,209,197,0.4);
   }
+  .unit-toggle-row{ padding:0 14px 14px; display:flex; gap:8px; }
+  .unit-btn{
+    flex:1 1 auto; background:var(--bg); border:1px solid var(--hairline); color:var(--text-muted);
+    font-family:'Inter',sans-serif; font-size:12px; font-weight:600;
+    padding:7px 10px; border-radius:var(--radius); cursor:pointer;
+  }
+  .unit-btn:hover{ color:var(--text); border-color:var(--text-muted); }
+  .unit-btn.active{
+    background:rgba(232,163,61,0.12); color:var(--amber); border-color:rgba(232,163,61,0.4);
+  }
   .track-op-row{
     margin-top:8px; padding-top:7px; border-top:1px solid var(--hairline);
     display:flex; align-items:center; justify-content:space-between; gap:8px;
@@ -399,6 +409,11 @@ function haversineMeters(lat1, lon1, lat2, lon2) {
 }
 
 function fmtDistance(meters) {
+  if (unitSystem === 'imperial') {
+    const feet = metersToFeet(meters);
+    if (feet < 5280) return `${feet.toFixed(0)} ft`;
+    return `${(feet / 5280).toFixed(2)} mi`;
+  }
   if (meters < 1000) return `${meters.toFixed(0)} m`;
   return `${(meters / 1000).toFixed(2)} km`;
 }
@@ -499,13 +514,13 @@ const FIELD_DEFS = {
     { key: 'op_status',           label: 'Op Status' },
     { key: 'height_type',         label: 'Height Type' },
     { key: 'heading',             label: 'Direction',          digits: 0, unit: '°' },
-    { key: 'speed',               label: 'Horiz Speed',        digits: 1, unit: ' m/s' },
-    { key: 'vert_speed',          label: 'Vert Speed',         digits: 1, unit: ' m/s' },
+    { key: 'speed',               label: 'Horiz Speed',        digits: 1, unit: ' m/s', kind: 'speed' },
+    { key: 'vert_speed',          label: 'Vert Speed',         digits: 1, unit: ' m/s', kind: 'vspeed' },
     { key: 'lat',                 label: 'Latitude',           digits: 7, unit: '' },
     { key: 'lon',                 label: 'Longitude',          digits: 7, unit: '' },
-    { key: 'pressure_altitude',   label: 'Pressure Altitude',  digits: 1, unit: ' m' },
-    { key: 'alt',                 label: 'Geodetic Altitude',  digits: 1, unit: ' m' },
-    { key: 'height_agl',          label: 'Height AGL',         digits: 1, unit: ' m' },
+    { key: 'pressure_altitude',   label: 'Pressure Altitude',  digits: 1, unit: ' m', kind: 'altitude' },
+    { key: 'alt',                 label: 'Geodetic Altitude',  digits: 1, unit: ' m', kind: 'altitude' },
+    { key: 'height_agl',          label: 'Height AGL',         digits: 1, unit: ' m', kind: 'altitude' },
     { key: 'vertical_accuracy',   label: 'Vertical Accuracy' },
     { key: 'horizontal_accuracy', label: 'Horizontal Accuracy' },
     { key: 'baro_accuracy',       label: 'Baro Accuracy' },
@@ -564,6 +579,30 @@ function saveFieldSettings() {
 
 let fieldSettings = loadFieldSettings();
 
+// ---------------- unit system (metric / imperial) ----------------
+// A display-only preference — stored values stay metric (SI) internally
+// always; only how they're rendered changes here.
+const UNIT_SYSTEM_KEY = 'droneid_unit_system_v1';
+
+function loadUnitSystem() {
+  try {
+    const raw = localStorage.getItem(UNIT_SYSTEM_KEY);
+    return raw === 'imperial' ? 'imperial' : 'metric';
+  } catch (e) {
+    return 'metric';
+  }
+}
+
+function saveUnitSystem() {
+  try { localStorage.setItem(UNIT_SYSTEM_KEY, unitSystem); } catch (e) { /* ignore */ }
+}
+
+let unitSystem = loadUnitSystem();
+
+function metersToFeet(m) { return m * 3.28084; }
+function mpsToMph(mps) { return mps * 2.23694; }
+function mpsToFtMin(mps) { return mps * 196.850; }
+
 function fieldValue(d, key) {
   if (key === 'id') return (d.serial !== null && d.serial !== undefined) ? d.serial : d.mac;
   if (key === 'tracked_time') {
@@ -605,6 +644,16 @@ function fieldValue(d, key) {
 function fieldDisplay(fdef, value) {
   if (value === null || value === undefined || value === '') return '—';
   if (fdef.formatter) return escapeHtml(fdef.formatter(value));
+  if (fdef.kind === 'altitude' || fdef.kind === 'speed' || fdef.kind === 'vspeed') {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return escapeHtml(String(value));
+    if (unitSystem === 'imperial') {
+      if (fdef.kind === 'altitude') return fmt(metersToFeet(n), 0, ' ft');
+      if (fdef.kind === 'speed') return fmt(mpsToMph(n), 1, ' mph');
+      if (fdef.kind === 'vspeed') return fmt(mpsToFtMin(n), 0, ' ft/min');
+    }
+    return fmt(n, fdef.digits, fdef.unit || '');
+  }
   if (fdef.digits !== undefined) {
     const n = Number(value);
     return Number.isFinite(n) ? fmt(n, fdef.digits, fdef.unit || '') : escapeHtml(String(value));
@@ -652,8 +701,20 @@ function refreshOpenInfoBoxes() {
 
 function renderSettingsPanel() {
   const sidebar = document.getElementById('sidebar');
+  const unitsHtml = `
+    <div class="settings-group-title" style="border-top:none;">Units</div>
+    <div class="settings-note">
+      Choose the unit system for distance, altitude, and speed values across
+      the app. This only changes how numbers are displayed — everything is
+      still stored and transmitted in metric underneath.
+    </div>
+    <div class="unit-toggle-row">
+      <button class="unit-btn${unitSystem === 'metric' ? ' active' : ''}" data-unit="metric">Metric (m, m/s)</button>
+      <button class="unit-btn${unitSystem === 'imperial' ? ' active' : ''}" data-unit="imperial">Imperial (ft, mph)</button>
+    </div>`;
+
   const debugHtml = `
-    <div class="settings-group-title" style="border-top:none;">Debug</div>
+    <div class="settings-group-title">Debug</div>
     <div class="settings-note">
       Injects one synthetic drone (orbiting the station if set, otherwise a
       default location) through the real live pipeline — same code path as
@@ -690,7 +751,7 @@ function renderSettingsPanel() {
         : 'Not set yet.'}</div>
     </div>`;
 
-  let html = debugHtml;
+  let html = unitsHtml + debugHtml;
   html += '<div class="settings-note">Choose which fields appear in the info box shown when you click a drone on the map or scrub through its history. Applies everywhere — not per-drone.</div>';
   Object.keys(FIELD_DEFS).forEach(group => {
     html += `<div class="settings-group-title">${escapeHtml(group)}</div>`;
@@ -710,6 +771,16 @@ function renderSettingsPanel() {
     cb.addEventListener('change', () => {
       fieldSettings[cb.dataset.group][cb.dataset.key] = cb.checked;
       saveFieldSettings();
+      refreshOpenInfoBoxes();
+    });
+  });
+
+  sidebar.querySelectorAll('.unit-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.unit === unitSystem) return;
+      unitSystem = btn.dataset.unit;
+      saveUnitSystem();
+      sidebar.querySelectorAll('.unit-btn').forEach(b => b.classList.toggle('active', b.dataset.unit === unitSystem));
       refreshOpenInfoBoxes();
     });
   });
