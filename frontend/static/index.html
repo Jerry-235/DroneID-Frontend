@@ -110,6 +110,17 @@
     font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-muted);
     display:flex; gap:10px; flex-wrap:wrap;
   }
+  .track-serial{
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:150px;
+  }
+  .track-pills{
+    margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;
+  }
+  .track-pill{
+    background:var(--bg); border:1px solid var(--hairline); color:var(--text);
+    font-family:'IBM Plex Mono',monospace; font-size:11px; font-weight:500;
+    padding:3px 9px; border-radius:var(--radius); white-space:nowrap;
+  }
   .track-op-row{
     margin-top:8px; padding-top:7px; border-top:1px solid var(--hairline);
     display:flex; align-items:center; justify-content:space-between; gap:8px;
@@ -1066,9 +1077,13 @@ function renderLiveSidebar() {
           <button class="pencil-btn" data-rename="${escapeHtml(d.key)}" data-name="${escapeHtml(name)}">✎</button>
         </div>
         <div class="track-sub">
-          <span>${escapeHtml(d.mac || '—')}</span>
-          <span>${fmt(d.alt,0,'m')}</span>
-          <span>${fmt(d.heading,0,'°')}</span>
+          <span>${escapeHtml(d.mac || 'No MAC')}</span>
+          ${d.serial ? `<span class="track-serial">SN: ${escapeHtml(d.serial)}</span>` : ''}
+        </div>
+        <div class="track-pills">
+          ${d.height_agl !== null && d.height_agl !== undefined ? `<span class="track-pill">${fmt(d.height_agl,0,'m')} AGL</span>` : ''}
+          ${d.speed !== null && d.speed !== undefined ? `<span class="track-pill">${fmt(d.speed,1,' m/s')}</span>` : ''}
+          ${d.heading !== null && d.heading !== undefined ? `<span class="track-pill">${fmt(d.heading,0,'°')}</span>` : ''}
         </div>
         <div class="track-op-row">
           <span class="track-op-indicator${hasOp ? ' op-yes' : ''}">
