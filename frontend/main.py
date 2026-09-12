@@ -43,7 +43,7 @@ ZMQ_ADDR = os.environ.get("DRONEID_ZMQ_ADDR", "tcp://127.0.0.1:4224")
 BT_ZMQ_ADDR = os.environ.get("DRONEID_BT_ZMQ_ADDR", "tcp://127.0.0.1:4222")
 WIFI_ZMQ_ADDR = os.environ.get("DRONEID_WIFI_ZMQ_ADDR", "tcp://127.0.0.1:4223")
 STALE_AFTER_S = float(os.environ.get("DRONEID_STALE_AFTER_S", "45"))
-DROP_AFTER_S = float(os.environ.get("DRONEID_DROP_AFTER_S", "300"))
+DROP_AFTER_S = float(os.environ.get("DRONEID_DROP_AFTER_S", "60"))
 HEALTH_TIMEOUT_S = float(os.environ.get("DRONEID_HEALTH_TIMEOUT_S", "12"))
 
 # Two independent signals per channel:
@@ -577,8 +577,11 @@ async def health_broadcaster():
     """Pushes ZMQ/Bluetooth/WiFi health to connected clients periodically,
     independent of whether any drone data is actually flowing."""
     while True:
-        await asyncio.sleep(5)
-        await manager.broadcast({"type": "health", "health": compute_health()})
+        try:
+            await asyncio.sleep(5)
+            await manager.broadcast({"type": "health", "health": compute_health()})
+        except Exception:
+            log.exception("Error in health broadcaster loop")
 
 
 # ---- synthetic test drone, for exercising the real pipeline without RF hardware ----
@@ -666,23 +669,45 @@ async def test_drone_simulator():
 async def stale_sweeper():
     """Periodically re-broadcast status transitions (live -> stale -> dropped)
     so the UI can fade/remove icons even without new packets arriving, and
-    close out the DB flight record once a track is dropped."""
+    close out the DB flight record once a track is dropped.
+
+    The whole loop body is wrapped in try/except: without it, a single
+    unexpected error here (e.g. a transient DB hiccup in db.end_flight)
+    would silently kill this task for the rest of the process's life —
+    meaning nothing would ever go stale or get dropped again until the
+    server is restarted. Every other long-running loop in this file already
+    follows this pattern; this one was missing it, which is the most likely
+    explanation for drones outliving DROP_AFTER_S indefinitely rather than
+    just late."""
     while True:
-        await asyncio.sleep(5)
-        now = time.time()
-        drop_keys = []
-        for key, track in list(store.tracks.items()):
-            age = now - track.last_seen
-            if age > DROP_AFTER_S:
-                drop_keys.append(key)
-            else:
-                await manager.broadcast({"type": "status", "key": key, "status": track.status()})
-        for key in drop_keys:
-            store.tracks.pop(key, None)
-            flight_id = active_flights.pop(key, None)
-            if flight_id is not None:
-                await db.end_flight(flight_id, now)
-            await manager.broadcast({"type": "dropped", "key": key})
+        try:
+            await asyncio.sleep(5)
+            now = time.time()
+            drop_keys = []
+            for key, track in list(store.tracks.items()):
+                age = now - track.last_seen
+                if age > DROP_AFTER_S:
+                    drop_keys.append(key)
+                else:
+                    await manager.broadcast({"type": "status", "key": key, "status": track.status()})
+            for key in drop_keys:
+                store.tracks.pop(key, None)
+                flight_id = active_flights.pop(key, None)
+                if flight_id is not None:
+                    try:
+                        await db.end_flight(flight_id, now)
+                    except Exception:
+                        # Don't let one flight's DB write take down the rest
+                        # of this batch, and still tell clients it's gone —
+                        # the flight just stays "in progress" in History
+                        # until this can be reconciled, rather than leaving
+                        # a marker stuck on the live map indefinitely.
+                        log.exception(
+                            "Failed to close out flight %s in DB for dropped track %s", flight_id, key
+                        )
+                await manager.broadcast({"type": "dropped", "key": key})
+        except Exception:
+            log.exception("Error in stale sweeper loop — will retry on next tick")
 
 
 app = FastAPI(title="DroneID Live Map")
