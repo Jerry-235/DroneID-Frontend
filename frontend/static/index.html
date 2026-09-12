@@ -119,6 +119,19 @@
     font-family:'IBM Plex Mono',monospace; font-size:11px; font-weight:500;
     padding:3px 9px; border-radius:var(--radius); white-space:nowrap;
   }
+  .history-track-buttons{
+    margin-top:8px; padding-top:7px; border-top:1px solid var(--hairline);
+    display:flex; gap:6px;
+  }
+  .history-track-btn{
+    flex:1 1 auto; background:var(--bg); border:1px solid var(--hairline); color:var(--text-muted);
+    font-family:'Inter',sans-serif; font-size:11px; font-weight:600;
+    padding:5px 8px; border-radius:var(--radius); cursor:pointer;
+  }
+  .history-track-btn:hover{ color:var(--text); border-color:var(--text-muted); }
+  .history-track-btn.active{
+    background:rgba(79,209,197,0.12); color:var(--cyan); border-color:rgba(79,209,197,0.4);
+  }
   .track-op-row{
     margin-top:8px; padding-top:7px; border-top:1px solid var(--hairline);
     display:flex; align-items:center; justify-content:space-between; gap:8px;
@@ -1144,6 +1157,7 @@ function renderLiveSidebar() {
 // ---------------- HISTORY mode ----------------
 
 let historyState = { flightId: null, flightMeta: null, points: [], marker: null, opMarker: null, line: null, opLine: null, link: null, playing: false, timer: null };
+let historySelectedTarget = 'drone'; // 'drone' | 'operator' — which popup is tracked during playback
 
 function historyPointData(idx) {
   const p = historyState.points[idx] || {};
@@ -1178,6 +1192,16 @@ function historyPopupHtml(idx) {
   `;
 }
 
+function historyOperatorPopupHtml(idx) {
+  const d = historyPointData(idx);
+  const name = historyState.flightMeta ? historyState.flightMeta.display_name : '';
+  return `
+    ${popupBadgeHtml('OPERATOR', '#A78BFA')}
+    <div class="popup-title">${escapeHtml(name)}</div>
+    ${renderInfoBox(d, ['Basic', 'Operator'])}
+  `;
+}
+
 async function loadHistoryList() {
   const sidebar = document.getElementById('sidebar');
   sidebar.innerHTML = '<div class="sidebar-empty">Loading flights…</div>';
@@ -1195,6 +1219,17 @@ async function loadHistoryList() {
   sidebar.innerHTML = flights.map(f => {
     const sel = f.id === historyState.flightId ? ' selected' : '';
     const inProgress = !f.ended_at;
+    const isOpen = f.id === historyState.flightId;
+    // Only known once this flight's points have actually been fetched
+    // (i.e. it's the currently open one) — the flight list itself doesn't
+    // carry point-level data, so Track Op only appears once we can confirm
+    // this flight actually has operator positions recorded.
+    const hasOpData = isOpen && !!historyState.opMarker;
+    const expandedHtml = isOpen ? `
+        <div class="history-track-buttons">
+          <button class="history-track-btn${historySelectedTarget === 'drone' ? ' active' : ''}" data-target="drone">Track Drone</button>
+          ${hasOpData ? `<button class="history-track-btn${historySelectedTarget === 'operator' ? ' active' : ''}" data-target="operator">Track Op</button>` : ''}
+        </div>` : '';
     return `
       <div class="track-row${sel}" data-flight="${f.id}" data-key="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">
         <div class="row-top">
@@ -1210,13 +1245,20 @@ async function loadHistoryList() {
           <span>${f.point_count} pts</span>
           ${inProgress ? '<span style="color:#E8A33D">in progress</span>' : ''}
         </div>
+        ${expandedHtml}
       </div>`;
   }).join('');
 
   sidebar.querySelectorAll('.track-row').forEach(row => {
     row.addEventListener('click', (e) => {
-      if (e.target.dataset.rename) return;
+      if (e.target.dataset.rename || e.target.dataset.target) return;
       selectHistoryFlight(parseInt(row.dataset.flight, 10));
+    });
+  });
+  sidebar.querySelectorAll('.history-track-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      selectHistoryTarget(btn.dataset.target);
     });
   });
   sidebar.querySelectorAll('[data-rename]').forEach(btn => {
@@ -1230,6 +1272,7 @@ async function loadHistoryList() {
 async function selectHistoryFlight(flightId) {
   stopPlayback();
   historyLayer.clearLayers();
+  historySelectedTarget = 'drone'; // always default back to Track Drone on a fresh flight selection
   const res = await fetch(`/api/flights/${flightId}`);
   const data = await res.json();
   // Master, unfiltered, in timestamp order — the scrub index maps 1:1 to
@@ -1250,6 +1293,7 @@ async function selectHistoryFlight(flightId) {
     document.getElementById('scrub-readout').textContent = 'No data recorded for this flight.';
     scrubber.classList.add('show');
     range.max = 0;
+    loadHistoryList();
     return;
   }
 
@@ -1269,11 +1313,15 @@ async function selectHistoryFlight(flightId) {
   }
   if (dronePts.length > 0) {
     historyState.marker = L.marker([dronePts[0].lat, dronePts[0].lon], { icon: droneIconSvg('#4FD1C5', dronePts[0].heading) });
-    historyState.marker.bindPopup(historyPopupHtml(0));
+    historyState.marker.bindPopup(historyPopupHtml(0), { autoClose: false });
+    historyState.marker.on('click', () => selectHistoryTarget('drone'));
     historyLayer.addLayer(historyState.marker);
   }
   if (opPts.length > 0) {
     historyState.opMarker = L.marker([opPts[0].op_lat, opPts[0].op_lon], { icon: opIconSvg('#A78BFA') });
+    historyState.opMarker.bindTooltip('Operator / ground station', { direction: 'top' });
+    historyState.opMarker.bindPopup(historyOperatorPopupHtml(0), { autoClose: false });
+    historyState.opMarker.on('click', () => selectHistoryTarget('operator'));
     historyLayer.addLayer(historyState.opMarker);
   }
 
@@ -1287,7 +1335,23 @@ async function selectHistoryFlight(flightId) {
   scrubber.classList.add('show');
   scrubToIndex(0);
   if (historyState.marker) historyState.marker.openPopup();
-  loadHistoryList(); // refresh selection highlight
+  loadHistoryList(); // refresh selection highlight + show the Track Drone/Track Op buttons
+}
+
+function selectHistoryTarget(target) {
+  historySelectedTarget = target;
+  if (target === 'drone') {
+    if (historyState.opMarker) historyState.opMarker.closePopup();
+    if (historyState.marker) historyState.marker.openPopup();
+  } else {
+    if (historyState.marker) historyState.marker.closePopup();
+    if (historyState.opMarker) historyState.opMarker.openPopup();
+  }
+  // Update just the two track-target buttons in place rather than
+  // re-fetching/re-rendering the whole flight list for a simple toggle.
+  document.querySelectorAll('.history-track-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.target === target);
+  });
 }
 
 function scrubToIndex(idx) {
@@ -1308,6 +1372,7 @@ function scrubToIndex(idx) {
   }
   if (hasOp && historyState.opMarker) {
     historyState.opMarker.setLatLng([p.op_lat, p.op_lon]);
+    historyState.opMarker.setPopupContent(historyOperatorPopupHtml(idx));
   }
 
   // Dashed link follows the drone through playback, connecting to wherever
