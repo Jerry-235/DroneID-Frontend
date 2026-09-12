@@ -201,20 +201,24 @@
   #map{flex:1 1 auto;background:#DDE3E8;}
 
   .scrubber-bar{
-    display:none; flex:0 0 auto; height:60px; background:var(--panel);
-    border-top:1px solid var(--hairline); padding:0 16px; align-items:center; gap:14px;
+    display:none; flex:0 0 auto; background:var(--panel);
+    border-top:1px solid var(--hairline); padding:10px 16px;
+    flex-direction:column; gap:10px;
   }
   .scrubber-bar.show{display:flex;}
+  .scrub-controls{ display:flex; align-items:center; gap:14px; }
   .scrub-btn{
     background:var(--panel-raised); border:1px solid var(--hairline); color:var(--amber);
     width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:12px;flex:0 0 auto;
   }
   .scrub-range{flex:1 1 auto;accent-color:var(--amber);}
   .scrub-readout{
-    font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-muted);
-    display:flex; gap:14px; white-space:nowrap;
+    display:flex; justify-content:flex-end; align-items:baseline; gap:18px;
+    font-family:'IBM Plex Mono',monospace; white-space:nowrap;
   }
-  .scrub-readout b{color:var(--text);font-weight:500;}
+  .scrub-datetime{ font-size:16px; font-weight:600; color:var(--text); }
+  .scrub-point{ font-size:13px; color:var(--text-muted); }
+  .scrub-point b{color:var(--text);font-weight:600;}
 
   /* Leaflet overrides for dark UI on a full-color basemap */
   .leaflet-container{background:#DDE3E8;}
@@ -296,8 +300,10 @@
   <div class="map-wrap">
     <div id="map"></div>
     <div class="scrubber-bar" id="scrubber">
-      <button class="scrub-btn" id="scrub-play">▶</button>
-      <input type="range" class="scrub-range" id="scrub-range" min="0" max="0" value="0">
+      <div class="scrub-controls">
+        <button class="scrub-btn" id="scrub-play">▶</button>
+        <input type="range" class="scrub-range" id="scrub-range" min="0" max="0" value="0" step="1">
+      </div>
       <div class="scrub-readout" id="scrub-readout"></div>
     </div>
   </div>
@@ -1392,10 +1398,8 @@ function scrubToIndex(idx) {
   }
 
   document.getElementById('scrub-readout').innerHTML = `
-    <span>${fmtDateTime(p.ts)}</span>
-    <span>alt <b>${fmt(p.alt,1,'m')}</b></span>
-    <span>hdg <b>${fmt(p.heading,0,'°')}</b></span>
-    <span>spd <b>${fmt(p.speed,1,'m/s')}</b></span>
+    <span class="scrub-datetime">${fmtDateTime(p.ts)}</span>
+    <span class="scrub-point">Point <b>${idx}</b> / ${historyState.points.length - 1}</span>
   `;
 }
 
