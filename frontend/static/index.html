@@ -74,16 +74,14 @@
   .health-item{ display:flex; align-items:center; gap:6px; position:relative; cursor:default; }
   .health-tooltip{
     display:none;
-    position:absolute; top:100%; left:50%; transform:translateX(-50%);
-    margin-top:10px; width:230px; z-index:2000;
+    position:fixed; z-index:2000;
+    width:230px;
     background:var(--panel-raised); border:1px solid var(--hairline); border-radius:var(--radius);
     padding:10px 12px; box-shadow:0 10px 24px rgba(0,0,0,0.5);
     font-family:'Inter',sans-serif; font-size:11px; line-height:1.6; color:var(--text);
     text-transform:none; letter-spacing:normal; cursor:auto;
   }
-  .health-item:hover .health-tooltip,
-  .health-item:focus .health-tooltip,
-  .health-item:focus-within .health-tooltip{ display:block; }
+  .health-tooltip.show{ display:block; }
   .health-tooltip .tt-title{ font-weight:700; margin-bottom:6px; color:var(--text); }
   .health-tooltip .tt-row{ display:flex; align-items:center; gap:7px; margin-top:4px; }
   .health-tooltip .tt-dot{ width:7px; height:7px; border-radius:50%; flex:0 0 auto; }
@@ -1625,6 +1623,42 @@ loadStation();
 setInterval(() => {
   if (selectedKey) refreshOpenInfoBoxes();
 }, 1000);
+
+// Health indicator tooltips: now position:fixed (see CSS) rather than
+// absolute + top:100%, since the top bar is a horizontal scroll container
+// and CSS can't let an element both clip on the X axis and overflow freely
+// on the Y axis at the same time — a purely-CSS :hover dropdown would get
+// silently clipped by the same overflow that makes the bar scrollable.
+// Positioned here instead, in viewport coordinates, so it always renders on
+// top regardless of scroll state.
+document.querySelectorAll('.health-item').forEach(item => {
+  const tooltip = item.querySelector('.health-tooltip');
+  if (!tooltip) return;
+
+  function show() {
+    const rect = item.getBoundingClientRect();
+    const tooltipWidth = 230; // matches the fixed width set in CSS
+    tooltip.style.top = (rect.bottom + 8) + 'px';
+    let left = rect.left + rect.width / 2 - tooltipWidth / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - tooltipWidth - 8));
+    tooltip.style.left = left + 'px';
+    tooltip.classList.add('show');
+  }
+  function hide() {
+    tooltip.classList.remove('show');
+  }
+
+  item.addEventListener('mouseenter', show);
+  item.addEventListener('mouseleave', hide);
+  item.addEventListener('focus', show);
+  item.addEventListener('blur', hide);
+});
+
+// If the bar scrolls while a tooltip is open, its position would go stale —
+// simplest correct behavior is just to close it rather than track scroll.
+document.querySelector('.topbar').addEventListener('scroll', () => {
+  document.querySelectorAll('.health-tooltip.show').forEach(t => t.classList.remove('show'));
+});
 </script>
 </body>
 </html>
