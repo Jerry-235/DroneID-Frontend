@@ -100,8 +100,6 @@
   .track-row.selected{background:var(--panel-raised);border-left:2px solid var(--amber);padding-left:12px;}
   .track-row .row-top{ display:flex; align-items:center; gap:8px; }
   .status-chip{ width:7px;height:7px;border-radius:50%;flex:0 0 auto; }
-  .status-chip.live{background:var(--amber);}
-  .status-chip.stale{background:var(--text-muted);}
   .track-name{
     font-size:13px; font-weight:600; overflow:hidden;
     text-overflow:ellipsis; white-space:nowrap; flex:1 1 auto;
@@ -129,7 +127,6 @@
     display:flex; align-items:center; gap:5px;
     font-size:10px; font-family:'IBM Plex Mono',monospace; color:var(--text-muted);
   }
-  .track-op-indicator.op-yes{ color:#34D399; }
   .op-dot{
     width:6px; height:6px; border-radius:50%; background:var(--text-muted);
     flex:0 0 auto;
@@ -328,7 +325,7 @@ let stationMarker = null;
 // the dashed drone<->operator link, and a highlight ring on the drone icon
 // when either half of the pair is selected — keeps the pairing visually
 // obvious even with several drones/operators on screen at once.
-const PAIR_COLORS = ['#4FD1C5', '#E8A33D', '#C77DFF', '#63B3ED', '#F6AD55', '#68D391', '#F687B3', '#90CDF4'];
+const PAIR_COLORS = ['#F97316', '#2DD4BF', '#F43F5E', '#A78BFA', '#60A5FA', '#4ADE80', '#F472B6', '#FBBF24'];
 let pairColorIndex = 0;
 function nextPairColor() {
   const c = PAIR_COLORS[pairColorIndex % PAIR_COLORS.length];
@@ -415,12 +412,6 @@ async function loadStation() {
       hasCentered = true;
     }
   } catch (e) { /* no station set yet, or fetch failed — fall back silently */ }
-}
-
-function statusColor(status) {
-  if (status === 'live') return '#E8A33D';
-  if (status === 'stale') return '#7C8B99';
-  return '#E0645A';
 }
 
 function fmt(v, digits, suffix) {
@@ -773,7 +764,6 @@ async function renameDrone(catalogKey, currentName) {
 // ---------------- LIVE mode ----------------
 
 function upsertDrone(d) {
-  const color = statusColor(d.status);
   let entry = droneMarkers.get(d.key);
   const hasPos = d.lat !== null && d.lat !== undefined && d.lon !== null && d.lon !== undefined;
 
@@ -813,7 +803,7 @@ function upsertDrone(d) {
       drawLivePath(entry, d.key);
     }
     if (!entry.marker) {
-      entry.marker = L.marker(latlng, { icon: droneIconSvg(color, d.heading) });
+      entry.marker = L.marker(latlng, { icon: droneIconSvg(entry.pairColor, d.heading) });
       entry.marker.on('click', () => selectTrack(d.key, { fromMapClick: true }));
       // Leaflet's default autoClose would silently close this popup whenever
       // a different marker's popup opens, which fights with our own
@@ -889,7 +879,12 @@ function upsertDrone(d) {
 function updateDroneIcon(entry, key) {
   if (!entry.marker) return;
   const halo = (key === selectedKey) ? entry.pairColor : null;
-  entry.marker.setIcon(droneIconSvg(statusColor(entry.data.status), entry.data.heading, halo));
+  entry.marker.setIcon(droneIconSvg(entry.pairColor, entry.data.heading, halo));
+  // Identity color stays constant regardless of freshness — "stale" is shown
+  // by fading the whole marker instead of swapping its hue, so the drone's
+  // color reads the same everywhere (icon, path, link, badge, sidebar) at
+  // every stage of its lifecycle, not just while freshly live.
+  entry.marker.setOpacity(entry.data.status === 'stale' ? 0.5 : 1);
 }
 
 function drawLivePath(entry, key) {
@@ -906,7 +901,7 @@ function drawLivePath(entry, key) {
     return;
   }
   if (entry.path.length < 2) return;
-  const style = { color: '#E8A33D', weight: 3, opacity: 0.9 };
+  const style = { color: entry.pairColor, weight: 3, opacity: 0.9 };
   if (!entry.pathLine) {
     entry.pathLine = L.polyline(entry.path, style);
     liveLayer.addLayer(entry.pathLine);
@@ -1065,14 +1060,18 @@ function renderLiveSidebar() {
     return;
   }
 
-  sidebar.innerHTML = entries.map(({ data: d }) => {
+  sidebar.innerHTML = entries.map((entry) => {
+    const d = entry.data;
+    const color = entry.pairColor;
     const name = d.nickname || d.serial || d.mac;
     const sel = d.key === selectedKey ? ' selected' : '';
     const hasOp = d.op_lat !== null && d.op_lat !== undefined && d.op_lon !== null && d.op_lon !== undefined;
+    const chipColor = d.status === 'live' ? color : '#7C8B99';
+    const opColor = hasOp ? color : '#7C8B99';
     return `
-      <div class="track-row${sel}" data-key="${escapeHtml(d.key)}">
+      <div class="track-row${sel}" data-key="${escapeHtml(d.key)}" style="${sel ? `border-left-color:${color};` : ''}">
         <div class="row-top">
-          <span class="status-chip ${d.status}"></span>
+          <span class="status-chip" style="background:${chipColor};box-shadow:${d.status === 'live' ? `0 0 6px ${chipColor}` : 'none'};"></span>
           <span class="track-name">${escapeHtml(name)}</span>
           <button class="pencil-btn" data-rename="${escapeHtml(d.key)}" data-name="${escapeHtml(name)}">✎</button>
         </div>
@@ -1086,10 +1085,10 @@ function renderLiveSidebar() {
           ${d.heading !== null && d.heading !== undefined ? `<span class="track-pill">${fmt(d.heading,0,'°')}</span>` : ''}
         </div>
         <div class="track-op-row">
-          <span class="track-op-indicator${hasOp ? ' op-yes' : ''}">
-            <span class="op-dot${hasOp ? ' op-yes' : ''}"></span>${hasOp ? 'Operator Detected' : 'No Operator Detected'}
+          <span class="track-op-indicator" style="color:${opColor};">
+            <span class="op-dot${hasOp ? ' op-yes' : ''}" style="${hasOp ? `background:${color};box-shadow:0 0 6px ${color};` : ''}"></span>${hasOp ? 'Operator Detected' : 'No Operator Detected'}
           </span>
-          ${hasOp ? `<button class="focus-op-btn" data-focus-op="${escapeHtml(d.key)}">Focus Op</button>` : ''}
+          ${hasOp ? `<button class="focus-op-btn" data-focus-op="${escapeHtml(d.key)}" style="color:${color};border-color:${hexToRgba(color,0.35)};background:${hexToRgba(color,0.1)};">Focus Op</button>` : ''}
         </div>
       </div>`;
   }).join('');
