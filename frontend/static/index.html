@@ -519,6 +519,7 @@ const FIELD_DEFS = {
     { key: 'op_lat',                 label: 'Operator Latitude',  digits: 7, unit: '' },
     { key: 'op_lon',                 label: 'Operator Longitude', digits: 7, unit: '' },
     { key: 'op_station_distance',    label: 'Distance to Station', formatter: fmtDistance },
+    { key: 'op_drone_distance',      label: 'Distance to Drone', formatter: fmtDistance },
   ],
 };
 
@@ -532,7 +533,7 @@ const FIELD_DEFAULTS = {
     vertical_accuracy: false, horizontal_accuracy: false, baro_accuracy: false,
     speed_accuracy: false, loc_timestamp: false, station_distance: true,
   },
-  'Operator': { op_location_type: true, op_classification_type: true, op_lat: true, op_lon: true, op_station_distance: true },
+  'Operator': { op_location_type: true, op_classification_type: true, op_lat: true, op_lon: true, op_station_distance: true, op_drone_distance: true },
 };
 
 const FIELD_SETTINGS_KEY = 'droneid_field_toggles_v1';
@@ -592,6 +593,11 @@ function fieldValue(d, key) {
   if (key === 'op_station_distance') {
     if (!stationCoord || d.op_lat === null || d.op_lat === undefined || d.op_lon === null || d.op_lon === undefined) return null;
     return haversineMeters(stationCoord.lat, stationCoord.lon, d.op_lat, d.op_lon);
+  }
+  if (key === 'op_drone_distance') {
+    if (d.op_lat === null || d.op_lat === undefined || d.op_lon === null || d.op_lon === undefined) return null;
+    if (d.lat === null || d.lat === undefined || d.lon === null || d.lon === undefined) return null;
+    return haversineMeters(d.op_lat, d.op_lon, d.lat, d.lon);
   }
   return d[key];
 }
