@@ -769,7 +769,9 @@ function upsertDrone(d) {
 
   if (!entry) {
     entry = {
-      marker: null, opMarker: null, link: null, pathLine: null, path: [],
+      marker: null, opMarker: null, link: null,
+      pathLine: null, path: [],
+      opPathLine: null, opPath: [],
       flightId: null, flightLoading: false, pairColor: nextPairColor(), data: d,
     };
     droneMarkers.set(d.key, entry);
@@ -781,16 +783,22 @@ function upsertDrone(d) {
     entry.flightLoading = true;
     entry.flightId = d.flight_id;
     fetch(`/api/flights/${d.flight_id}`).then(r => r.json()).then(data => {
-      const fetched = (data.points || [])
-        .filter(p => p.lat !== null && p.lon !== null)
-        .map(p => [p.lat, p.lon]);
+      const points = data.points || [];
+      const fetchedDrone = points.filter(p => p.lat !== null && p.lon !== null).map(p => [p.lat, p.lon]);
+      const fetchedOp = points
+        .filter(p => p.op_lat !== null && p.op_lon !== null && !(p.op_lat === 0 && p.op_lon === 0))
+        .map(p => [p.op_lat, p.op_lon]);
       // This fetch is async, so by the time it resolves, live bursts may
-      // already have pushed newer points into entry.path — merge rather
-      // than overwrite, or those would be silently dropped from the trail.
-      const already = new Set(fetched.map(p => p[0] + ',' + p[1]));
-      const liveOnly = entry.path.filter(p => !already.has(p[0] + ',' + p[1]));
-      entry.path = fetched.concat(liveOnly);
-      drawLivePath(entry, d.key);
+      // already have pushed newer points into entry.path/opPath — merge
+      // rather than overwrite, or those would be silently dropped.
+      const mergeKeepingLive = (fetched, live) => {
+        const already = new Set(fetched.map(p => p[0] + ',' + p[1]));
+        const liveOnly = live.filter(p => !already.has(p[0] + ',' + p[1]));
+        return fetched.concat(liveOnly);
+      };
+      entry.path = mergeKeepingLive(fetchedDrone, entry.path);
+      entry.opPath = mergeKeepingLive(fetchedOp, entry.opPath);
+      updatePathVisibility(entry, d.key);
       entry.flightLoading = false;
     }).catch(() => { entry.flightLoading = false; });
   }
@@ -800,7 +808,7 @@ function upsertDrone(d) {
     const last = entry.path[entry.path.length - 1];
     if (!last || last[0] !== d.lat || last[1] !== d.lon) {
       entry.path.push(latlng);
-      drawLivePath(entry, d.key);
+      updatePathVisibility(entry, d.key);
     }
     if (!entry.marker) {
       entry.marker = L.marker(latlng, { icon: droneIconSvg(entry.pairColor, d.heading) });
@@ -813,7 +821,7 @@ function upsertDrone(d) {
         if (selectedKey === d.key && selectedTarget === 'drone') {
           selectedKey = null;
           selectedTarget = null;
-          droneMarkers.forEach((e, k) => { drawLivePath(e, k); updateDroneIcon(e, k); });
+          droneMarkers.forEach((e, k) => { updatePathVisibility(e, k); updateDroneIcon(e, k); });
           renderSidebar();
         }
       });
@@ -840,6 +848,11 @@ function upsertDrone(d) {
   // been received — parse_latlon on the backend already nulls out 0,0.
   if (d.op_lat !== null && d.op_lat !== undefined && d.op_lon !== null && d.op_lon !== undefined) {
     const opLatlng = [d.op_lat, d.op_lon];
+    const lastOp = entry.opPath[entry.opPath.length - 1];
+    if (!lastOp || lastOp[0] !== d.op_lat || lastOp[1] !== d.op_lon) {
+      entry.opPath.push(opLatlng);
+      updatePathVisibility(entry, d.key);
+    }
     if (!entry.opMarker) {
       entry.opMarker = L.marker(opLatlng, { icon: opIconSvg(entry.pairColor) });
       entry.opMarker.bindTooltip('Operator / ground station', { direction: 'top' });
@@ -849,7 +862,7 @@ function upsertDrone(d) {
         if (selectedKey === d.key && selectedTarget === 'operator') {
           selectedKey = null;
           selectedTarget = null;
-          droneMarkers.forEach((e, k) => { drawLivePath(e, k); updateDroneIcon(e, k); });
+          droneMarkers.forEach((e, k) => { updatePathVisibility(e, k); updateDroneIcon(e, k); });
           renderSidebar();
         }
       });
@@ -887,27 +900,40 @@ function updateDroneIcon(entry, key) {
   entry.marker.setOpacity(entry.data.status === 'stale' ? 0.5 : 1);
 }
 
-function drawLivePath(entry, key) {
-  // Only draw a path line for the drone/operator currently being focused —
-  // otherwise just the icon shows, no clutter from every track's trail at
-  // once. Data collection into entry.path never stops either way, so the
-  // full trail is already there the moment you do select it.
-  const focused = key === selectedKey;
-  if (!focused) {
-    if (entry.pathLine) {
-      liveLayer.removeLayer(entry.pathLine);
-      entry.pathLine = null;
+function updatePathVisibility(entry, key) {
+  // Shows exactly one trail at a time for the focused track: the drone's
+  // path when its own icon/row is focused, the operator's path when the
+  // operator is focused instead, and nothing when this key isn't focused at
+  // all. Both entry.path and entry.opPath keep accumulating in the
+  // background regardless, so whichever trail you focus is already
+  // complete the moment you select it.
+  const droneFocused = key === selectedKey && selectedTarget === 'drone';
+  const opFocused = key === selectedKey && selectedTarget === 'operator';
+
+  if (!droneFocused) {
+    if (entry.pathLine) { liveLayer.removeLayer(entry.pathLine); entry.pathLine = null; }
+  } else if (entry.path.length >= 2) {
+    const style = { color: entry.pairColor, weight: 3, opacity: 0.9 };
+    if (!entry.pathLine) {
+      entry.pathLine = L.polyline(entry.path, style);
+      liveLayer.addLayer(entry.pathLine);
+    } else {
+      entry.pathLine.setLatLngs(entry.path);
+      entry.pathLine.setStyle(style);
     }
-    return;
   }
-  if (entry.path.length < 2) return;
-  const style = { color: entry.pairColor, weight: 3, opacity: 0.9 };
-  if (!entry.pathLine) {
-    entry.pathLine = L.polyline(entry.path, style);
-    liveLayer.addLayer(entry.pathLine);
-  } else {
-    entry.pathLine.setLatLngs(entry.path);
-    entry.pathLine.setStyle(style);
+
+  if (!opFocused) {
+    if (entry.opPathLine) { liveLayer.removeLayer(entry.opPathLine); entry.opPathLine = null; }
+  } else if (entry.opPath.length >= 2) {
+    const style = { color: entry.pairColor, weight: 3, opacity: 0.9 };
+    if (!entry.opPathLine) {
+      entry.opPathLine = L.polyline(entry.opPath, style);
+      liveLayer.addLayer(entry.opPathLine);
+    } else {
+      entry.opPathLine.setLatLngs(entry.opPath);
+      entry.opPathLine.setStyle(style);
+    }
   }
 }
 
@@ -927,9 +953,11 @@ function removeDrone(key) {
       map.removeLayer(layer);
     });
     // leave the flight path visible but fade it to show it's no longer live
-    // — only relevant if this drone was actually focused when it dropped,
-    // since the path is otherwise already hidden per the focus-only rule.
+    // — only relevant if this drone/operator was actually focused when it
+    // dropped, since the path is otherwise already hidden per the
+    // focus-only rule.
     if (entry.pathLine) entry.pathLine.setStyle({ color: '#7C8B99', opacity: 0.35, weight: 2 });
+    if (entry.opPathLine) entry.opPathLine.setStyle({ color: '#7C8B99', opacity: 0.35, weight: 2 });
     droneMarkers.delete(key);
   }
   // Otherwise selectedKey/selectedTarget would keep pointing at a track that
@@ -1019,11 +1047,11 @@ function selectTrack(key, opts) {
       // ourselves when we got here some other way (sidebar row, etc.).
       if (!fromMapClick) entry.marker.openPopup();
     }
-    drawLivePath(entry, key);
+    updatePathVisibility(entry, key);
   }
   // dim every other track's path so the selected drone's route stands out,
   // and refresh every drone icon's halo ring (only the selected one keeps it)
-  droneMarkers.forEach((e, k) => { drawLivePath(e, k); updateDroneIcon(e, k); });
+  droneMarkers.forEach((e, k) => { updatePathVisibility(e, k); updateDroneIcon(e, k); });
   renderSidebar();
 }
 
@@ -1043,9 +1071,9 @@ function selectOperator(key, opts) {
     } else if (entry.opMarker) {
       map.panTo(entry.opMarker.getLatLng());
     }
-    drawLivePath(entry, key);
+    updatePathVisibility(entry, key);
   }
-  droneMarkers.forEach((e, k) => { drawLivePath(e, k); updateDroneIcon(e, k); });
+  droneMarkers.forEach((e, k) => { updatePathVisibility(e, k); updateDroneIcon(e, k); });
   renderSidebar();
 }
 
@@ -1115,7 +1143,7 @@ function renderLiveSidebar() {
 
 // ---------------- HISTORY mode ----------------
 
-let historyState = { flightId: null, flightMeta: null, points: [], marker: null, line: null, playing: false, timer: null };
+let historyState = { flightId: null, flightMeta: null, points: [], marker: null, opMarker: null, line: null, opLine: null, link: null, playing: false, timer: null };
 
 function historyPointData(idx) {
   const p = historyState.points[idx] || {};
@@ -1204,41 +1232,100 @@ async function selectHistoryFlight(flightId) {
   historyLayer.clearLayers();
   const res = await fetch(`/api/flights/${flightId}`);
   const data = await res.json();
-  const points = (data.points || []).filter(p => p.lat !== null && p.lon !== null);
-  historyState = { flightId, flightMeta: data.flight || null, points, marker: null, line: null, playing: false, timer: null };
+  // Master, unfiltered, in timestamp order — the scrub index maps 1:1 to
+  // this array so the drone and operator positions at any given index are
+  // guaranteed to be from the same moment in time, even though either one
+  // individually might be missing (null) at some rows.
+  const allPoints = data.points || [];
+  historyState = {
+    flightId, flightMeta: data.flight || null, points: allPoints,
+    marker: null, opMarker: null, line: null, opLine: null, link: null,
+    playing: false, timer: null,
+  };
 
   const scrubber = document.getElementById('scrubber');
   const range = document.getElementById('scrub-range');
 
-  if (points.length === 0) {
-    document.getElementById('scrub-readout').textContent = 'No position data recorded for this flight.';
+  if (allPoints.length === 0) {
+    document.getElementById('scrub-readout').textContent = 'No data recorded for this flight.';
     scrubber.classList.add('show');
     range.max = 0;
     return;
   }
 
-  const latlngs = points.map(p => [p.lat, p.lon]);
-  historyState.line = L.polyline(latlngs, { color: '#4FD1C5', weight: 3, opacity: 0.8 });
-  historyLayer.addLayer(historyState.line);
-  historyState.marker = L.marker(latlngs[0], { icon: droneIconSvg('#4FD1C5', points[0].heading) });
-  historyState.marker.bindPopup(historyPopupHtml(0));
-  historyLayer.addLayer(historyState.marker);
-  map.fitBounds(historyState.line.getBounds(), { padding: [40, 40] });
+  const dronePts = allPoints.filter(p => p.lat !== null && p.lon !== null);
+  const opPts = allPoints.filter(p => p.op_lat !== null && p.op_lon !== null && !(p.op_lat === 0 && p.op_lon === 0));
+  const boundsLayers = [];
 
-  range.max = points.length - 1;
+  if (dronePts.length > 1) {
+    historyState.line = L.polyline(dronePts.map(p => [p.lat, p.lon]), { color: '#4FD1C5', weight: 3, opacity: 0.8 });
+    historyLayer.addLayer(historyState.line);
+    boundsLayers.push(historyState.line);
+  }
+  if (opPts.length > 1) {
+    historyState.opLine = L.polyline(opPts.map(p => [p.op_lat, p.op_lon]), { color: '#A78BFA', weight: 2, opacity: 0.6, dashArray: '4,4' });
+    historyLayer.addLayer(historyState.opLine);
+    boundsLayers.push(historyState.opLine);
+  }
+  if (dronePts.length > 0) {
+    historyState.marker = L.marker([dronePts[0].lat, dronePts[0].lon], { icon: droneIconSvg('#4FD1C5', dronePts[0].heading) });
+    historyState.marker.bindPopup(historyPopupHtml(0));
+    historyLayer.addLayer(historyState.marker);
+  }
+  if (opPts.length > 0) {
+    historyState.opMarker = L.marker([opPts[0].op_lat, opPts[0].op_lon], { icon: opIconSvg('#A78BFA') });
+    historyLayer.addLayer(historyState.opMarker);
+  }
+
+  if (boundsLayers.length > 0) {
+    const group = L.featureGroup(boundsLayers);
+    map.fitBounds(group.getBounds(), { padding: [40, 40] });
+  }
+
+  range.max = allPoints.length - 1;
   range.value = 0;
   scrubber.classList.add('show');
   scrubToIndex(0);
-  historyState.marker.openPopup();
+  if (historyState.marker) historyState.marker.openPopup();
   loadHistoryList(); // refresh selection highlight
 }
 
 function scrubToIndex(idx) {
   const p = historyState.points[idx];
   if (!p) return;
-  historyState.marker.setLatLng([p.lat, p.lon]);
-  historyState.marker.setIcon(droneIconSvg('#4FD1C5', p.heading));
-  historyState.marker.setPopupContent(historyPopupHtml(idx));
+
+  const hasDrone = p.lat !== null && p.lat !== undefined && p.lon !== null && p.lon !== undefined;
+  const hasOp = p.op_lat !== null && p.op_lat !== undefined && p.op_lon !== null && p.op_lon !== undefined
+    && !(p.op_lat === 0 && p.op_lon === 0);
+
+  // If either is missing at this exact row, leave that marker wherever it
+  // last was rather than hiding/teleporting it — a brief gap in one signal
+  // shouldn't erase the other's last known position.
+  if (hasDrone && historyState.marker) {
+    historyState.marker.setLatLng([p.lat, p.lon]);
+    historyState.marker.setIcon(droneIconSvg('#4FD1C5', p.heading));
+    historyState.marker.setPopupContent(historyPopupHtml(idx));
+  }
+  if (hasOp && historyState.opMarker) {
+    historyState.opMarker.setLatLng([p.op_lat, p.op_lon]);
+  }
+
+  // Dashed link follows the drone through playback, connecting to wherever
+  // the operator was at that same moment — only drawn when both are known
+  // at this exact row.
+  if (hasDrone && hasOp) {
+    const linkPts = [[p.lat, p.lon], [p.op_lat, p.op_lon]];
+    if (!historyState.link) {
+      historyState.link = L.polyline(linkPts, { color: '#4FD1C5', weight: 2, dashArray: '6,6', opacity: 0.7 });
+      historyLayer.addLayer(historyState.link);
+    } else {
+      historyState.link.setLatLngs(linkPts);
+    }
+  } else if (historyState.link) {
+    historyLayer.removeLayer(historyState.link);
+    historyState.link = null;
+  }
+
   document.getElementById('scrub-readout').innerHTML = `
     <span>${fmtDateTime(p.ts)}</span>
     <span>alt <b>${fmt(p.alt,1,'m')}</b></span>
