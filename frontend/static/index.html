@@ -40,7 +40,13 @@
     padding:0 16px;
     border-bottom:1px solid var(--hairline);
     background:var(--panel);
+    overflow-x:auto;
+    overflow-y:hidden;
+    -webkit-overflow-scrolling:touch;
+    scrollbar-width:none;
   }
+  .topbar::-webkit-scrollbar{ display:none; }
+  .topbar > *{ flex-shrink:0; }
   .brand{ font-weight:700; font-size:14px; letter-spacing:0.02em; }
   .brand span{color:var(--amber);}
   .tabs{ display:flex; gap:2px; background:var(--bg); border-radius:var(--radius); padding:2px; }
@@ -81,7 +87,6 @@
   .health-tooltip .tt-title{ font-weight:700; margin-bottom:6px; color:var(--text); }
   .health-tooltip .tt-row{ display:flex; align-items:center; gap:7px; margin-top:4px; }
   .health-tooltip .tt-dot{ width:7px; height:7px; border-radius:50%; flex:0 0 auto; }
-  @media (max-width: 640px){ .health-group{ display:none; } }
   .count{ margin-left:auto; font-size:12px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace; }
   .count b{color:var(--text);font-weight:600;}
   .main{ flex:1 1 auto; display:flex; min-height:0; }
@@ -541,14 +546,14 @@ const FIELD_DEFS = {
 // Requested defaults: everything else in Basic/Drone starts OFF. Operator
 // (System Message) defaults ON.
 const FIELD_DEFAULTS = {
-  'Basic': { protocol_version: false, serial: true, ua_type: false, id: true, mac: true, status: true, tracked_time: true, last_seen_elapsed: true },
+  'Basic': { protocol_version: false, serial: true, ua_type: false, id: false, mac: true, status: true, tracked_time: true, last_seen_elapsed: true },
   'Drone': {
-    op_status: true, height_type: false, heading: true, speed: true, vert_speed: true,
-    lat: true, lon: true, pressure_altitude: false, alt: false, height_agl: true,
+    op_status: true, height_type: true, heading: true, speed: true, vert_speed: true,
+    lat: true, lon: true, pressure_altitude: false, alt: true, height_agl: true,
     vertical_accuracy: false, horizontal_accuracy: false, baro_accuracy: false,
     speed_accuracy: false, loc_timestamp: false, station_distance: true,
   },
-  'Operator': { op_location_type: true, op_classification_type: true, op_lat: true, op_lon: true, op_station_distance: true, op_drone_distance: true },
+  'Operator': { op_location_type: true, op_classification_type: false, op_lat: true, op_lon: true, op_station_distance: true, op_drone_distance: true },
 };
 
 const FIELD_SETTINGS_KEY = 'droneid_field_toggles_v1';
@@ -701,7 +706,7 @@ function refreshOpenInfoBoxes() {
 function renderSettingsPanel() {
   const sidebar = document.getElementById('sidebar');
   const unitsHtml = `
-    <div class="settings-group-title" style="border-top:none;">Units</div>
+    <div class="settings-group-title">Units</div>
     <div class="settings-note">
       Choose the unit system for distance, altitude, and speed values across
       the app. This only changes how numbers are displayed — everything is
@@ -750,10 +755,9 @@ function renderSettingsPanel() {
         : 'Not set yet.'}</div>
     </div>`;
 
-  let html = unitsHtml + debugHtml;
-  html += '<div class="settings-note">Choose which fields appear in the info box shown when you click a drone on the map or scrub through its history. Applies everywhere — not per-drone.</div>';
-  Object.keys(FIELD_DEFS).forEach(group => {
-    html += `<div class="settings-group-title">${escapeHtml(group)}</div>`;
+  let html = '<div class="settings-note" style="padding-top:12px;">Choose which fields appear in the info box shown when you click a drone on the map or scrub through its history. Applies everywhere — not per-drone.</div>';
+  Object.keys(FIELD_DEFS).forEach((group, i) => {
+    html += `<div class="settings-group-title"${i === 0 ? ' style="border-top:none;"' : ''}>${escapeHtml(group)}</div>`;
     html += FIELD_DEFS[group].map(f => {
       const checked = fieldSettings[group][f.key] ? 'checked' : '';
       return `
@@ -763,7 +767,9 @@ function renderSettingsPanel() {
         </label>`;
     }).join('');
   });
+  html += unitsHtml;
   html += stationHtml;
+  html += debugHtml;
   sidebar.innerHTML = html;
 
   sidebar.querySelectorAll('input[type=checkbox]').forEach(cb => {
