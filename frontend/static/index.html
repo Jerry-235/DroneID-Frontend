@@ -604,7 +604,12 @@ function renderInfoBox(d, groups) {
 }
 
 function refreshOpenInfoBoxes() {
-  if (mode === 'live' && selectedKey) {
+  // selectedKey/selectedTarget only ever come from live selections, so their
+  // presence alone means a live popup may be open — regardless of which
+  // sidebar tab (Live/History/Settings) happens to be showing right now.
+  // Gating this on mode === 'live' meant Tracked Time/Last Seen would freeze
+  // the moment you switched to Settings, even with the popup still visible.
+  if (selectedKey) {
     const entry = droneMarkers.get(selectedKey);
     if (entry) {
       if (entry.marker) entry.marker.setPopupContent(popupHtml(entry.data, entry.pairColor));
@@ -877,9 +882,20 @@ function updateDroneIcon(entry, key) {
 }
 
 function drawLivePath(entry, key) {
+  // Only draw a path line for the drone/operator currently being focused —
+  // otherwise just the icon shows, no clutter from every track's trail at
+  // once. Data collection into entry.path never stops either way, so the
+  // full trail is already there the moment you do select it.
+  const focused = key === selectedKey;
+  if (!focused) {
+    if (entry.pathLine) {
+      liveLayer.removeLayer(entry.pathLine);
+      entry.pathLine = null;
+    }
+    return;
+  }
   if (entry.path.length < 2) return;
-  const selected = key === selectedKey;
-  const style = { color: '#E8A33D', weight: selected ? 3 : 2, opacity: selected ? 0.9 : 0.5 };
+  const style = { color: '#E8A33D', weight: 3, opacity: 0.9 };
   if (!entry.pathLine) {
     entry.pathLine = L.polyline(entry.path, style);
     liveLayer.addLayer(entry.pathLine);
@@ -892,10 +908,21 @@ function drawLivePath(entry, key) {
 function removeDrone(key) {
   const entry = droneMarkers.get(key);
   if (entry) {
-    if (entry.marker) liveLayer.removeLayer(entry.marker);
-    if (entry.opMarker) liveLayer.removeLayer(entry.opMarker);
-    if (entry.link) liveLayer.removeLayer(entry.link);
+    // Close any open popup explicitly and remove from both the layer group
+    // AND the map directly — belt-and-suspenders, in case group-removal
+    // alone ever leaves a stray DOM node behind (this is the best guess I
+    // have at the "icon lingers until page refresh" report without being
+    // able to reproduce it directly; if it still happens after this, the
+    // browser console at the moment of drop would be the next thing to check).
+    [entry.marker, entry.opMarker, entry.link].forEach(layer => {
+      if (!layer) return;
+      if (typeof layer.closePopup === 'function') layer.closePopup();
+      liveLayer.removeLayer(layer);
+      map.removeLayer(layer);
+    });
     // leave the flight path visible but fade it to show it's no longer live
+    // — only relevant if this drone was actually focused when it dropped,
+    // since the path is otherwise already hidden per the focus-only rule.
     if (entry.pathLine) entry.pathLine.setStyle({ color: '#7C8B99', opacity: 0.35, weight: 2 });
     droneMarkers.delete(key);
   }
@@ -1344,7 +1371,7 @@ loadStation();
 // Ticks any currently-open popup once a second so "Tracked Time" counts up
 // live even between bursts, without waiting on new data to arrive.
 setInterval(() => {
-  if (mode === 'live' && selectedKey) refreshOpenInfoBoxes();
+  if (selectedKey) refreshOpenInfoBoxes();
 }, 1000);
 </script>
 </body>
