@@ -601,7 +601,6 @@ let unitSystem = loadUnitSystem();
 
 function metersToFeet(m) { return m * 3.28084; }
 function mpsToMph(mps) { return mps * 2.23694; }
-function mpsToFtMin(mps) { return mps * 196.850; }
 
 function fieldValue(d, key) {
   if (key === 'id') return (d.serial !== null && d.serial !== undefined) ? d.serial : d.mac;
@@ -650,7 +649,7 @@ function fieldDisplay(fdef, value) {
     if (unitSystem === 'imperial') {
       if (fdef.kind === 'altitude') return fmt(metersToFeet(n), 0, ' ft');
       if (fdef.kind === 'speed') return fmt(mpsToMph(n), 1, ' mph');
-      if (fdef.kind === 'vspeed') return fmt(mpsToFtMin(n), 0, ' ft/min');
+      if (fdef.kind === 'vspeed') return fmt(mpsToMph(n), 1, ' mph');
     }
     return fmt(n, fdef.digits, fdef.unit || '');
   }
