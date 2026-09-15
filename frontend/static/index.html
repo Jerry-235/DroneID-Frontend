@@ -1418,6 +1418,7 @@ async function selectHistoryFlight(flightId) {
     historyState.opMarker.on('click', () => selectHistoryTarget('operator'));
     historyLayer.addLayer(historyState.opMarker);
   }
+  updateHistoryTrailStyles(); // reflects the 'drone' default set above
 
   if (boundsLayers.length > 0) {
     const group = L.featureGroup(boundsLayers);
@@ -1441,11 +1442,32 @@ function selectHistoryTarget(target) {
     if (historyState.marker) historyState.marker.closePopup();
     if (historyState.opMarker) historyState.opMarker.openPopup();
   }
+  updateHistoryTrailStyles();
   // Update just the two track-target buttons in place rather than
   // re-fetching/re-rendering the whole flight list for a simple toggle.
   document.querySelectorAll('.history-track-btn').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.target === target);
   });
+}
+
+function updateHistoryTrailStyles() {
+  // Both trails always stay visible in History (unlike Live, which hides
+  // the unfocused one entirely) — here we only distinguish "the one you're
+  // currently tracking" by making it solid, matching Live's convention,
+  // while keeping it visually distinct from the dashed drone<->operator
+  // link line, which stays dashed regardless of focus.
+  if (historyState.line) {
+    const droneFocused = historySelectedTarget === 'drone';
+    historyState.line.setStyle({ weight: droneFocused ? 3 : 2, opacity: droneFocused ? 0.9 : 0.6 });
+  }
+  if (historyState.opLine) {
+    const opFocused = historySelectedTarget === 'operator';
+    historyState.opLine.setStyle({
+      weight: opFocused ? 3 : 2,
+      opacity: opFocused ? 0.9 : 0.6,
+      dashArray: opFocused ? null : '4,4',
+    });
+  }
 }
 
 function scrubToIndex(idx) {
