@@ -1178,6 +1178,7 @@ function selectOperator(key, opts) {
 
 function renderLiveSidebar() {
   const sidebar = document.getElementById('sidebar');
+  const scrollPos = sidebar.scrollTop;
   const entries = Array.from(droneMarkers.values()).sort((a, b) => (b.data.last_seen || 0) - (a.data.last_seen || 0));
   document.getElementById('track-count').textContent = entries.length;
   document.getElementById('count-label').textContent = 'tracked';
@@ -1238,6 +1239,7 @@ function renderLiveSidebar() {
       selectOperator(btn.dataset.focusOp);
     });
   });
+  sidebar.scrollTop = scrollPos;
 }
 
 // ---------------- HISTORY mode ----------------
@@ -1290,6 +1292,11 @@ function historyOperatorPopupHtml(idx) {
 
 async function loadHistoryList() {
   const sidebar = document.getElementById('sidebar');
+  // Preserve scroll position across the re-render below — a plain innerHTML
+  // replacement resets scrollTop to 0 in most browsers, which is why
+  // clicking a flight partway down a long list used to jump you back to
+  // the top instead of staying where you were.
+  const scrollPos = sidebar.scrollTop;
   sidebar.innerHTML = '<div class="sidebar-empty">Loading flights…</div>';
   const res = await fetch('/api/flights?limit=100');
   const data = await res.json();
@@ -1353,6 +1360,7 @@ async function loadHistoryList() {
       renameDrone(btn.dataset.rename, btn.dataset.name);
     });
   });
+  sidebar.scrollTop = scrollPos;
 }
 
 async function selectHistoryFlight(flightId) {
