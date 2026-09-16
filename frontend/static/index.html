@@ -1571,7 +1571,7 @@ function scrubToIndex(idx) {
   if (hasDrone && hasOp) {
     const linkPts = [[p.lat, p.lon], [p.op_lat, p.op_lon]];
     if (!historyState.link) {
-      historyState.link = L.polyline(linkPts, { color: '#4FD1C5', weight: 2, dashArray: '6,6', opacity: 0.7 });
+      historyState.link = L.polyline(linkPts, { color: '#A78BFA', weight: 2, dashArray: '6,6', opacity: 0.7 });
       historyLayer.addLayer(historyState.link);
     } else {
       historyState.link.setLatLngs(linkPts);

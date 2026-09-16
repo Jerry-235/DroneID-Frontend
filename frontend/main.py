@@ -622,6 +622,19 @@ if discord_webhook_url and not discord_webhook_url.startswith((
         "(expected it to start with https://discord.com/api/webhooks/) — alerts will "
         "likely fail to send"
     )
+
+# Optional: pings a specific role on every alert. Must be the role's numeric
+# snowflake ID (Server Settings > Roles > right-click the role > Copy Role
+# ID, with Developer Mode on), NOT its name — Discord only pings on the
+# <@&ROLE_ID> mention syntax, plain "@role-name" text in a message never
+# notifies anyone.
+DISCORD_ROLE_ID: Optional[str] = os.environ.get("DRONEID_DISCORD_ROLE_ID") or None
+if DISCORD_ROLE_ID and not DISCORD_ROLE_ID.isdigit():
+    log.warning(
+        "DRONEID_DISCORD_ROLE_ID is set but isn't purely numeric — Discord role IDs are "
+        "numeric snowflakes, so this will likely fail to resolve as a real mention"
+    )
+
 # Cached separately from the DB so building an alert never needs a DB round
 # trip on the hot path; kept in sync with /api/station's PUT/DELETE.
 station_cache: Optional[dict] = None
@@ -646,21 +659,23 @@ def mps_to_mph(mps: float) -> float:
 
 def build_new_drone_message(track: "DroneTrack") -> str:
     """Builds the alert text for a brand-new (non-test) detection. Uses
-    imperial units throughout (feet/mph) to match the "feet from station"
-    phrasing this was specified with."""
+    imperial units throughout (feet/mph). Formatted as a Discord ## heading
+    (bold, slightly larger) with the role ping (if configured) on that same
+    line, followed by the details in a fenced code block on their own line."""
     name = track.nickname or "New Drone"
-    header = f"{name} Detected"
+    role_ping = f" <@&{DISCORD_ROLE_ID}>" if DISCORD_ROLE_ID else ""
+    header = f"## {name} Detected{role_ping}"
 
     has_pos = track.lat is not None and track.lon is not None
     if not has_pos:
-        return f"{header} - No location information available"
+        return f"{header}\n```No location information available```"
 
-    station_clause = None
+    parts = []
     if station_cache and station_cache.get("lat") is not None and station_cache.get("lon") is not None:
         dist_ft = meters_to_feet(
             haversine_meters(station_cache["lat"], station_cache["lon"], track.lat, track.lon)
         )
-        station_clause = f"({dist_ft:.0f} feet from station)"
+        parts.append(f"{dist_ft:,.0f}ft From Station")
 
     # op_status is the direct Remote ID signal for this ("Ground", "Airborne",
     # etc.); anything other than "Ground" (including unknown/missing) is
@@ -669,25 +684,33 @@ def build_new_drone_message(track: "DroneTrack") -> str:
     is_landed = (track.op_status or "").strip().lower() == "ground"
     status_clause = "Currently landed" if is_landed else "Currently flying"
     if not is_landed and track.speed is not None:
-        status_clause += f" at {mps_to_mph(track.speed):.0f} mph"
+        status_clause += f" at {mps_to_mph(track.speed):.0f}mph"
     if track.heading is not None:
-        status_clause += f" and heading {track.heading:.0f}\u00b0"
+        status_clause += f" and Heading {track.heading:.0f}\u00b0"
+    parts.append(status_clause)
 
     has_op = track.op_lat is not None and track.op_lon is not None
-    controller_clause = "Controller located" if has_op else "Controller not located"
+    parts.append("Controller Located" if has_op else "Controller Not Located")
 
-    message = header
-    if station_clause:
-        message += f" {station_clause}"
-    message += f", {status_clause} - {controller_clause}"
-    return message
+    body = " - ".join(parts)
+    return f"{header}\n```{body}```"
 
 
 def _post_discord_webhook_sync(url: str, content: str) -> tuple[bool, str]:
     """Returns (success, detail). Never raises — callers decide whether the
     detail matters (the fire-and-forget alert path just logs it; the test
     endpoint surfaces it to the UI)."""
-    payload = json.dumps({"content": content}).encode("utf-8")
+    # allowed_mentions is deliberately locked down rather than left at
+    # Discord's default (which parses and pings anything mention-shaped in
+    # the content). Drone nicknames are user-editable text that lands
+    # directly in this string — without this restriction, naming a drone
+    # something like "@everyone" would actually ping the whole server. Only
+    # the one specific configured role (if any) is ever allowed through.
+    allowed_roles = [DISCORD_ROLE_ID] if DISCORD_ROLE_ID else []
+    payload = json.dumps({
+        "content": content,
+        "allowed_mentions": {"parse": [], "roles": allowed_roles},
+    }).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=payload,
@@ -929,7 +952,7 @@ async def api_test_discord_webhook():
         return JSONResponse({"error": "No webhook configured."}, status_code=400)
     ok, detail = await asyncio.to_thread(
         _post_discord_webhook_sync, discord_webhook_url,
-        "DroneID test alert — if you can see this, the webhook is working.",
+        "## DroneID Test Alert\n```If you can see this, the webhook is working.```",
     )
     if not ok:
         return JSONResponse({"error": f"Discord rejected the request — {detail}"}, status_code=502)

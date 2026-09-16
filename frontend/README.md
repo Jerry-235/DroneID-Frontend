@@ -177,6 +177,39 @@ changing or clearing it means editing `.env` (or the environment variable)
 and restarting, same as the other env-configured settings in this app (ZMQ
 addresses, timeouts, DB path).
 
+### Pinging a role, and the message format
+
+Alerts are formatted as a Discord `##` heading line (bold, slightly larger)
+followed by the details in a fenced code block on their own line:
+
+```
+## Jerry Mini 5 Detected @drone-alerts
+26,614ft From Station - Currently flying at 32mph and Heading 122° - Controller Located
+```
+
+(the second line renders as a monospaced code box in Discord; shown plain
+above for readability here).
+
+To have it actually ping a role — plain `@role-name` text in a message
+never notifies anyone, Discord only pings on the `<@&ROLE_ID>` mention
+syntax — set `DRONEID_DISCORD_ROLE_ID` to that role's numeric ID:
+
+1. In Discord: *User Settings → Advanced → Developer Mode* (turn it on, if
+   not already).
+2. *Server Settings → Roles* → right-click the role → **Copy Role ID**.
+3. Add it to `.env` (or export it) alongside the webhook URL:
+   ```bash
+   DRONEID_DISCORD_ROLE_ID=123456789012345678
+   ```
+4. Restart the server.
+
+Leave it unset for no ping — the heading line just omits the mention.
+`allowed_mentions` is explicitly locked down on every outgoing message to
+*only* that one role ID, regardless of what's in the message content —
+this matters because drone nicknames are user-editable text that ends up
+directly in the alert, so without this restriction, naming a drone
+something like "@everyone" would actually ping your whole server.
+
 ## Admin view (casual-viewer declutter, not real access control)
 
 Settings > Station, Discord Alerts, and Debug are hidden by default. Visit
