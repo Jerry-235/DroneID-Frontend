@@ -730,8 +730,7 @@ function renderSettingsPanel() {
     <div class="settings-group-title">Units</div>
     <div class="settings-note">
       Choose the unit system for distance, altitude, and speed values across
-      the app. This only changes how numbers are displayed — everything is
-      still stored and transmitted in metric underneath.
+      the app.
     </div>
     <div class="unit-toggle-row">
       <button class="unit-btn${unitSystem === 'metric' ? ' active' : ''}" data-unit="metric">Metric (m, m/s)</button>
@@ -741,11 +740,9 @@ function renderSettingsPanel() {
   const debugHtml = `
     <div class="settings-group-title">Debug</div>
     <div class="settings-note">
-      Injects one synthetic drone (orbiting the station if set, otherwise a
-      default location) through the real live pipeline — same code path as
-      actual ZMQ data — for exercising the map, popups, and history without
-      RF hardware. It decays and drops on its own after Stop, same as a real
-      signal loss, rather than being force-removed.
+      Injects one synthetic drone orbiting the station if set,
+      through the real live pipeline for exercising the map, popups, and history without
+      RF hardware.
     </div>
     <div class="station-form">
       <div class="station-form-buttons">
@@ -758,9 +755,7 @@ function renderSettingsPanel() {
   const stationHtml = `
     <div class="settings-group-title">Station</div>
     <div class="settings-note">
-      Set this device's fixed reference location. It's stored on the server —
-      the same for every browser/device that opens this app — and the map
-      loads centered here every time.
+      Set this device's fixed reference location.
     </div>
     <div class="station-form">
       <input id="station-lat" type="number" step="any" placeholder="Latitude"
@@ -779,11 +774,8 @@ function renderSettingsPanel() {
   const discordHtml = `
     <div class="settings-group-title">Discord Alerts</div>
     <div class="settings-note">
-      Sends a message to a Discord channel whenever a genuinely new drone is
-      detected (not the test drone). Configured via the DRONEID_DISCORD_WEBHOOK
-      environment variable on the server — not editable here, since a
-      webhook URL is a bearer secret and this app is meant to be kept in
-      source control. Set it and restart the server to enable or change it.
+      Sends a message to a Discord channel whenever a new drone is
+      detected. Send a test alert using the Discord webhook and role ping.
     </div>
     <div class="station-form">
       <div class="settings-note" id="discord-webhook-status">Checking…</div>
