@@ -118,6 +118,13 @@ Then, in the browser:
 
 ## What's new in this pass
 
+- **Discord webhook alerts** — fires once per genuinely new drone detection
+  (excludes the test drone), with distance-to-station, landed/flying status,
+  speed, heading, and whether an operator/controller position was found.
+  Configured via the `DRONEID_DISCORD_WEBHOOK` environment variable (see
+  below) — not through the UI, since it's a secret and this repo is meant
+  to be kept in source control. No new dependency — uses `urllib` from the
+  standard library rather than adding `requests`/`httpx`.
 - **SQLite persistence** (`db.py`, stdlib `sqlite3`, no extra dependency).
   Three tables: `drones` (catalog/nicknames), `flights` (one row per
   detection session), `track_points` (timestamped samples per flight).
@@ -141,8 +148,59 @@ Then, in the browser:
   above; selecting a drone (row or marker) highlights its trail and dims
   others.
 
+## Discord webhook setup
+
+1. In the target Discord channel: *Edit Channel → Integrations → Webhooks →
+   New Webhook*, then click "Copy Webhook URL".
+2. Give it to the app one of two ways:
+   - **`.env` file (recommended)** — copy `.env.example` to `.env` (same
+     folder as `frontend.py`) and fill in the real URL:
+     ```bash
+     cp .env.example .env
+     # then edit .env and paste your webhook URL in place of the placeholder
+     ```
+     `.env` is already in `.gitignore` — it will never get committed.
+     `.env.example` has no real secret in it, so it's safe to commit and
+     keeps the expected format documented for anyone else who clones this.
+   - **Plain environment variable** — skip the file entirely:
+     ```bash
+     export DRONEID_DISCORD_WEBHOOK="https://discord.com/api/webhooks/.../..."
+     ```
+     (or set it in your `systemd` unit / process manager). A real
+     environment variable always wins over whatever's in `.env` if both
+     happen to be set.
+3. Restart the server. Settings > Discord Alerts (admin view) will show
+   "Configured" and a "Send Test" button once it picks it up.
+
+The webhook URL is read once at startup and never stored in the database —
+changing or clearing it means editing `.env` (or the environment variable)
+and restarting, same as the other env-configured settings in this app (ZMQ
+addresses, timeouts, DB path).
+
+## Admin view (casual-viewer declutter, not real access control)
+
+Settings > Station, Discord Alerts, and Debug are hidden by default. Visit
+the app once with `?admin=1` on the URL (e.g. `http://<host>:8000/?admin=1`)
+to unlock them permanently for that browser — the flag is stored in that
+browser's `localStorage` and the param is stripped from the URL right after,
+so it won't linger visibly or get shared via a bookmark. Every other
+browser/device just sees the field toggles and Units, with no indication
+those other sections exist.
+
+This is purely a client-side UI convenience, **not security** — anyone who
+opens dev tools can set the same flag themselves, and every backend endpoint
+those sections talk to (station, Discord test-send, test drone) has no
+server-side auth at all regardless of this flag. Treat it as "declutter the
+view for casual observers on my LAN," not as a way to prevent someone
+determined from reaching those controls.
+
 ## New API surface
 
+- `GET /api/discord_webhook` — `{"configured": true|false}` only; never
+  returns the actual URL (it isn't stored anywhere the app manages — see
+  above).
+- `POST /api/discord_webhook/test` — sends a one-line test message so you
+  can confirm it's wired up without waiting for a real detection.
 - `POST /api/test/drone/start` / `POST /api/test/drone/stop` / `GET /api/test/drone/status`
   — a synthetic orbiting test drone (with an operator position), fed through
   the exact same apply_burst/persist_update/broadcast pipeline as real ZMQ
@@ -150,10 +208,8 @@ Then, in the browser:
   popups, path trail, and history without RF hardware. Stopping it doesn't
   force-remove it — it decays through the normal stale/drop timeouts like a
   real signal loss would, so that lifecycle gets exercised too.
-
 - `GET  /api/health` — `{"health": {"zmq": "green"|"red", "bluetooth": "green"|"yellow"|"red", "wifi": "green"|"yellow"|"red"}}`,
   same data the top bar's ZMQ/Bluetooth/WiFi dots use.
-
 - `GET  /api/flights?limit=&offset=` — flight list, most recent first.
 - `GET  /api/flights/{id}` — one flight's metadata + full point list.
 - `GET  /api/drones/catalog` — all catalog_key → nickname mappings.
@@ -162,6 +218,11 @@ Then, in the browser:
 
 ## Known limitations / next things to tighten up
 
+- **No auth on any endpoint** — the admin-view flag above is UI-only. In
+  particular, `POST /api/discord_webhook/test` and the test-drone endpoints
+  can be triggered by anyone who can reach this server at all, admin flag
+  or not. Fine for a private LAN box; put a reverse proxy with basic auth
+  in front of it before exposing this beyond your own network.
 - **Every burst is written as a DB point** — fine at "a few drones, single
   operator" scale (your stated scale), but if you ever run this against
   much heavier traffic, batch or debounce the writes.
@@ -173,10 +234,6 @@ Then, in the browser:
   actually emits so we can convert it properly instead of flagging it.
 - **Renaming uses a plain `prompt()` dialog** for now — functional, not
   polished; an inline edit box would be a nice small upgrade later.
-- **No auth** — fine for a single-operator LAN box; put a reverse proxy
-  with basic auth in front of it before exposing it beyond your own
-  network.
-- **Discord webhook alerts** — still not built; that's the next piece.
 
 ## Files
 

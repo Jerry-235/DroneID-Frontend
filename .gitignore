@@ -14,3 +14,18 @@ DA_*.bin
 # Pyinstaller stuff
 build
 dist
+
+# Secrets — never commit the real .env, only .env.example
+.env
+
+# Local runtime data
+droneid.db
+droneid.db-wal
+droneid.db-shm
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+

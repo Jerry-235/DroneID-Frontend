@@ -776,6 +776,22 @@ function renderSettingsPanel() {
         : 'Not set yet.'}</div>
     </div>`;
 
+  const discordHtml = `
+    <div class="settings-group-title">Discord Alerts</div>
+    <div class="settings-note">
+      Sends a message to a Discord channel whenever a genuinely new drone is
+      detected (not the test drone). Configured via the DRONEID_DISCORD_WEBHOOK
+      environment variable on the server — not editable here, since a
+      webhook URL is a bearer secret and this app is meant to be kept in
+      source control. Set it and restart the server to enable or change it.
+    </div>
+    <div class="station-form">
+      <div class="settings-note" id="discord-webhook-status">Checking…</div>
+      <div class="station-form-buttons">
+        <button id="discord-webhook-test" class="settings-btn settings-btn-ghost">Send Test</button>
+      </div>
+    </div>`;
+
   let html = '<div class="settings-note" style="padding-top:12px;">Choose which fields appear in the info box shown when you click a drone on the map or scrub through its history. Applies everywhere — not per-drone.</div>';
   Object.keys(FIELD_DEFS).forEach((group, i) => {
     html += `<div class="settings-group-title"${i === 0 ? ' style="border-top:none;"' : ''}>${escapeHtml(group)}</div>`;
@@ -792,6 +808,7 @@ function renderSettingsPanel() {
   const admin = isAdmin();
   if (admin) {
     html += stationHtml;
+    html += discordHtml;
     html += debugHtml;
   }
   sidebar.innerHTML = html;
@@ -874,6 +891,35 @@ function renderSettingsPanel() {
       refreshOpenInfoBoxes();
       renderSettingsPanel();
     } catch (e) { /* ignore */ }
+  });
+
+  async function refreshDiscordWebhookStatus() {
+    const statusEl = document.getElementById('discord-webhook-status');
+    const testBtn = document.getElementById('discord-webhook-test');
+    try {
+      const res = await fetch('/api/discord_webhook');
+      const data = await res.json();
+      statusEl.textContent = data.configured
+        ? 'Configured — alerts are active.'
+        : 'Not configured — set DRONEID_DISCORD_WEBHOOK on the server and restart.';
+      testBtn.disabled = !data.configured;
+    } catch (e) {
+      statusEl.textContent = 'Could not reach the server.';
+      testBtn.disabled = true;
+    }
+  }
+  refreshDiscordWebhookStatus();
+
+  document.getElementById('discord-webhook-test').addEventListener('click', async () => {
+    const statusEl = document.getElementById('discord-webhook-status');
+    statusEl.textContent = 'Sending…';
+    try {
+      const res = await fetch('/api/discord_webhook/test', { method: 'POST' });
+      const data = await res.json();
+      statusEl.textContent = res.ok ? 'Test sent — check Discord.' : (data.error || 'Test failed.');
+    } catch (e) {
+      statusEl.textContent = 'Could not reach the server.';
+    }
   });
 }
 

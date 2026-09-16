@@ -19,6 +19,8 @@ import logging
 import math
 import os
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
@@ -29,6 +31,19 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+try:
+    from dotenv import load_dotenv
+    # Looked for next to this file specifically (not the process's current
+    # working directory), so it's found the same way regardless of where
+    # you launch the server from — same convention as the SQLite DB path
+    # below. Silently does nothing if the file isn't there; env vars set
+    # directly in the shell/systemd/etc. still work exactly as before and
+    # take priority over anything in .env (load_dotenv doesn't overwrite
+    # variables that are already set).
+    load_dotenv(os.path.join(os.path.dirname(os.path.realpath(__file__)), ".env"))
+except ImportError:
+    pass  # python-dotenv not installed — fine, .env is an optional convenience
 
 import db
 
@@ -487,12 +502,17 @@ async def persist_update(track: DroneTrack):
         key, track.mac, track.serial, track.registration_id,
         track.ua_type, track.protocol_version, track.last_seen,
     )
-    if key not in active_flights:
+    is_new = key not in active_flights
+    if is_new:
         active_flights[key] = await db.start_flight(key, track.mac, track.serial, track.last_seen)
     track.flight_id = active_flights[key]
     point_fields = {c: getattr(track, c, None) for c in db.POINT_COLUMNS}
     await db.add_point(track.flight_id, track.last_seen, point_fields)
     track.nickname = catalog_nicknames.get(key)
+
+    if is_new and key != TEST_DRONE_SERIAL:
+        # Fire-and-forget: never let a slow/unreachable webhook stall ingest.
+        asyncio.create_task(send_new_drone_alert(track))
 
 
 async def watch_connection_state(monitor, channel: str):
@@ -582,6 +602,103 @@ async def health_broadcaster():
             await manager.broadcast({"type": "health", "health": compute_health()})
         except Exception:
             log.exception("Error in health broadcaster loop")
+
+
+# ---- Discord webhook alerts ----
+
+DISCORD_ALERT_TIMEOUT_S = 5  # keep short so an unreachable webhook can't back up ingest
+
+# Read once from the environment at startup, not stored in the DB — this
+# repo is meant to be pushed to source control, and a webhook URL is a
+# bearer secret (anyone who has it can post into that channel), so it
+# belongs in the deployment environment, not in a file that could get
+# committed or synced alongside everything else.
+discord_webhook_url: Optional[str] = os.environ.get("DRONEID_DISCORD_WEBHOOK") or None
+if discord_webhook_url and not discord_webhook_url.startswith((
+    "https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/",
+)):
+    log.warning(
+        "DRONEID_DISCORD_WEBHOOK is set but doesn't look like a Discord webhook URL "
+        "(expected it to start with https://discord.com/api/webhooks/) — alerts will "
+        "likely fail to send"
+    )
+# Cached separately from the DB so building an alert never needs a DB round
+# trip on the hot path; kept in sync with /api/station's PUT/DELETE.
+station_cache: Optional[dict] = None
+
+
+def haversine_meters(lat1, lon1, lat2, lon2) -> float:
+    R = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlambda / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def meters_to_feet(m: float) -> float:
+    return m * 3.28084
+
+
+def mps_to_mph(mps: float) -> float:
+    return mps * 2.23694
+
+
+def build_new_drone_message(track: "DroneTrack") -> str:
+    """Builds the alert text for a brand-new (non-test) detection. Uses
+    imperial units throughout (feet/mph) to match the "feet from station"
+    phrasing this was specified with."""
+    name = track.nickname or "New Drone"
+    header = f"{name} Detected"
+
+    has_pos = track.lat is not None and track.lon is not None
+    if not has_pos:
+        return f"{header} - No location information available"
+
+    station_clause = None
+    if station_cache and station_cache.get("lat") is not None and station_cache.get("lon") is not None:
+        dist_ft = meters_to_feet(
+            haversine_meters(station_cache["lat"], station_cache["lon"], track.lat, track.lon)
+        )
+        station_clause = f"({dist_ft:.0f} feet from station)"
+
+    # op_status is the direct Remote ID signal for this ("Ground", "Airborne",
+    # etc.); anything other than "Ground" (including unknown/missing) is
+    # treated as flying, since a device actively broadcasting is more likely
+    # airborne than not.
+    is_landed = (track.op_status or "").strip().lower() == "ground"
+    status_clause = "Currently landed" if is_landed else "Currently flying"
+    if not is_landed and track.speed is not None:
+        status_clause += f" at {mps_to_mph(track.speed):.0f} mph"
+    if track.heading is not None:
+        status_clause += f" and heading {track.heading:.0f}\u00b0"
+
+    has_op = track.op_lat is not None and track.op_lon is not None
+    controller_clause = "Controller located" if has_op else "Controller not located"
+
+    message = header
+    if station_clause:
+        message += f" {station_clause}"
+    message += f", {status_clause} - {controller_clause}"
+    return message
+
+
+def _post_discord_webhook_sync(url: str, content: str):
+    payload = json.dumps({"content": content}).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    try:
+        urllib.request.urlopen(req, timeout=DISCORD_ALERT_TIMEOUT_S)
+    except Exception:
+        log.exception("Failed to send Discord webhook alert")
+
+
+async def send_new_drone_alert(track: "DroneTrack"):
+    if not discord_webhook_url:
+        return
+    message = build_new_drone_message(track)
+    await asyncio.to_thread(_post_discord_webhook_sync, discord_webhook_url, message)
 
 
 # ---- synthetic test drone, for exercising the real pipeline without RF hardware ----
@@ -724,8 +841,15 @@ class StationBody(BaseModel):
 
 @app.on_event("startup")
 async def startup():
+    global station_cache
     db.init(os.environ.get("DRONEID_DB_PATH", os.path.join(os.path.dirname(__file__), "droneid.db")))
     catalog_nicknames.update(await db.get_catalog())
+    raw_station = await db.get_setting("station")
+    if raw_station:
+        try:
+            station_cache = json.loads(raw_station)
+        except json.JSONDecodeError:
+            station_cache = None
     asyncio.create_task(zmq_listener())
     asyncio.create_task(sniffer_health_listener(BT_ZMQ_ADDR, "bluetooth"))
     asyncio.create_task(sniffer_health_listener(WIFI_ZMQ_ADDR, "wifi"))
@@ -752,13 +876,38 @@ async def api_get_station():
 async def api_set_station(body: StationBody):
     if not (-90 <= body.lat <= 90) or not (-180 <= body.lon <= 180):
         return JSONResponse({"error": "lat/lon out of range"}, status_code=400)
+    global station_cache
     await db.set_setting("station", json.dumps({"lat": body.lat, "lon": body.lon}))
+    station_cache = {"lat": body.lat, "lon": body.lon}
     return {"ok": True, "lat": body.lat, "lon": body.lon}
 
 
 @app.delete("/api/station")
 async def api_delete_station():
+    global station_cache
     await db.delete_setting("station")
+    station_cache = None
+    return {"ok": True}
+
+
+@app.get("/api/discord_webhook")
+async def api_get_discord_webhook():
+    """Status only — deliberately never returns the actual URL. It's read
+    from the DRONEID_DISCORD_WEBHOOK environment variable at startup, not
+    stored anywhere the app itself manages, so there's no save/clear
+    endpoint for it: changing it means changing the environment and
+    restarting the process, same as any other env-configured setting here."""
+    return {"configured": discord_webhook_url is not None}
+
+
+@app.post("/api/discord_webhook/test")
+async def api_test_discord_webhook():
+    if not discord_webhook_url:
+        return JSONResponse({"error": "No webhook configured."}, status_code=400)
+    await asyncio.to_thread(
+        _post_discord_webhook_sync, discord_webhook_url,
+        "DroneID test alert — if you can see this, the webhook is working.",
+    )
     return {"ok": True}
 
 
