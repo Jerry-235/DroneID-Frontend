@@ -683,15 +683,38 @@ def build_new_drone_message(track: "DroneTrack") -> str:
     return message
 
 
-def _post_discord_webhook_sync(url: str, content: str):
+def _post_discord_webhook_sync(url: str, content: str) -> tuple[bool, str]:
+    """Returns (success, detail). Never raises — callers decide whether the
+    detail matters (the fire-and-forget alert path just logs it; the test
+    endpoint surfaces it to the UI)."""
     payload = json.dumps({"content": content}).encode("utf-8")
     req = urllib.request.Request(
-        url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
+        url,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            # Discord sits behind Cloudflare, which blocks requests carrying
+            # urllib's default User-Agent ("Python-urllib/3.x") as likely
+            # bot/scraper traffic — this alone is the usual cause of an
+            # otherwise-inexplicable 403 on an otherwise-correct webhook URL.
+            "User-Agent": "DroneID-Frontend (https://github.com/Jerry-235/DroneID-Frontend, 1.0)",
+        },
+        method="POST",
     )
     try:
         urllib.request.urlopen(req, timeout=DISCORD_ALERT_TIMEOUT_S)
-    except Exception:
+        return True, "ok"
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")[:300]
+        except Exception:
+            pass
+        log.exception("Failed to send Discord webhook alert (HTTP %s)", e.code)
+        return False, f"HTTP {e.code}: {body or e.reason}"
+    except Exception as e:
         log.exception("Failed to send Discord webhook alert")
+        return False, str(e)
 
 
 async def send_new_drone_alert(track: "DroneTrack"):
@@ -904,10 +927,12 @@ async def api_get_discord_webhook():
 async def api_test_discord_webhook():
     if not discord_webhook_url:
         return JSONResponse({"error": "No webhook configured."}, status_code=400)
-    await asyncio.to_thread(
+    ok, detail = await asyncio.to_thread(
         _post_discord_webhook_sync, discord_webhook_url,
         "DroneID test alert — if you can see this, the webhook is working.",
     )
+    if not ok:
+        return JSONResponse({"error": f"Discord rejected the request — {detail}"}, status_code=502)
     return {"ok": True}
 
 
