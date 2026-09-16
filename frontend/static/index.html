@@ -602,6 +602,29 @@ function saveUnitSystem() {
 
 let unitSystem = loadUnitSystem();
 
+// ---------------- admin view gate ----------------
+// Purely a client-side declutter for casual viewers, not real access
+// control — anyone who opens dev tools can flip this themselves. Visiting
+// once with ?admin=1 unlocks it permanently for that browser; the flag then
+// lives in localStorage and the param is stripped from the URL so it's not
+// visible or accidentally shared via a bookmark/link.
+const ADMIN_KEY = 'droneid_admin_v1';
+
+function checkAdminUnlock() {
+  const params = new URLSearchParams(location.search);
+  if (params.get('admin') === '1') {
+    try { localStorage.setItem(ADMIN_KEY, '1'); } catch (e) { /* ignore */ }
+    params.delete('admin');
+    const clean = location.pathname + (params.toString() ? '?' + params.toString() : '') + location.hash;
+    history.replaceState({}, '', clean);
+  }
+}
+checkAdminUnlock();
+
+function isAdmin() {
+  try { return localStorage.getItem(ADMIN_KEY) === '1'; } catch (e) { return false; }
+}
+
 function metersToFeet(m) { return m * 3.28084; }
 function mpsToMph(mps) { return mps * 2.23694; }
 
@@ -766,8 +789,11 @@ function renderSettingsPanel() {
     }).join('');
   });
   html += unitsHtml;
-  html += stationHtml;
-  html += debugHtml;
+  const admin = isAdmin();
+  if (admin) {
+    html += stationHtml;
+    html += debugHtml;
+  }
   sidebar.innerHTML = html;
 
   sidebar.querySelectorAll('input[type=checkbox]').forEach(cb => {
@@ -787,6 +813,8 @@ function renderSettingsPanel() {
       refreshOpenInfoBoxes();
     });
   });
+
+  if (!admin) return; // station/debug controls below don't exist in the DOM for a casual viewer
 
   async function refreshTestDroneStatus() {
     const statusEl = document.getElementById('test-drone-status');
