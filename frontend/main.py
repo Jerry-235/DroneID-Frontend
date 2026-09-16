@@ -950,10 +950,11 @@ async def api_get_discord_webhook():
 async def api_test_discord_webhook():
     if not discord_webhook_url:
         return JSONResponse({"error": "No webhook configured."}, status_code=400)
-    ok, detail = await asyncio.to_thread(
-        _post_discord_webhook_sync, discord_webhook_url,
-        "## DroneID Test Alert\n```If you can see this, the webhook is working.```",
-    )
+    # Same role-ping logic as a real alert, so this test actually exercises
+    # that path too — not just the webhook URL itself.
+    role_ping = f" <@&{DISCORD_ROLE_ID}>" if DISCORD_ROLE_ID else ""
+    test_message = f"## DroneID Test Alert{role_ping}\n```If you can see this, the webhook is working.```"
+    ok, detail = await asyncio.to_thread(_post_discord_webhook_sync, discord_webhook_url, test_message)
     if not ok:
         return JSONResponse({"error": f"Discord rejected the request — {detail}"}, status_code=502)
     return {"ok": True}
