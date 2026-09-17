@@ -411,6 +411,18 @@ function haversineMeters(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+function slantRangeMeters(lat1, lon1, lat2, lon2, verticalMeters) {
+  // True straight-line (slant range) distance, not just the flat ground
+  // track: the horizontal (lateral) haversine distance and the vertical
+  // separation are the two legs of a right triangle, and the actual
+  // distance between the two points is the hypotenuse. Falls back to the
+  // horizontal-only distance if the vertical leg isn't known, rather than
+  // returning nothing.
+  const horizontal = haversineMeters(lat1, lon1, lat2, lon2);
+  if (verticalMeters === null || verticalMeters === undefined) return horizontal;
+  return Math.sqrt(horizontal * horizontal + verticalMeters * verticalMeters);
+}
+
 function fmtDistance(meters) {
   // Always feet in imperial — never auto-switching to miles. The four
   // distance-to-X metrics get compared against each other at a glance in
@@ -655,20 +667,25 @@ function fieldValue(d, key) {
     return Math.max(0, (Date.now() / 1000) - d.last_seen);
   }
   if (key === 'station_distance') {
+    // Drone <-> station: station assumed 0ft AGL, so the drone's own
+    // height_agl is the vertical leg between them.
     if (!stationCoord || d.lat === null || d.lat === undefined || d.lon === null || d.lon === undefined) return null;
-    return haversineMeters(stationCoord.lat, stationCoord.lon, d.lat, d.lon);
+    return slantRangeMeters(stationCoord.lat, stationCoord.lon, d.lat, d.lon, d.height_agl);
   }
   if (key === 'op_station_distance') {
+    // Operator <-> station: both assumed 0ft AGL, so there's no vertical
+    // leg — this one stays a flat ground distance.
     if (!stationCoord || d.op_lat === null || d.op_lat === undefined || d.op_lon === null || d.op_lon === undefined) return null;
     return haversineMeters(stationCoord.lat, stationCoord.lon, d.op_lat, d.op_lon);
   }
   if (key === 'op_drone_distance' || key === 'drone_op_distance') {
-    // Same physical distance either way (haversine is symmetric) — two
-    // separate toggle keys just so it can be shown under Drone and/or
-    // Operator independently.
+    // Same physical distance either way (symmetric) — two separate toggle
+    // keys just so it can be shown under Drone and/or Operator
+    // independently. Operator assumed 0ft AGL, so the drone's own
+    // height_agl is again the vertical leg.
     if (d.op_lat === null || d.op_lat === undefined || d.op_lon === null || d.op_lon === undefined) return null;
     if (d.lat === null || d.lat === undefined || d.lon === null || d.lon === undefined) return null;
-    return haversineMeters(d.op_lat, d.op_lon, d.lat, d.lon);
+    return slantRangeMeters(d.op_lat, d.op_lon, d.lat, d.lon, d.height_agl);
   }
   return d[key];
 }
