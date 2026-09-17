@@ -73,7 +73,7 @@
   .health-item{ display:flex; align-items:center; gap:6px; position:relative; cursor:default; }
   .health-tooltip{
     display:none;
-    position:fixed; z-index:2000;
+    position:fixed; z-index:99999;
     width:230px;
     background:var(--panel-raised); border:1px solid var(--hairline); border-radius:var(--radius);
     padding:10px 12px; box-shadow:0 10px 24px rgba(0,0,0,0.5);
@@ -1784,6 +1784,16 @@ setInterval(() => {
 document.querySelectorAll('.health-item').forEach(item => {
   const tooltip = item.querySelector('.health-tooltip');
   if (!tooltip) return;
+
+  // Move the tooltip to be a direct child of <body> rather than staying
+  // nested inside .health-item/.topbar. It's already position:fixed with
+  // coordinates computed in viewport space below, so this doesn't change
+  // where it appears — but on mobile, a fixed element can still end up
+  // visually trapped behind other content (like the Leaflet map) due to
+  // stacking-context quirks from ancestor elements, even with a high
+  // z-index. Making it a top-level element with no ancestor to interfere
+  // sidesteps that entirely.
+  document.body.appendChild(tooltip);
 
   function show() {
     const rect = item.getBoundingClientRect();
