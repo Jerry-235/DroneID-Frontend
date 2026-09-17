@@ -17,7 +17,7 @@
     --text-muted:    #7C8B99;
     --amber:         #E8A33D;   /* live drone / primary accent */
     --amber-dim:     #7A5A28;
-    --cyan:          #4FD1C5;   /* operator position / history playback */
+    --connected:     #60A5FA;   /* WS connection status only — kept distinct from the green health dots */
     --red:           #E0645A;   /* dropped/error */
     --radius: 3px;
   }
@@ -64,7 +64,7 @@
     width:8px;height:8px;border-radius:50%; background:var(--red);
     box-shadow:0 0 0 3px rgba(224,100,90,0.15); transition:background .2s, box-shadow .2s;
   }
-  .dot.connected{ background:var(--cyan); box-shadow:0 0 0 3px rgba(79,209,197,0.15); }
+  .dot.connected{ background:var(--connected); box-shadow:0 0 0 3px rgba(96,165,250,0.15); }
   .dot.health-ok{ background:#34D399; box-shadow:0 0 0 3px rgba(52,211,153,0.15); }
   .dot.health-yellow{ background:var(--amber); box-shadow:0 0 0 3px rgba(232,163,61,0.15); }
   .health-group{
@@ -132,8 +132,11 @@
     padding:5px 8px; border-radius:var(--radius); cursor:pointer;
   }
   .history-track-btn:hover{ color:var(--text); border-color:var(--text-muted); }
-  .history-track-btn.active{
-    background:rgba(79,209,197,0.12); color:var(--cyan); border-color:rgba(79,209,197,0.4);
+  .history-track-btn.active-drone{
+    background:rgba(249,115,22,0.12); color:#F97316; border-color:rgba(249,115,22,0.4);
+  }
+  .history-track-btn.active-operator{
+    background:rgba(167,139,250,0.12); color:#A78BFA; border-color:rgba(167,139,250,0.4);
   }
   .unit-toggle-row{ padding:0 14px 14px; display:flex; gap:8px; }
   .unit-btn{
@@ -357,7 +360,7 @@ let stationMarker = null;
 // the dashed drone<->operator link, and a highlight ring on the drone icon
 // when either half of the pair is selected — keeps the pairing visually
 // obvious even with several drones/operators on screen at once.
-const PAIR_COLORS = ['#F97316', '#2DD4BF', '#F43F5E', '#A78BFA', '#60A5FA', '#4ADE80', '#F472B6', '#FBBF24'];
+const PAIR_COLORS = ['#F97316', '#6366F1', '#F43F5E', '#A78BFA', '#60A5FA', '#4ADE80', '#F472B6', '#FBBF24'];
 let pairColorIndex = 0;
 function nextPairColor() {
   const c = PAIR_COLORS[pairColorIndex % PAIR_COLORS.length];
@@ -1222,7 +1225,7 @@ function popupHtml(d, color) {
 function operatorPopupHtml(d, color) {
   const name = d.nickname || d.serial || d.mac;
   return `
-    ${popupBadgeHtml('OPERATOR', color || '#4FD1C5')}
+    ${popupBadgeHtml('OPERATOR', color || '#A78BFA')}
     <div class="popup-title">${escapeHtml(name)}</div>
     ${renderInfoBox(d, ['Basic', 'Operator'])}
   `;
@@ -1432,8 +1435,8 @@ async function loadHistoryList() {
     const hasOpData = isOpen && !!historyState.opMarker;
     const expandedHtml = isOpen ? `
         <div class="history-track-buttons">
-          <button class="history-track-btn${historySelectedTarget === 'drone' ? ' active' : ''}" data-target="drone">Track Drone</button>
-          ${hasOpData ? `<button class="history-track-btn${historySelectedTarget === 'operator' ? ' active' : ''}" data-target="operator">Track Op</button>` : ''}
+          <button class="history-track-btn${historySelectedTarget === 'drone' ? ' active-drone' : ''}" data-target="drone">Track Drone</button>
+          ${hasOpData ? `<button class="history-track-btn${historySelectedTarget === 'operator' ? ' active-operator' : ''}" data-target="operator">Track Op</button>` : ''}
         </div>` : '';
     return `
       <div class="track-row${sel}" data-flight="${f.id}" data-key="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">
@@ -1558,7 +1561,8 @@ function selectHistoryTarget(target) {
   // Update just the two track-target buttons in place rather than
   // re-fetching/re-rendering the whole flight list for a simple toggle.
   document.querySelectorAll('.history-track-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.target === target);
+    btn.classList.toggle('active-drone', btn.dataset.target === 'drone' && btn.dataset.target === target);
+    btn.classList.toggle('active-operator', btn.dataset.target === 'operator' && btn.dataset.target === target);
   });
 }
 
