@@ -17,7 +17,6 @@
     --text-muted:    #7C8B99;
     --amber:         #E8A33D;   /* live drone / primary accent */
     --amber-dim:     #7A5A28;
-    --connected:     #60A5FA;   /* WS connection status only — kept distinct from the green health dots */
     --red:           #E0645A;   /* dropped/error */
     --radius: 3px;
   }
@@ -64,7 +63,7 @@
     width:8px;height:8px;border-radius:50%; background:var(--red);
     box-shadow:0 0 0 3px rgba(224,100,90,0.15); transition:background .2s, box-shadow .2s;
   }
-  .dot.connected{ background:var(--connected); box-shadow:0 0 0 3px rgba(96,165,250,0.15); }
+  .dot.connected{ background:#34D399; box-shadow:0 0 0 3px rgba(52,211,153,0.15); }
   .dot.health-ok{ background:#34D399; box-shadow:0 0 0 3px rgba(52,211,153,0.15); }
   .dot.health-yellow{ background:var(--amber); box-shadow:0 0 0 3px rgba(232,163,61,0.15); }
   .health-group{
@@ -1361,6 +1360,9 @@ function renderLiveSidebar() {
 
 let historyState = { flightId: null, flightMeta: null, points: [], marker: null, opMarker: null, line: null, opLine: null, link: null, playing: false, timer: null };
 let historySelectedTarget = 'drone'; // 'drone' | 'operator' — which popup is tracked during playback
+let historyRequestId = 0; // guards against a slow/stale fetch finishing after a newer flight was
+                           // already selected — without this, both flights' markers could end up
+                           // on the map at once (the intermittent "duplicate drone" bug)
 
 function historyPointData(idx) {
   const p = historyState.points[idx] || {};
@@ -1482,8 +1484,10 @@ async function selectHistoryFlight(flightId) {
   stopPlayback();
   historyLayer.clearLayers();
   historySelectedTarget = 'drone'; // always default back to Track Drone on a fresh flight selection
+  const myRequestId = ++historyRequestId;
   const res = await fetch(`/api/flights/${flightId}`);
   const data = await res.json();
+  if (myRequestId !== historyRequestId) return; // a newer selection happened while this was in flight — discard this stale one
   // Master, unfiltered, in timestamp order — the scrub index maps 1:1 to
   // this array so the drone and operator positions at any given index are
   // guaranteed to be from the same moment in time, even though either one
@@ -1798,6 +1802,25 @@ document.querySelectorAll('.health-item').forEach(item => {
   item.addEventListener('mouseleave', hide);
   item.addEventListener('focus', show);
   item.addEventListener('blur', hide);
+  // Hover/focus alone don't reliably work on mobile — iOS Safari (and some
+  // Android browsers) don't focus an arbitrary tabindex'd element on tap
+  // the way a real button/link gets focused, so the tooltip never showed
+  // there. This gives tap-to-toggle explicitly, on top of hover/focus, so
+  // both desktop and mobile work.
+  item.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const alreadyOpen = tooltip.classList.contains('show');
+    document.querySelectorAll('.health-tooltip.show').forEach(t => t.classList.remove('show'));
+    if (!alreadyOpen) show();
+  });
+});
+
+// Tapping anywhere outside a health-item closes whatever tooltip is open —
+// mobile has no hover-away equivalent to fall back on.
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.health-item')) {
+    document.querySelectorAll('.health-tooltip.show').forEach(t => t.classList.remove('show'));
+  }
 });
 
 // If the bar scrolls while a tooltip is open, its position would go stale —
