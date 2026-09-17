@@ -1781,6 +1781,17 @@ setInterval(() => {
 // silently clipped by the same overflow that makes the bar scrollable.
 // Positioned here instead, in viewport coordinates, so it always renders on
 // top regardless of scroll state.
+// Only devices that genuinely support hovering (a real mouse) get the
+// mouseenter/focus-based listeners below. On touch devices, a fresh tap
+// fires a synthetic "mouseenter" first (browsers do this to support
+// :hover-styled elements), immediately followed by the real "click" for
+// that same tap — our click handler would then see the tooltip already
+// open (from that synthetic mouseenter a moment earlier) and treat it as
+// "already open, close it", making it flash and vanish on the very first
+// tap. Skipping hover/focus entirely on touch devices removes that race:
+// only "click" ever fires per tap, so toggle logic stays unambiguous.
+const supportsRealHover = window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+
 document.querySelectorAll('.health-item').forEach(item => {
   const tooltip = item.querySelector('.health-tooltip');
   if (!tooltip) return;
@@ -1808,15 +1819,14 @@ document.querySelectorAll('.health-item').forEach(item => {
     tooltip.classList.remove('show');
   }
 
-  item.addEventListener('mouseenter', show);
-  item.addEventListener('mouseleave', hide);
-  item.addEventListener('focus', show);
-  item.addEventListener('blur', hide);
-  // Hover/focus alone don't reliably work on mobile — iOS Safari (and some
-  // Android browsers) don't focus an arbitrary tabindex'd element on tap
-  // the way a real button/link gets focused, so the tooltip never showed
-  // there. This gives tap-to-toggle explicitly, on top of hover/focus, so
-  // both desktop and mobile work.
+  if (supportsRealHover) {
+    item.addEventListener('mouseenter', show);
+    item.addEventListener('mouseleave', hide);
+    item.addEventListener('focus', show);
+    item.addEventListener('blur', hide);
+  }
+  // Tap-to-toggle — the only interaction touch devices get, deliberately,
+  // per the note above.
   item.addEventListener('click', (e) => {
     e.stopPropagation();
     const alreadyOpen = tooltip.classList.contains('show');
