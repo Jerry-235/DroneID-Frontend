@@ -1386,7 +1386,7 @@ function historyPopupHtml(idx) {
   const d = historyPointData(idx);
   const name = historyState.flightMeta ? historyState.flightMeta.display_name : '';
   return `
-    ${popupBadgeHtml('AIRCRAFT', '#4FD1C5')}
+    ${popupBadgeHtml('AIRCRAFT', '#F97316')}
     <div class="popup-title">${escapeHtml(name)}</div>
     ${renderInfoBox(d, ['Basic', 'Drone'])}
   `;
@@ -1508,7 +1508,7 @@ async function selectHistoryFlight(flightId) {
   const boundsLayers = [];
 
   if (dronePts.length > 1) {
-    historyState.line = L.polyline(dronePts.map(p => [p.lat, p.lon]), { color: '#4FD1C5', weight: 3, opacity: 0.8 });
+    historyState.line = L.polyline(dronePts.map(p => [p.lat, p.lon]), { color: '#F97316', weight: 3, opacity: 0.8 });
     historyLayer.addLayer(historyState.line);
     boundsLayers.push(historyState.line);
   }
@@ -1518,7 +1518,7 @@ async function selectHistoryFlight(flightId) {
     boundsLayers.push(historyState.opLine);
   }
   if (dronePts.length > 0) {
-    historyState.marker = L.marker([dronePts[0].lat, dronePts[0].lon], { icon: droneIconSvg('#4FD1C5', dronePts[0].heading) });
+    historyState.marker = L.marker([dronePts[0].lat, dronePts[0].lon], { icon: droneIconSvg('#F97316', dronePts[0].heading) });
     historyState.marker.bindPopup(historyPopupHtml(0), { autoClose: false });
     historyState.marker.on('click', () => selectHistoryTarget('drone'));
     historyLayer.addLayer(historyState.marker);
@@ -1595,7 +1595,7 @@ function scrubToIndex(idx) {
   // shouldn't erase the other's last known position.
   if (hasDrone && historyState.marker) {
     historyState.marker.setLatLng([p.lat, p.lon]);
-    historyState.marker.setIcon(droneIconSvg('#4FD1C5', p.heading));
+    historyState.marker.setIcon(droneIconSvg('#F97316', p.heading));
     historyState.marker.setPopupContent(historyPopupHtml(idx));
   }
   if (hasOp && historyState.opMarker) {
