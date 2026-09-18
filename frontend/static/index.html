@@ -102,6 +102,13 @@
   .track-row.selected{background:var(--panel-raised);border-left:2px solid var(--amber);padding-left:12px;}
   .track-row .row-top{ display:flex; align-items:center; gap:8px; }
   .status-chip{ width:7px;height:7px;border-radius:50%;flex:0 0 auto; }
+  /* Says in words what the gray icon says on the map, for when the track
+     you're wondering about is off-screen or one of several grayed at once. */
+  .stale-tag{
+    flex:0 0 auto; font-family:'IBM Plex Mono',monospace; font-size:9px;
+    font-weight:600; letter-spacing:0.08em; color:#7C8B99;
+    border:1px solid rgba(124,139,153,0.45); border-radius:3px; padding:1px 4px;
+  }
   .track-name{
     font-size:13px; font-weight:600; overflow:hidden;
     text-overflow:ellipsis; white-space:nowrap; flex:1 1 auto;
@@ -365,6 +372,51 @@ function nextPairColor() {
   const c = PAIR_COLORS[pairColorIndex % PAIR_COLORS.length];
   pairColorIndex++;
   return c;
+}
+
+// A track that's gone quiet (45s by default, DRONEID_STALE_AFTER_S on the
+// server) drops its identity color for this neutral gray and parks at its
+// last known position until it's dropped altogether 60s later. Deliberately
+// not in PAIR_COLORS, so gray never doubles as some drone's identity — but
+// it does mean several stale tracks look alike, which is fine: they're all
+// saying the same thing.
+const STALE_COLOR = '#7C8B99';
+
+// The color everything belonging to this track should currently be drawn in
+// — icon, operator diamond, pair link, trail, popup badge, sidebar accents.
+// One place to ask, so no part of the pair can be left showing the live
+// color after the rest has gone gray.
+function entryColor(entry) {
+  if (!entry) return STALE_COLOR;
+  return (entry.data && entry.data.status === 'stale') ? STALE_COLOR : entry.pairColor;
+}
+
+// Which detection segment of its flight a point (or a live track) belongs
+// to. A flight gets a new segment each time the aircraft drops off the map
+// and comes back inside the reappearance window — same flight, but with a
+// gap in the middle that no line should be drawn across. Rows written
+// before segments existed, and any payload from an older server, read as
+// segment 0.
+function pointSegment(p) {
+  const s = p && p.segment;
+  return (s === null || s === undefined) ? 0 : s;
+}
+
+// Splits an ordered point list into one run of coordinates per segment, for
+// handing to L.polyline as a multi-line (Leaflet accepts an array of latlng
+// arrays and draws each as its own disconnected stroke).
+function segmentedLatLngs(points, toLatLng) {
+  const runs = [];
+  let current = null;
+  points.forEach(p => {
+    const s = pointSegment(p);
+    if (current === null || s !== current.seg) {
+      current = { seg: s, pts: [] };
+      runs.push(current);
+    }
+    current.pts.push(toLatLng(p));
+  });
+  return runs.map(r => r.pts);
 }
 
 // ---------------- shared helpers ----------------
@@ -753,8 +805,8 @@ function refreshOpenInfoBoxes() {
   if (selectedKey) {
     const entry = droneMarkers.get(selectedKey);
     if (entry) {
-      if (entry.marker) entry.marker.setPopupContent(popupHtml(entry.data, entry.pairColor));
-      if (entry.opMarker) entry.opMarker.setPopupContent(operatorPopupHtml(entry.data, entry.pairColor));
+      if (entry.marker) entry.marker.setPopupContent(popupHtml(entry.data, entryColor(entry)));
+      if (entry.opMarker) entry.opMarker.setPopupContent(operatorPopupHtml(entry.data, entryColor(entry)));
     }
   }
   if (mode === 'history' && historyState.marker) {
@@ -997,9 +1049,17 @@ function upsertDrone(d) {
     entry.flightId = d.flight_id;
     fetch(`/api/flights/${d.flight_id}`).then(r => r.json()).then(data => {
       const points = data.points || [];
-      const fetchedDrone = points.filter(p => p.lat !== null && p.lon !== null).map(p => [p.lat, p.lon]);
+      // A flight that was resumed after a short disappearance still holds
+      // the earlier segments' points, but the live trail only wants the
+      // stretch since this aircraft came back — otherwise it would draw a
+      // straight line from wherever it vanished to wherever it reappeared.
+      const seg = pointSegment(d);
+      const inSegment = p => pointSegment(p) === seg;
+      const fetchedDrone = points
+        .filter(p => inSegment(p) && p.lat !== null && p.lon !== null)
+        .map(p => [p.lat, p.lon]);
       const fetchedOp = points
-        .filter(p => p.op_lat !== null && p.op_lon !== null && !(p.op_lat === 0 && p.op_lon === 0))
+        .filter(p => inSegment(p) && p.op_lat !== null && p.op_lon !== null && !(p.op_lat === 0 && p.op_lon === 0))
         .map(p => [p.op_lat, p.op_lon]);
       // This fetch is async, so by the time it resolves, live bursts may
       // already have pushed newer points into entry.path/opPath — merge
@@ -1024,7 +1084,7 @@ function upsertDrone(d) {
       updatePathVisibility(entry, d.key);
     }
     if (!entry.marker) {
-      entry.marker = L.marker(latlng, { icon: droneIconSvg(entry.pairColor, d.heading) });
+      entry.marker = L.marker(latlng, { icon: droneIconSvg(entryColor(entry), d.heading) });
       entry.marker.on('click', () => selectTrack(d.key, { fromMapClick: true }));
       // Leaflet's default autoClose would silently close this popup whenever
       // a different marker's popup opens, which fights with our own
@@ -1044,15 +1104,19 @@ function upsertDrone(d) {
       // right as you clicked the marker to open it, the click could miss
       // or get silently undone. Content updates below use setPopupContent
       // instead, which only touches the text, never the popup object itself.
-      entry.marker.bindPopup(popupHtml(d, entry.pairColor), { autoClose: false });
+      entry.marker.bindPopup(popupHtml(d, entryColor(entry)), { autoClose: false });
       entry.marker.bindTooltip(droneTooltipText(d), { direction: 'top' });
       liveLayer.addLayer(entry.marker);
     } else {
       entry.marker.setLatLng(latlng);
-      entry.marker.setPopupContent(popupHtml(d, entry.pairColor));
+      entry.marker.setPopupContent(popupHtml(d, entryColor(entry)));
       entry.marker.setTooltipContent(droneTooltipText(d));
     }
     updateDroneIcon(entry, d.key);
+    // Also re-run on plain status updates, not just when a new point lands:
+    // a track that has just gone stale by definition isn't sending points
+    // any more, so this is the only chance its trail gets to go gray too.
+    updatePathVisibility(entry, d.key);
     if (selectedKey === d.key && selectedTarget === 'drone') entry.marker.openPopup();
     if (!hasCentered) { map.setView(latlng, 14); hasCentered = true; }
   }
@@ -1067,7 +1131,7 @@ function upsertDrone(d) {
       updatePathVisibility(entry, d.key);
     }
     if (!entry.opMarker) {
-      entry.opMarker = L.marker(opLatlng, { icon: opIconSvg(entry.pairColor) });
+      entry.opMarker = L.marker(opLatlng, { icon: opIconSvg(entryColor(entry)) });
       entry.opMarker.bindTooltip('Operator / ground station', { direction: 'top' });
       entry.opMarker.on('click', () => selectOperator(d.key, { fromMapClick: true }));
       entry.opMarker.on('popupclose', () => {
@@ -1079,22 +1143,22 @@ function upsertDrone(d) {
           renderSidebar();
         }
       });
-      entry.opMarker.bindPopup(operatorPopupHtml(d, entry.pairColor), { autoClose: false });
+      entry.opMarker.bindPopup(operatorPopupHtml(d, entryColor(entry)), { autoClose: false });
       liveLayer.addLayer(entry.opMarker);
     } else {
       entry.opMarker.setLatLng(opLatlng);
-      entry.opMarker.setIcon(opIconSvg(entry.pairColor));
-      entry.opMarker.setPopupContent(operatorPopupHtml(d, entry.pairColor));
+      entry.opMarker.setIcon(opIconSvg(entryColor(entry)));
+      entry.opMarker.setPopupContent(operatorPopupHtml(d, entryColor(entry)));
     }
     if (selectedKey === d.key && selectedTarget === 'operator') entry.opMarker.openPopup();
     if (hasPos) {
       const linePts = [[d.lat, d.lon], opLatlng];
       if (!entry.link) {
-        entry.link = L.polyline(linePts, { color: entry.pairColor, weight: 1, dashArray: '4,4', opacity: 0.6 });
+        entry.link = L.polyline(linePts, { color: entryColor(entry), weight: 1, dashArray: '4,4', opacity: 0.6 });
         liveLayer.addLayer(entry.link);
       } else {
         entry.link.setLatLngs(linePts);
-        entry.link.setStyle({ color: entry.pairColor });
+        entry.link.setStyle({ color: entryColor(entry) });
       }
     }
   }
@@ -1104,13 +1168,13 @@ function upsertDrone(d) {
 
 function updateDroneIcon(entry, key) {
   if (!entry.marker) return;
-  const halo = (key === selectedKey) ? entry.pairColor : null;
-  entry.marker.setIcon(droneIconSvg(entry.pairColor, entry.data.heading, halo));
-  // Identity color stays constant regardless of freshness — "stale" is shown
-  // by fading the whole marker instead of swapping its hue, so the drone's
-  // color reads the same everywhere (icon, path, link, badge, sidebar) at
-  // every stage of its lifecycle, not just while freshly live.
-  entry.marker.setOpacity(entry.data.status === 'stale' ? 0.5 : 1);
+  const color = entryColor(entry);
+  const halo = (key === selectedKey) ? color : null;
+  entry.marker.setIcon(droneIconSvg(color, entry.data.heading, halo));
+  // Stale is signalled by the color change alone, at full opacity — the
+  // marker has another 60s to live and needs to stay readable for all of
+  // it, so it isn't faded on top of being grayed.
+  entry.marker.setOpacity(1);
 }
 
 function updatePathVisibility(entry, key) {
@@ -1126,7 +1190,7 @@ function updatePathVisibility(entry, key) {
   if (!droneFocused) {
     if (entry.pathLine) { liveLayer.removeLayer(entry.pathLine); entry.pathLine = null; }
   } else if (entry.path.length >= 2) {
-    const style = { color: entry.pairColor, weight: 3, opacity: 0.9 };
+    const style = { color: entryColor(entry), weight: 3, opacity: 0.9 };
     if (!entry.pathLine) {
       entry.pathLine = L.polyline(entry.path, style);
       liveLayer.addLayer(entry.pathLine);
@@ -1139,7 +1203,7 @@ function updatePathVisibility(entry, key) {
   if (!opFocused) {
     if (entry.opPathLine) { liveLayer.removeLayer(entry.opPathLine); entry.opPathLine = null; }
   } else if (entry.opPath.length >= 2) {
-    const style = { color: entry.pairColor, weight: 3, opacity: 0.9 };
+    const style = { color: entryColor(entry), weight: 3, opacity: 0.9 };
     if (!entry.opPathLine) {
       entry.opPathLine = L.polyline(entry.opPath, style);
       liveLayer.addLayer(entry.opPathLine);
@@ -1304,17 +1368,20 @@ function renderLiveSidebar() {
 
   sidebar.innerHTML = entries.map((entry) => {
     const d = entry.data;
-    const color = entry.pairColor;
+    // Same source of truth as the map markers, so a grayed icon never has a
+    // still-colored row (or the reverse) sitting next to it.
+    const color = entryColor(entry);
     const name = d.nickname || d.serial || d.mac;
     const sel = d.key === selectedKey ? ' selected' : '';
     const hasOp = d.op_lat !== null && d.op_lat !== undefined && d.op_lon !== null && d.op_lon !== undefined;
-    const chipColor = d.status === 'live' ? color : '#7C8B99';
-    const opColor = hasOp ? color : '#7C8B99';
+    const chipColor = d.status === 'live' ? color : STALE_COLOR;
+    const opColor = hasOp ? color : STALE_COLOR;
     return `
       <div class="track-row${sel}" data-key="${escapeHtml(d.key)}" style="${sel ? `border-left-color:${color};` : ''}">
         <div class="row-top">
           <span class="status-chip" style="background:${chipColor};box-shadow:${d.status === 'live' ? `0 0 6px ${chipColor}` : 'none'};"></span>
           <span class="track-name">${escapeHtml(name)}</span>
+          ${d.status === 'stale' ? '<span class="stale-tag">STALE</span>' : ''}
           <button class="pencil-btn" data-rename="${escapeHtml(d.key)}" data-name="${escapeHtml(name)}">✎</button>
         </div>
         <div class="track-sub">
@@ -1453,6 +1520,7 @@ async function loadHistoryList() {
         <div class="track-sub">
           <span>${fmtDuration(f.started_at, f.last_point_at)}</span>
           <span>${f.point_count} pts</span>
+          ${f.segment_count > 1 ? `<span title="Detection dropped out and the same aircraft came back within the merge window, so these were recorded as one flight">${f.segment_count} segments</span>` : ''}
           ${inProgress ? '<span style="color:#E8A33D">in progress</span>' : ''}
         </div>
         ${expandedHtml}
@@ -1514,13 +1582,17 @@ async function selectHistoryFlight(flightId) {
   const opPts = allPoints.filter(p => p.op_lat !== null && p.op_lon !== null && !(p.op_lat === 0 && p.op_lon === 0));
   const boundsLayers = [];
 
+  // Drawn per segment rather than as one continuous run: a flight that was
+  // resumed after the aircraft briefly dropped off the map has a gap in the
+  // middle, and joining across it would invent a flight path that never
+  // happened. Separate strokes leave the gap visible for what it is.
   if (dronePts.length > 1) {
-    historyState.line = L.polyline(dronePts.map(p => [p.lat, p.lon]), { color: '#F97316', weight: 3, opacity: 0.8 });
+    historyState.line = L.polyline(segmentedLatLngs(dronePts, p => [p.lat, p.lon]), { color: '#F97316', weight: 3, opacity: 0.8 });
     historyLayer.addLayer(historyState.line);
     boundsLayers.push(historyState.line);
   }
   if (opPts.length > 1) {
-    historyState.opLine = L.polyline(opPts.map(p => [p.op_lat, p.op_lon]), { color: '#A78BFA', weight: 2, opacity: 0.6, dashArray: '4,4' });
+    historyState.opLine = L.polyline(segmentedLatLngs(opPts, p => [p.op_lat, p.op_lon]), { color: '#A78BFA', weight: 2, opacity: 0.6, dashArray: '4,4' });
     historyLayer.addLayer(historyState.opLine);
     boundsLayers.push(historyState.opLine);
   }

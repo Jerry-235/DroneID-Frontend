@@ -45,6 +45,57 @@ Each of the three health dots is one of three states:
 - **Green** — connected and a message arrived recently. ZMQ only ever shows
   green or red (it's your own data pipeline, not a sniffer to merely watch).
 
+## Marker lifecycle, and flights that survive a dropout
+
+A track on the live map goes through three stages, measured in seconds of
+silence since its last received packet:
+
+| Silence | Status | On the map |
+| --- | --- | --- |
+| 0–45s | `live` | Normal identity color |
+| 45–105s | `stale` | Icon, operator diamond, pair link and trail all turn **gray**; the marker stays parked at its last known position. Any number of tracks can sit here at once. |
+| >105s | `dropped` | Removed from the map, flight closed out in the DB |
+
+So: 45 seconds to go gray, then a further 60 seconds parked before it
+disappears — 1m45s of dead air in total. The sidebar row for a stale track
+goes gray too and picks up a small `STALE` tag.
+
+```bash
+export DRONEID_STALE_AFTER_S=45          # live -> stale (gray)
+export DRONEID_DROP_AFTER_S=105          # stale -> dropped (removed)
+export DRONEID_FLIGHT_MERGE_WINDOW_S=300 # reappearance window, see below
+```
+
+If the same aircraft comes back **within 5 minutes of disappearing from the
+map**, it is treated as a continuation of the flight it was already on
+rather than a new one:
+
+- History shows **one** flight spanning the gap, not two fragments. The row
+  is annotated with e.g. `2 segments` so a merged flight is still visible as
+  one for what it is.
+- The Discord "new drone detected" alert does **not** re-fire. It only fires
+  when a genuinely new flight is opened.
+
+The window is measured from the drop, not from the last packet, so with the
+defaults above the real dead-air tolerance is 105s + 300s.
+
+"The same aircraft" is matched loosely — any one of catalog key, MAC,
+serial, or the friendly name you assigned — precisely so it survives coming
+back under a slightly different identity (a re-randomized MAC, or a serial
+that hadn't been decoded yet the first time round). Two side effects worth
+knowing about:
+
+- Giving two genuinely different drones the **same friendly name** will
+  merge them if they appear within the window of each other. That's the
+  behavior as specified; rename one if you don't want it.
+- A merged flight's recorded path has a real gap in it. Points carry a
+  `segment` number so neither the live trail nor History playback draws a
+  straight line across it — you'll see separate strokes instead.
+
+A flight left open by a server restart is picked back up by the same
+mechanism, so restarting the app mid-flight no longer strands a half-flight
+in History (as long as the drone reappears inside the window).
+
 **Worth verifying on your machine**: the connect/disconnect detection relies
 on pyzmq's socket monitor API (`get_monitor_socket()` + parsing
 `EVENT_CONNECTED`/`EVENT_DISCONNECTED`/`EVENT_CONNECT_RETRIED`). I couldn't
@@ -53,7 +104,6 @@ test this against a real ZMQ instance in the environment this was built in
 the app's logs for "Could not attach connection monitor" and let me know;
 that would mean this signal isn't available the way I expected on your
 pyzmq version and needs a fallback.
-```
 
 ## Install & run
 
@@ -110,11 +160,11 @@ Then, in the browser:
   ground-test one you sent where `latitude`/`longitude` were `"Unknown"`.
 - A local SQLite file `droneid.db` is created next to `frontend.py` the
   first time a burst is processed. Every detection is now persisted; a
-  restart of this app does **not** lose flight history (only the live
-  in-memory "currently open flight" bookkeeping resets — a drone
-  reappearing after an app restart opens as a new flight row, since a
-  restart is indistinguishable from a real signal gap from the app's point
-  of view; worth knowing about).
+  restart of this app does **not** lose flight history. The live in-memory
+  "currently open flight" bookkeeping does reset, but a drone that reappears
+  within `DRONEID_FLIGHT_MERGE_WINDOW_S` is reattached to the flight it was
+  already on rather than opening a second row — so a restart mid-flight no
+  longer strands a half-flight in History.
 
 ## What's new in this pass
 
@@ -267,6 +317,14 @@ determined from reaching those controls.
   actually emits so we can convert it properly instead of flagging it.
 - **Renaming uses a plain `prompt()` dialog** for now — functional, not
   polished; an inline edit box would be a nice small upgrade later.
+- **Friendly-name matching in flight merging is exact and case-sensitive**,
+  and it is the one matching arm that can join two genuinely different
+  aircraft. See the merge section above; it's deliberate, but it's the arm
+  most likely to surprise you.
+- **Merging can't un-merge.** Once two segments are recorded on one flight
+  row there's no UI to split them apart again, so if the window turns out to
+  be too generous for your airspace, lower
+  `DRONEID_FLIGHT_MERGE_WINDOW_S` rather than fixing it up afterwards.
 
 ## Files
 

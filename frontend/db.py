@@ -10,11 +10,20 @@ Four tables:
                    relabels every past and future flight for that drone —
                    nickname is joined in at query time, never copied into
                    flight/point rows.
-  - flights       one row per contiguous detection session for a catalog_key.
+  - flights       one row per detection session for a catalog_key. Not
+                   necessarily contiguous: if the same aircraft reappears
+                   shortly after dropping off the map, the old flight is
+                   reopened rather than a second one started (see
+                   find_resumable_flight/resume_flight), so one row can span
+                   several detection segments separated by short gaps.
+                   segment_count says how many.
   - track_points  timestamped samples belonging to a flight, including every
                    per-message-instance field (op_status, accuracies, etc.)
                    so historical playback can show the same level of detail
-                   as the live view.
+                   as the live view. `segment` is the 0-based index of the
+                   detection segment the point belongs to, so a merged
+                   flight's path can be drawn as separate strokes instead of
+                   one line teleporting across the gap.
   - app_settings  small generic key/value store for app-wide config that
                    isn't per-drone — currently just the station location.
                    Server-side (not localStorage) so it's the same for every
@@ -47,7 +56,22 @@ POINT_COLUMNS = [
     "vertical_accuracy", "horizontal_accuracy", "baro_accuracy", "speed_accuracy",
     "op_status", "height_type", "loc_timestamp", "protocol_version",
     "op_location_type", "op_classification_type",
+    "segment",
 ]
+
+_REAL_POINT_COLUMNS = {
+    "lat", "lon", "alt", "height_agl", "heading", "speed", "op_lat", "op_lon",
+    "vert_speed", "pressure_altitude",
+}
+_INTEGER_POINT_COLUMNS = {"segment"}
+
+
+def _point_col_type(col: str) -> str:
+    if col in _REAL_POINT_COLUMNS:
+        return "REAL"
+    if col in _INTEGER_POINT_COLUMNS:
+        return "INTEGER"
+    return "TEXT"
 
 
 def _connect(path: str = DB_PATH) -> sqlite3.Connection:
@@ -56,10 +80,7 @@ def _connect(path: str = DB_PATH) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
 
-    point_cols_sql = ",\n            ".join(f"{c} TEXT" if c not in (
-        "lat", "lon", "alt", "height_agl", "heading", "speed", "op_lat", "op_lon",
-        "vert_speed", "pressure_altitude",
-    ) else f"{c} REAL" for c in POINT_COLUMNS)
+    point_cols_sql = ",\n            ".join(f"{c} {_point_col_type(c)}" for c in POINT_COLUMNS)
 
     conn.executescript(
         f"""
@@ -84,7 +105,8 @@ def _connect(path: str = DB_PATH) -> sqlite3.Connection:
             started_at    REAL NOT NULL,
             ended_at      REAL,
             last_point_at REAL,
-            point_count   INTEGER NOT NULL DEFAULT 0
+            point_count   INTEGER NOT NULL DEFAULT 0,
+            segment_count INTEGER NOT NULL DEFAULT 1
         );
         CREATE INDEX IF NOT EXISTS idx_flights_catalog ON flights(catalog_key, started_at);
 
@@ -109,6 +131,11 @@ def _connect(path: str = DB_PATH) -> sqlite3.Connection:
     if "last_point_at" not in flight_cols:
         conn.execute("ALTER TABLE flights ADD COLUMN last_point_at REAL")
         conn.execute("UPDATE flights SET last_point_at = ended_at WHERE last_point_at IS NULL")
+    if "segment_count" not in flight_cols:
+        # SQLite won't add a NOT NULL column without a constant default, and
+        # every pre-existing flight is by definition a single unbroken
+        # segment, so 1 is both the right default and the right backfill.
+        conn.execute("ALTER TABLE flights ADD COLUMN segment_count INTEGER NOT NULL DEFAULT 1")
 
     drone_cols = [r[1] for r in conn.execute("PRAGMA table_info(drones)").fetchall()]
     if "protocol_version" not in drone_cols:
@@ -117,11 +144,11 @@ def _connect(path: str = DB_PATH) -> sqlite3.Connection:
     point_cols = [r[1] for r in conn.execute("PRAGMA table_info(track_points)").fetchall()]
     for c in POINT_COLUMNS:
         if c not in point_cols:
-            coltype = "REAL" if c in (
-                "lat", "lon", "alt", "height_agl", "heading", "speed", "op_lat", "op_lon",
-                "vert_speed", "pressure_altitude",
-            ) else "TEXT"
-            conn.execute(f"ALTER TABLE track_points ADD COLUMN {c} {coltype}")
+            conn.execute(f"ALTER TABLE track_points ADD COLUMN {c} {_point_col_type(c)}")
+            if c == "segment":
+                # Points recorded before segments existed all belong to the
+                # first (only) segment of their flight.
+                conn.execute("UPDATE track_points SET segment = 0 WHERE segment IS NULL")
     conn.commit()
 
     return conn
@@ -222,12 +249,93 @@ def _end_flight(flight_id, ts):
     conn.commit()
 
 
+# "Last activity" for a flight: when it was closed out on drop-detection,
+# falling back to its last received point (a flight left open by a server
+# restart never got an ended_at) and finally to when it started (a flight
+# that never recorded a single point). Used as the anchor for the
+# reappearance window, so the window is measured from the moment the icon
+# actually left the map, not from the last packet.
+_LAST_ACTIVITY_SQL = "COALESCE(f.ended_at, f.last_point_at, f.started_at)"
+
+
+def _find_resumable_flight(catalog_key, mac, serial, nickname, cutoff_ts, exclude_ids):
+    """Most recent flight that plausibly belongs to the same aircraft as the
+    track described by (catalog_key, mac, serial, nickname) and that stopped
+    being seen no earlier than cutoff_ts — i.e. one this detection should be
+    treated as a continuation of rather than a separate flight.
+
+    Identity match is deliberately loose (any one of catalog key, MAC,
+    serial, or user-assigned friendly name), because the whole point is to
+    survive the aircraft coming back under a slightly different identity —
+    a re-randomized MAC, or a serial that hadn't been decoded yet the first
+    time around. Each arm is guarded by its own NULL check so a track with,
+    say, no serial yet can't match every serial-less flight in the table.
+
+    exclude_ids keeps this from stealing a flight that some other live track
+    currently has open.
+
+    Returns a dict (id, catalog_key, segment_count, last_activity) or None."""
+    conn = _require_conn()
+    params = [cutoff_ts, catalog_key, mac, mac, serial, serial, nickname, nickname]
+    exclude_sql = ""
+    if exclude_ids:
+        exclude_sql = f" AND f.id NOT IN ({','.join('?' * len(exclude_ids))})"
+        params.extend(exclude_ids)
+    row = conn.execute(
+        f"""
+        SELECT f.id, f.catalog_key, f.segment_count,
+               {_LAST_ACTIVITY_SQL} AS last_activity
+        FROM flights f
+        LEFT JOIN drones d ON d.catalog_key = f.catalog_key
+        WHERE {_LAST_ACTIVITY_SQL} >= ?
+          AND (
+                f.catalog_key = ?
+             OR (? IS NOT NULL AND f.mac = ?)
+             OR (? IS NOT NULL AND f.serial = ?)
+             OR (? IS NOT NULL AND d.nickname = ?)
+          )
+          {exclude_sql}
+        ORDER BY last_activity DESC
+        LIMIT 1
+        """,
+        params,
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _resume_flight(flight_id, catalog_key, mac, serial) -> int:
+    """Reopen a closed flight for a fresh detection segment and return that
+    segment's 0-based index (points recorded from here on carry it).
+
+    The flight also adopts the reappearing track's identity: if it was first
+    logged under a bare MAC and the serial has since been decoded, the merged
+    flight should file under the better key rather than stay on the weaker
+    one. mac/serial are COALESCEd so a burst that simply hasn't re-reported a
+    field yet can't blank out what we already knew."""
+    conn = _require_conn()
+    conn.execute(
+        """
+        UPDATE flights
+        SET ended_at = NULL,
+            segment_count = segment_count + 1,
+            catalog_key = ?,
+            mac = COALESCE(?, mac),
+            serial = COALESCE(?, serial)
+        WHERE id = ?
+        """,
+        (catalog_key, mac, serial, flight_id),
+    )
+    conn.commit()
+    row = conn.execute("SELECT segment_count FROM flights WHERE id = ?", (flight_id,)).fetchone()
+    return (row["segment_count"] - 1) if row else 0
+
+
 def _list_flights(limit, offset):
     conn = _require_conn()
     rows = conn.execute(
         """
         SELECT f.id, f.catalog_key, f.mac, f.serial, f.started_at, f.ended_at,
-               f.last_point_at, f.point_count,
+               f.last_point_at, f.point_count, f.segment_count,
                COALESCE(d.nickname, f.serial, f.mac, f.catalog_key) AS display_name
         FROM flights f
         LEFT JOIN drones d ON d.catalog_key = f.catalog_key
@@ -244,7 +352,7 @@ def _get_flight(flight_id):
     row = conn.execute(
         """
         SELECT f.id, f.catalog_key, f.mac, f.serial, f.started_at, f.ended_at,
-               f.last_point_at, f.point_count,
+               f.last_point_at, f.point_count, f.segment_count,
                d.ua_type, d.protocol_version, d.registration_id,
                COALESCE(d.nickname, f.serial, f.mac, f.catalog_key) AS display_name
         FROM flights f LEFT JOIN drones d ON d.catalog_key = f.catalog_key
@@ -298,6 +406,16 @@ async def add_point(flight_id, ts, fields: dict):
 
 async def end_flight(flight_id, ts=None):
     await run(_end_flight, flight_id, ts or time.time())
+
+
+async def find_resumable_flight(catalog_key, mac, serial, nickname, cutoff_ts, exclude_ids=None):
+    return await run(
+        _find_resumable_flight, catalog_key, mac, serial, nickname, cutoff_ts, list(exclude_ids or [])
+    )
+
+
+async def resume_flight(flight_id, catalog_key, mac, serial) -> int:
+    return await run(_resume_flight, flight_id, catalog_key, mac, serial)
 
 
 async def list_flights(limit=50, offset=0):

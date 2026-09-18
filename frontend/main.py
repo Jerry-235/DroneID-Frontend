@@ -57,8 +57,19 @@ ZMQ_ADDR = os.environ.get("DRONEID_ZMQ_ADDR", "tcp://127.0.0.1:4224")
 # the only source used for actual drone data.
 BT_ZMQ_ADDR = os.environ.get("DRONEID_BT_ZMQ_ADDR", "tcp://127.0.0.1:4222")
 WIFI_ZMQ_ADDR = os.environ.get("DRONEID_WIFI_ZMQ_ADDR", "tcp://127.0.0.1:4223")
+# Marker lifecycle, in seconds of silence since the last received packet:
+#   0-45s    "live"    — normal identity color
+#   45-105s  "stale"   — icon goes gray, marker stays put at its last known
+#                        position (any number of tracks can sit here at once)
+#   >105s    "dropped" — removed from the map, flight closed out in the DB
+# i.e. 45s to go gray, then a further 60s parked before it disappears.
 STALE_AFTER_S = float(os.environ.get("DRONEID_STALE_AFTER_S", "45"))
-DROP_AFTER_S = float(os.environ.get("DRONEID_DROP_AFTER_S", "60"))
+DROP_AFTER_S = float(os.environ.get("DRONEID_DROP_AFTER_S", "105"))
+# How long after an aircraft disappears from the map it can come back and
+# still count as the same flight rather than a new one. Measured from the
+# drop (the moment the icon left the map), not from the last packet — so
+# with the defaults above, the real dead-air tolerance is 105s + 300s.
+FLIGHT_MERGE_WINDOW_S = float(os.environ.get("DRONEID_FLIGHT_MERGE_WINDOW_S", "300"))
 HEALTH_TIMEOUT_S = float(os.environ.get("DRONEID_HEALTH_TIMEOUT_S", "12"))
 
 # Two independent signals per channel:
@@ -183,6 +194,9 @@ class DroneTrack:
     nickname: Optional[str] = None
     notes: Optional[str] = None
     flight_id: Optional[int] = None  # current open flight row in the DB, if any
+    segment: int = 0                 # which detection segment of that flight we're in:
+                                     # 0 the first time, +1 each time this flight gets
+                                     # resumed after a short disappearance
 
     first_seen: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
@@ -492,25 +506,57 @@ def extract_bursts(data) -> list[tuple[Optional[str], list[dict]]]:
 
 
 async def persist_update(track: DroneTrack):
-    """Open a new flight the first time we see this catalog key in this
-    process's lifetime, otherwise append a point to the already-open flight.
-    Also refreshes the catalog row (mac/serial/registration/ua_type/protocol
-    version) and applies any user-assigned nickname to the live track."""
+    """Append a point to this track's open flight, opening one first if it
+    doesn't have one yet. Also refreshes the catalog row (mac/serial/
+    registration/ua_type/protocol version) and applies any user-assigned
+    nickname to the live track.
+
+    "Opening one" is where re-acquisition is handled. Before starting a
+    genuinely new flight, we look for one this aircraft was flying until it
+    dropped off the map less than FLIGHT_MERGE_WINDOW_S ago — matched on
+    catalog key, MAC, serial, or friendly name — and continue that one
+    instead. Two consequences, both intended: History shows a single flight
+    spanning the gap rather than a pile of fragments, and the Discord
+    "new drone detected" alert doesn't re-fire for an aircraft that was
+    already announced minutes earlier and merely blinked out of range."""
     key = track.key
     # ensure the catalog row exists before a flight can reference it (FK)
     await db.upsert_catalog(
         key, track.mac, track.serial, track.registration_id,
         track.ua_type, track.protocol_version, track.last_seen,
     )
+    nickname = catalog_nicknames.get(key)
     is_new = key not in active_flights
+    resumed = False
     if is_new:
-        active_flights[key] = await db.start_flight(key, track.mac, track.serial, track.last_seen)
+        candidate = await db.find_resumable_flight(
+            key, track.mac, track.serial, nickname,
+            track.last_seen - FLIGHT_MERGE_WINDOW_S,
+            # Never adopt a flight another live track is still writing to.
+            exclude_ids=list(active_flights.values()),
+        )
+        if candidate:
+            track.segment = await db.resume_flight(
+                candidate["id"], key, track.mac, track.serial
+            )
+            active_flights[key] = candidate["id"]
+            resumed = True
+            log.info(
+                "Resuming flight %s for %s (segment %s) — last seen %.0fs ago, within the "
+                "%.0fs reappearance window",
+                candidate["id"], key, track.segment,
+                track.last_seen - (candidate["last_activity"] or track.last_seen),
+                FLIGHT_MERGE_WINDOW_S,
+            )
+        else:
+            active_flights[key] = await db.start_flight(key, track.mac, track.serial, track.last_seen)
+            track.segment = 0
     track.flight_id = active_flights[key]
     point_fields = {c: getattr(track, c, None) for c in db.POINT_COLUMNS}
     await db.add_point(track.flight_id, track.last_seen, point_fields)
-    track.nickname = catalog_nicknames.get(key)
+    track.nickname = nickname
 
-    if is_new and key != TEST_DRONE_SERIAL:
+    if is_new and not resumed and key != TEST_DRONE_SERIAL:
         # Fire-and-forget: never let a slow/unreachable webhook stall ingest.
         asyncio.create_task(send_new_drone_alert(track))
 
