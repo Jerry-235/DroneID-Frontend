@@ -97,6 +97,7 @@
   .track-row{
     padding:10px 14px; border-bottom:1px solid var(--hairline); cursor:pointer;
     display:flex; flex-direction:column; gap:3px;
+    position:relative; /* anchors the admin select checkbox to the row */
   }
   .track-row:hover{background:var(--panel-raised);}
   .track-row.selected{background:var(--panel-raised);border-left:2px solid var(--amber);padding-left:12px;}
@@ -128,6 +129,32 @@
     font-family:'IBM Plex Mono',monospace; font-size:11px; font-weight:500;
     padding:3px 9px; border-radius:var(--radius); white-space:nowrap;
   }
+  /* Admin-only multi-select on History rows. Anchored bottom-right of the
+     row, under the pencil button, so it sits out of the way of the flight
+     details and doesn't shift the layout of rows that don't have it. */
+  .flight-pick{
+    position:absolute; right:12px; bottom:10px; width:15px; height:15px;
+    margin:0; cursor:pointer; accent-color:var(--amber); flex:0 0 auto;
+  }
+  .track-row.picked{ background:var(--panel-raised); }
+  .bulk-bar{
+    position:sticky; top:0; z-index:5; background:var(--panel-raised);
+    border-bottom:1px solid var(--hairline); padding:10px 12px;
+    display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  }
+  .bulk-count{ font-size:12px; font-weight:600; flex:1 1 auto; white-space:nowrap; }
+  .bulk-btn{
+    background:var(--bg); border:1px solid var(--hairline); color:var(--text);
+    font-size:11px; font-weight:600; padding:5px 11px; border-radius:var(--radius);
+    cursor:pointer; white-space:nowrap;
+  }
+  .bulk-btn:hover{ border-color:var(--amber); color:var(--amber); }
+  .bulk-btn.danger:hover{ border-color:var(--red); color:var(--red); }
+  /* Errors land here rather than in an alert(), so the message sits next to
+     the buttons that produced it and stays readable while you fix the
+     selection. */
+  .bulk-msg{ flex:1 1 100%; font-size:11px; line-height:1.4; color:var(--red); }
+  .bulk-msg.ok{ color:var(--text-muted); }
   .history-track-buttons{
     margin-top:8px; padding-top:7px; border-top:1px solid var(--hairline);
     display:flex; gap:6px;
@@ -822,8 +849,7 @@ function renderSettingsPanel() {
     <div class="settings-group-title">Units</div>
     <div class="settings-note">
       Choose the unit system for distance, altitude, and speed values across
-      the app. This only changes how numbers are displayed — everything is
-      still stored and transmitted in metric underneath.
+      the app.
     </div>
     <div class="unit-toggle-row">
       <button class="unit-btn${unitSystem === 'metric' ? ' active' : ''}" data-unit="metric">Metric (m, m/s)</button>
@@ -833,11 +859,9 @@ function renderSettingsPanel() {
   const debugHtml = `
     <div class="settings-group-title">Debug</div>
     <div class="settings-note">
-      Injects one synthetic drone (orbiting the station if set, otherwise a
-      default location) through the real live pipeline — same code path as
-      actual ZMQ data — for exercising the map, popups, and history without
-      RF hardware. It decays and drops on its own after Stop, same as a real
-      signal loss, rather than being force-removed.
+      Injects one synthetic drone orbiting the station if set,
+      through the real live pipeline for exercising the map, popups, and history without
+      RF hardware.
     </div>
     <div class="station-form">
       <div class="station-form-buttons">
@@ -850,9 +874,7 @@ function renderSettingsPanel() {
   const stationHtml = `
     <div class="settings-group-title">Station</div>
     <div class="settings-note">
-      Set this device's fixed reference location. It's stored on the server —
-      the same for every browser/device that opens this app — and the map
-      loads centered here every time.
+      Set this device's fixed reference location.
     </div>
     <div class="station-form">
       <input id="station-lat" type="number" step="any" placeholder="Latitude"
@@ -871,11 +893,8 @@ function renderSettingsPanel() {
   const discordHtml = `
     <div class="settings-group-title">Discord Alerts</div>
     <div class="settings-note">
-      Sends a message to a Discord channel whenever a genuinely new drone is
-      detected (not the test drone). Configured via the DRONEID_DISCORD_WEBHOOK
-      environment variable on the server — not editable here, since a
-      webhook URL is a bearer secret and this app is meant to be kept in
-      source control. Set it and restart the server to enable or change it.
+      Sends a message to a Discord channel whenever a new drone is
+      detected. Send a test alert using the Discord webhook and role ping.
     </div>
     <div class="station-form">
       <div class="settings-note" id="discord-webhook-status">Checking…</div>
@@ -1474,6 +1493,140 @@ function historyOperatorPopupHtml(idx) {
   `;
 }
 
+// ---- admin-only bulk merge/delete on the History tab ----
+//
+// Flight ids the operator has ticked, and the last thing the bulk bar had to
+// say. Both live outside loadHistoryList() because that function re-renders
+// the whole sidebar from scratch on every change, so anything it needs to
+// remember across renders has to sit here.
+const pickedFlights = new Set();
+let bulkMessage = null;  // { text, ok } or null
+
+function clearHistorySelection() {
+  stopPlayback();
+  historyLayer.clearLayers();
+  // Bumped so a flight fetch already in flight is discarded rather than
+  // repopulating the map for a flight that has just been deleted.
+  historyRequestId++;
+  historyState = {
+    flightId: null, flightMeta: null, points: [], marker: null, opMarker: null,
+    line: null, opLine: null, link: null, playing: false, timer: null,
+  };
+  const scrubber = document.getElementById('scrubber');
+  if (scrubber) scrubber.classList.remove('show');
+}
+
+function bulkBarHtml() {
+  // The bar only exists once something is ticked — or while there's a
+  // message to show, so an error doesn't vanish along with the selection
+  // that caused it.
+  if (pickedFlights.size === 0 && !bulkMessage) return '';
+  const n = pickedFlights.size;
+  const msg = bulkMessage
+    ? `<div class="bulk-msg${bulkMessage.ok ? ' ok' : ''}">${escapeHtml(bulkMessage.text)}</div>`
+    : '';
+  return `
+    <div class="bulk-bar">
+      <span class="bulk-count">${n} selected</span>
+      <button class="bulk-btn" data-bulk="merge">Merge</button>
+      <button class="bulk-btn danger" data-bulk="delete">Delete</button>
+      <button class="bulk-btn" data-bulk="clear">Clear</button>
+      ${msg}
+    </div>`;
+}
+
+function wireBulkBar() {
+  document.querySelectorAll('[data-bulk]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (btn.dataset.bulk === 'merge') mergePickedFlights();
+      else if (btn.dataset.bulk === 'delete') deletePickedFlights();
+      else { pickedFlights.clear(); bulkMessage = null; loadHistoryList(); }
+    });
+  });
+}
+
+async function postFlightAction(path, ids) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ flight_ids: ids }),
+  });
+  let data = {};
+  try { data = await res.json(); } catch (e) { /* non-JSON error body */ }
+  return { ok: res.ok, data };
+}
+
+async function mergePickedFlights() {
+  const ids = Array.from(pickedFlights);
+  if (ids.length < 2) {
+    bulkMessage = { text: 'Select at least two flights to merge.', ok: false };
+    loadHistoryList();
+    return;
+  }
+  if (!confirm(
+    `Merge these ${ids.length} flights into one?\n\n` +
+    `Their points are combined into a single continuous track, joined end to ` +
+    `start in time order. This cannot be undone.`
+  )) return;
+
+  const openWasMerged = ids.includes(historyState.flightId);
+  let result;
+  try {
+    result = await postFlightAction('/api/flights/merge', ids);
+  } catch (e) {
+    bulkMessage = { text: 'Could not reach the server.', ok: false };
+    loadHistoryList();
+    return;
+  }
+  if (!result.ok) {
+    bulkMessage = { text: result.data.error || 'Merge failed.', ok: false };
+    loadHistoryList();
+    return;
+  }
+  pickedFlights.clear();
+  bulkMessage = { text: `Merged ${result.data.merged} flights into one.`, ok: true };
+  if (openWasMerged) {
+    // Reopen the survivor so the map shows the merged track straight away
+    // rather than leaving the old (now deleted) flight drawn on screen.
+    clearHistorySelection();
+    await selectHistoryFlight(result.data.flight_id);
+  } else {
+    await loadHistoryList();
+  }
+}
+
+async function deletePickedFlights() {
+  const ids = Array.from(pickedFlights);
+  if (ids.length === 0) return;
+  if (!confirm(
+    `Delete ${ids.length} flight${ids.length === 1 ? '' : 's'} and all recorded ` +
+    `track points? This cannot be undone.`
+  )) return;
+
+  const openWasDeleted = ids.includes(historyState.flightId);
+  let result;
+  try {
+    result = await postFlightAction('/api/flights/delete', ids);
+  } catch (e) {
+    bulkMessage = { text: 'Could not reach the server.', ok: false };
+    loadHistoryList();
+    return;
+  }
+  if (!result.ok) {
+    bulkMessage = { text: result.data.error || 'Delete failed.', ok: false };
+    loadHistoryList();
+    return;
+  }
+  pickedFlights.clear();
+  bulkMessage = {
+    text: `Deleted ${result.data.deleted} flight${result.data.deleted === 1 ? '' : 's'}.`,
+    ok: true,
+  };
+  if (openWasDeleted) clearHistorySelection();
+  await loadHistoryList();
+}
+
 async function loadHistoryList() {
   const sidebar = document.getElementById('sidebar');
   // Preserve scroll position across the re-render below — a plain innerHTML
@@ -1489,12 +1642,25 @@ async function loadHistoryList() {
   document.getElementById('count-label').textContent = 'flights';
 
   if (flights.length === 0) {
-    sidebar.innerHTML = '<div class="sidebar-empty">No recorded flights yet.</div>';
+    // Still render the bulk bar if it has something to say — deleting the
+    // last flight lands here, and "Deleted 3 flights." shouldn't vanish
+    // along with the rows it removed.
+    pickedFlights.clear();
+    sidebar.innerHTML = (isAdmin() ? bulkBarHtml() : '')
+      + '<div class="sidebar-empty">No recorded flights yet.</div>';
+    wireBulkBar();
     return;
   }
 
-  sidebar.innerHTML = flights.map(f => {
+  // Drop any picks whose flight no longer exists (just merged away, or
+  // deleted from another tab), so the bulk bar can't act on a stale id.
+  const liveIds = new Set(flights.map(f => f.id));
+  Array.from(pickedFlights).forEach(id => { if (!liveIds.has(id)) pickedFlights.delete(id); });
+
+  const admin = isAdmin();
+  sidebar.innerHTML = (admin ? bulkBarHtml() : '') + flights.map(f => {
     const sel = f.id === historyState.flightId ? ' selected' : '';
+    const picked = pickedFlights.has(f.id);
     const inProgress = !f.ended_at;
     const isOpen = f.id === historyState.flightId;
     // Only known once this flight's points have actually been fetched
@@ -1508,7 +1674,7 @@ async function loadHistoryList() {
           ${hasOpData ? `<button class="history-track-btn${historySelectedTarget === 'operator' ? ' active-operator' : ''}" data-target="operator">Track Op</button>` : ''}
         </div>` : '';
     return `
-      <div class="track-row${sel}" data-flight="${f.id}" data-key="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">
+      <div class="track-row${sel}${picked ? ' picked' : ''}" data-flight="${f.id}" data-key="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">
         <div class="row-top">
           <span class="status-chip ${inProgress ? 'live' : ''}" style="${inProgress ? '' : 'background:#3A4A5A'}"></span>
           <span class="track-name">${escapeHtml(f.display_name)}</span>
@@ -1521,18 +1687,32 @@ async function loadHistoryList() {
           <span>${fmtDuration(f.started_at, f.last_point_at)}</span>
           <span>${f.point_count} pts</span>
           ${f.segment_count > 1 ? `<span title="Detection dropped out and the same aircraft came back within the merge window, so these were recorded as one flight">${f.segment_count} segments</span>` : ''}
+          ${f.merged_count > 1 ? `<span title="Merged by hand from ${f.merged_count} separate flights">merged ×${f.merged_count}</span>` : ''}
           ${inProgress ? '<span style="color:#E8A33D">in progress</span>' : ''}
         </div>
         ${expandedHtml}
+        ${admin ? `<input type="checkbox" class="flight-pick" data-pick="${f.id}" ${picked ? 'checked' : ''} title="Select this flight for merge or delete">` : ''}
       </div>`;
   }).join('');
 
   sidebar.querySelectorAll('.track-row').forEach(row => {
     row.addEventListener('click', (e) => {
-      if (e.target.dataset.rename || e.target.dataset.target) return;
+      if (e.target.dataset.rename || e.target.dataset.target || e.target.dataset.pick) return;
       selectHistoryFlight(parseInt(row.dataset.flight, 10));
     });
   });
+  sidebar.querySelectorAll('[data-pick]').forEach(box => {
+    box.addEventListener('click', (e) => {
+      // Stops the row's own click handler from also opening the flight —
+      // ticking the box is a selection action, not a "show me this" action.
+      e.stopPropagation();
+      const id = parseInt(box.dataset.pick, 10);
+      if (box.checked) pickedFlights.add(id); else pickedFlights.delete(id);
+      bulkMessage = null;
+      loadHistoryList();
+    });
+  });
+  wireBulkBar();
   sidebar.querySelectorAll('.history-track-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();

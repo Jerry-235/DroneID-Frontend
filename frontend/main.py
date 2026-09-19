@@ -1088,6 +1088,85 @@ async def api_get_flight(flight_id: int):
     return {"flight": flight, "points": points}
 
 
+MISMATCH_MESSAGE = "Cannot merge mismatched info"
+
+
+def flights_are_same_aircraft(flights: list[dict]) -> bool:
+    """True if every one of these flights can be taken to belong to the same
+    aircraft, by the same standard the automatic merge uses: they all agree
+    on a serial, or they all agree on a MAC.
+
+    Either alone is enough, because each covers a case the other misses — a
+    MAC can be re-randomized between flights while the serial holds, and a
+    serial can be missing from an early flight that was only ever seen by
+    MAC. What is *not* allowed is inferring a match from a field some of
+    them don't have: a flight carrying neither a MAC nor a serial can't be
+    shown to be the same aircraft as anything, so it never merges."""
+    if len(flights) < 2:
+        return False
+    serials = [f.get("serial") for f in flights]
+    macs = [f.get("mac") for f in flights]
+    all_serials_agree = all(s for s in serials) and len(set(serials)) == 1
+    all_macs_agree = all(m for m in macs) and len(set(macs)) == 1
+    return all_serials_agree or all_macs_agree
+
+
+class FlightIdsBody(BaseModel):
+    flight_ids: list[int]
+
+
+def _live_flight_ids() -> set[int]:
+    """Flights a live track is still writing points into. Editing one out
+    from under the ingest path would strand active_flights on a row that no
+    longer exists (or has silently changed shape), so both merge and delete
+    refuse to touch these."""
+    return set(active_flights.values())
+
+
+@app.post("/api/flights/merge")
+async def api_merge_flights(body: FlightIdsBody):
+    """Fold several past flights into one. Destructive and not reversible:
+    the source rows are removed and their points repointed at the survivor,
+    which is the oldest of them."""
+    ids = list(dict.fromkeys(body.flight_ids))  # de-dupe, keep order
+    if len(ids) < 2:
+        return JSONResponse(
+            {"error": "Select at least two flights to merge."}, status_code=400
+        )
+    flights = await db.get_flights_by_ids(ids)
+    if len(flights) != len(ids):
+        return JSONResponse({"error": "One or more flights no longer exist."}, status_code=404)
+    live = _live_flight_ids().intersection(ids)
+    if live:
+        return JSONResponse(
+            {"error": "That flight is still in progress — wait for it to close out first."},
+            status_code=409,
+        )
+    if not flights_are_same_aircraft(flights):
+        return JSONResponse({"error": MISMATCH_MESSAGE}, status_code=409)
+
+    target_id = await db.merge_flights(ids)
+    log.info("Merged flights %s into %s", ids, target_id)
+    return {"ok": True, "flight_id": target_id, "merged": len(ids)}
+
+
+@app.post("/api/flights/delete")
+async def api_delete_flights(body: FlightIdsBody):
+    """Delete past flights and their points. Also not reversible."""
+    ids = list(dict.fromkeys(body.flight_ids))
+    if not ids:
+        return JSONResponse({"error": "No flights selected."}, status_code=400)
+    live = _live_flight_ids().intersection(ids)
+    if live:
+        return JSONResponse(
+            {"error": "That flight is still in progress — wait for it to close out first."},
+            status_code=409,
+        )
+    deleted = await db.delete_flights(ids)
+    log.info("Deleted flights %s (%s rows)", ids, deleted)
+    return {"ok": True, "deleted": deleted}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)

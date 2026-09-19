@@ -96,6 +96,44 @@ A flight left open by a server restart is picked back up by the same
 mechanism, so restarting the app mid-flight no longer strands a half-flight
 in History (as long as the drone reappears inside the window).
 
+### Merging and deleting flights by hand (admin view only)
+
+With the admin flag set (see *Admin view* below), each row in the History tab
+gets a small checkbox at its bottom right, under the pencil. Tick one or more
+and a bar appears at the top of the list with **Merge**, **Delete** and
+**Clear**. Both actions ask for confirmation first, and neither can be undone.
+
+**Merge** folds the selected flights into the oldest one: all their points
+move across, the time span widens to cover earliest start through latest end,
+and the whole thing is renumbered to a single segment so the track draws as
+one continuous line, joining the end of each flight straight to the start of
+the next in time order. The row is then labelled `merged ×N`.
+
+Merging is refused, with the reason shown in the bar, when:
+
+- fewer than two flights are selected;
+- the flights aren't the same aircraft — every one has to agree on a serial,
+  or every one has to agree on a MAC (`Cannot merge mismatched info`). Either
+  alone is enough, since a MAC can be re-randomized between flights while the
+  serial holds, and an early flight may only ever have been seen by MAC. A
+  flight carrying neither can't be matched to anything, so it never merges;
+- a flight is still in progress — a live track is writing points into it, so
+  it has to close out first.
+
+Two consequences worth knowing:
+
+- A manual merge **flattens any automatic segment gaps** inside the flights
+  it touches, because you've just asserted they're one continuous flight.
+  If those flights had real dropouts, the line will now run straight through
+  them.
+- The merged row keeps the **oldest** flight's catalog key, so if you merged
+  on MAC across two different serials, it displays under the older one's
+  name.
+
+**Delete** removes the selected flights and all their track points. The
+`drones` catalog rows are left alone — they hold your nicknames, and an
+aircraft with no flights on record is still a valid catalog entry.
+
 **Worth verifying on your machine**: the connect/disconnect detection relies
 on pyzmq's socket monitor API (`get_monitor_socket()` + parsing
 `EVENT_CONNECTED`/`EVENT_DISCONNECTED`/`EVENT_CONNECT_RETRIED`). I couldn't
@@ -295,6 +333,12 @@ determined from reaching those controls.
   same data the top bar's ZMQ/Bluetooth/WiFi dots use.
 - `GET  /api/flights?limit=&offset=` — flight list, most recent first.
 - `GET  /api/flights/{id}` — one flight's metadata + full point list.
+- `POST /api/flights/merge` — body `{"flight_ids": [1,2,3]}`. Folds them into
+  the oldest; returns `{"flight_id": <survivor>, "merged": <n>}`. 400 on fewer
+  than two, 404 on an unknown id, 409 on mismatched identity or an
+  in-progress flight.
+- `POST /api/flights/delete` — body `{"flight_ids": [1,2]}`. Returns
+  `{"deleted": <n>}`. 409 on an in-progress flight.
 - `GET  /api/drones/catalog` — all catalog_key → nickname mappings.
 - `PATCH /api/drones/{catalog_key}/name` — body `{"nickname": "Drone 1"}`.
   Pass `{"nickname": ""}` to clear a name back to serial/MAC.
@@ -302,10 +346,15 @@ determined from reaching those controls.
 ## Known limitations / next things to tighten up
 
 - **No auth on any endpoint** — the admin-view flag above is UI-only. In
-  particular, `POST /api/discord_webhook/test` and the test-drone endpoints
-  can be triggered by anyone who can reach this server at all, admin flag
-  or not. Fine for a private LAN box; put a reverse proxy with basic auth
-  in front of it before exposing this beyond your own network.
+  particular, `POST /api/discord_webhook/test`, the test-drone endpoints and
+  now `POST /api/flights/merge` and `/api/flights/delete` can be triggered by
+  anyone who can reach this server at all, admin flag or not. The merge and
+  delete endpoints are **destructive and irreversible**, which raises the
+  stakes on this: fine for a private LAN box, but put a reverse proxy with
+  basic auth in front of it before exposing this beyond your own network.
+- **No undo on merge or delete.** There's no trash and no split — a merged
+  flight can't be pulled back apart, and a deleted one is gone. If you expect
+  to want either, copy `droneid.db` before a big tidy-up session.
 - **Every burst is written as a DB point** — fine at "a few drones, single
   operator" scale (your stated scale), but if you ever run this against
   much heavier traffic, batch or debounce the writes.

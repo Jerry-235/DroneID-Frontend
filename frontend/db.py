@@ -106,7 +106,8 @@ def _connect(path: str = DB_PATH) -> sqlite3.Connection:
             ended_at      REAL,
             last_point_at REAL,
             point_count   INTEGER NOT NULL DEFAULT 0,
-            segment_count INTEGER NOT NULL DEFAULT 1
+            segment_count INTEGER NOT NULL DEFAULT 1,
+            merged_count  INTEGER NOT NULL DEFAULT 1
         );
         CREATE INDEX IF NOT EXISTS idx_flights_catalog ON flights(catalog_key, started_at);
 
@@ -136,6 +137,11 @@ def _connect(path: str = DB_PATH) -> sqlite3.Connection:
         # every pre-existing flight is by definition a single unbroken
         # segment, so 1 is both the right default and the right backfill.
         conn.execute("ALTER TABLE flights ADD COLUMN segment_count INTEGER NOT NULL DEFAULT 1")
+    if "merged_count" not in flight_cols:
+        # How many separate flight rows an operator has manually merged into
+        # this one. 1 means "never merged by hand", which is true of every
+        # pre-existing row.
+        conn.execute("ALTER TABLE flights ADD COLUMN merged_count INTEGER NOT NULL DEFAULT 1")
 
     drone_cols = [r[1] for r in conn.execute("PRAGMA table_info(drones)").fetchall()]
     if "protocol_version" not in drone_cols:
@@ -330,12 +336,125 @@ def _resume_flight(flight_id, catalog_key, mac, serial) -> int:
     return (row["segment_count"] - 1) if row else 0
 
 
+def _get_flights_by_ids(flight_ids):
+    """Flight rows for an explicit id list, ordered oldest first. Used by the
+    merge/delete paths, which need to validate every row before touching any
+    of them."""
+    if not flight_ids:
+        return []
+    conn = _require_conn()
+    rows = conn.execute(
+        f"""
+        SELECT f.id, f.catalog_key, f.mac, f.serial, f.started_at, f.ended_at,
+               f.last_point_at, f.point_count, f.segment_count, f.merged_count,
+               COALESCE(d.nickname, f.serial, f.mac, f.catalog_key) AS display_name
+        FROM flights f
+        LEFT JOIN drones d ON d.catalog_key = f.catalog_key
+        WHERE f.id IN ({','.join('?' * len(flight_ids))})
+        ORDER BY f.started_at ASC
+        """,
+        list(flight_ids),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _merge_flights(flight_ids):
+    """Fold several flights into one row and return the survivor's id.
+
+    The oldest flight wins and absorbs the others: every point is repointed
+    at it, the time span widens to cover all of them, and point_count is
+    recounted from what actually landed rather than summed from the old
+    rows (which could drift if anything was ever deleted underneath them).
+    The source rows are then removed.
+
+    All surviving points are renumbered to a single segment. That is what
+    makes the merged track draw as one continuous line, joining the end of
+    each flight to the start of the next — which is the point of merging by
+    hand. It also means any automatic segment gaps inside the originals are
+    flattened; that's the deliberate trade, since the operator has just
+    asserted these are one flight.
+
+    Callers must validate identity and liveness first — this function
+    assumes that has already happened and simply performs the merge in one
+    transaction."""
+    conn = _require_conn()
+    ordered = _get_flights_by_ids(flight_ids)
+    target = ordered[0]
+    target_id = target["id"]
+    others = [f["id"] for f in ordered[1:]]
+
+    started = min(f["started_at"] for f in ordered)
+    # A NULL ended_at on any source means that flight was never closed out,
+    # so the merged flight inherits "still open" rather than a bogus end.
+    ended = None if any(f["ended_at"] is None for f in ordered) else max(f["ended_at"] for f in ordered)
+    last_points = [f["last_point_at"] for f in ordered if f["last_point_at"] is not None]
+    last_point = max(last_points) if last_points else None
+    merged_count = sum(f["merged_count"] or 1 for f in ordered)
+
+    try:
+        if others:
+            placeholders = ",".join("?" * len(others))
+            conn.execute(
+                f"UPDATE track_points SET flight_id = ? WHERE flight_id IN ({placeholders})",
+                [target_id] + others,
+            )
+        conn.execute("UPDATE track_points SET segment = 0 WHERE flight_id = ?", (target_id,))
+        count = conn.execute(
+            "SELECT COUNT(*) AS c FROM track_points WHERE flight_id = ?", (target_id,)
+        ).fetchone()["c"]
+        conn.execute(
+            """
+            UPDATE flights
+            SET started_at = ?, ended_at = ?, last_point_at = ?,
+                point_count = ?, segment_count = 1, merged_count = ?,
+                mac = COALESCE(mac, ?), serial = COALESCE(serial, ?)
+            WHERE id = ?
+            """,
+            (
+                started, ended, last_point, count, merged_count,
+                next((f["mac"] for f in ordered if f["mac"]), None),
+                next((f["serial"] for f in ordered if f["serial"]), None),
+                target_id,
+            ),
+        )
+        if others:
+            conn.execute(
+                f"DELETE FROM flights WHERE id IN ({','.join('?' * len(others))})", others
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return target_id
+
+
+def _delete_flights(flight_ids):
+    """Remove flights and their points. Returns how many flight rows went.
+    The drones catalog rows are deliberately left alone — they hold the
+    nicknames, and an aircraft with no flights on record is still a valid
+    catalog entry."""
+    if not flight_ids:
+        return 0
+    conn = _require_conn()
+    placeholders = ",".join("?" * len(flight_ids))
+    ids = list(flight_ids)
+    try:
+        conn.execute(f"DELETE FROM track_points WHERE flight_id IN ({placeholders})", ids)
+        cur = conn.execute(f"DELETE FROM flights WHERE id IN ({placeholders})", ids)
+        deleted = cur.rowcount
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return deleted
+
+
 def _list_flights(limit, offset):
     conn = _require_conn()
     rows = conn.execute(
         """
         SELECT f.id, f.catalog_key, f.mac, f.serial, f.started_at, f.ended_at,
-               f.last_point_at, f.point_count, f.segment_count,
+               f.last_point_at, f.point_count, f.segment_count, f.merged_count,
                COALESCE(d.nickname, f.serial, f.mac, f.catalog_key) AS display_name
         FROM flights f
         LEFT JOIN drones d ON d.catalog_key = f.catalog_key
@@ -352,7 +471,7 @@ def _get_flight(flight_id):
     row = conn.execute(
         """
         SELECT f.id, f.catalog_key, f.mac, f.serial, f.started_at, f.ended_at,
-               f.last_point_at, f.point_count, f.segment_count,
+               f.last_point_at, f.point_count, f.segment_count, f.merged_count,
                d.ua_type, d.protocol_version, d.registration_id,
                COALESCE(d.nickname, f.serial, f.mac, f.catalog_key) AS display_name
         FROM flights f LEFT JOIN drones d ON d.catalog_key = f.catalog_key
@@ -416,6 +535,18 @@ async def find_resumable_flight(catalog_key, mac, serial, nickname, cutoff_ts, e
 
 async def resume_flight(flight_id, catalog_key, mac, serial) -> int:
     return await run(_resume_flight, flight_id, catalog_key, mac, serial)
+
+
+async def get_flights_by_ids(flight_ids):
+    return await run(_get_flights_by_ids, list(flight_ids))
+
+
+async def merge_flights(flight_ids) -> int:
+    return await run(_merge_flights, list(flight_ids))
+
+
+async def delete_flights(flight_ids) -> int:
+    return await run(_delete_flights, list(flight_ids))
 
 
 async def list_flights(limit=50, offset=0):
