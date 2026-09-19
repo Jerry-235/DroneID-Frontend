@@ -116,8 +116,11 @@
   }
   .track-sub{
     font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-muted);
-    display:flex; gap:10px; flex-wrap:wrap;
+    display:flex; gap:10px; flex-wrap:wrap; align-items:center;
   }
+  /* Keeps the stats line the same height whether or not the row carries a
+     checkbox, so turning admin view on doesn't resize every row. */
+  .track-sub.stats{ min-height:18px; }
   .track-serial{
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:150px;
   }
@@ -129,26 +132,52 @@
     font-family:'IBM Plex Mono',monospace; font-size:11px; font-weight:500;
     padding:3px 9px; border-radius:var(--radius); white-space:nowrap;
   }
-  /* Admin-only multi-select on History rows. Anchored bottom-right of the
-     row, under the pencil button, so it sits out of the way of the flight
-     details and doesn't shift the layout of rows that don't have it. */
+  /* Admin-only multi-select on History rows. It rides at the right-hand end
+     of the stats line — still bottom-right of the flight's own details and
+     under the pencil, but in normal flow rather than absolutely positioned,
+     so it can't sit on top of the Track Drone / Track Op buttons when the
+     row expands. Styled to match those buttons: recessed dark well with a
+     hairline border, picking up the drone orange once ticked. */
   .flight-pick{
-    position:absolute; right:12px; bottom:10px; width:15px; height:15px;
-    margin:0; cursor:pointer; accent-color:var(--amber); flex:0 0 auto;
+    appearance:none; -webkit-appearance:none;
+    width:16px; height:16px; margin:0; flex:0 0 auto; cursor:pointer;
+    position:relative; background:var(--bg);
+    border:1px solid var(--hairline); border-radius:var(--radius);
+  }
+  .flight-pick:hover{ border-color:var(--text-muted); }
+  .flight-pick:checked{ background:rgba(249,115,22,0.12); border-color:rgba(249,115,22,0.4); }
+  .flight-pick:checked::after{
+    content:''; position:absolute; left:5px; top:1px; width:3px; height:8px;
+    border:solid #F97316; border-width:0 2px 2px 0; transform:rotate(45deg);
   }
   .track-row.picked{ background:var(--panel-raised); }
+  /* Sits at the END of the list, pinned to the bottom of the scrollport.
+     Appending rather than inserting at the top is deliberate: nothing above
+     it moves when it appears, so ticking the first checkbox doesn't shove
+     the whole list down. Sticky keeps its flow box, so the last row is
+     never hidden behind it either. */
   .bulk-bar{
-    position:sticky; top:0; z-index:5; background:var(--panel-raised);
-    border-bottom:1px solid var(--hairline); padding:10px 12px;
+    position:sticky; bottom:0; z-index:5; background:var(--panel-raised);
+    border-top:1px solid var(--hairline); padding:10px 12px;
     display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+    transform:translateY(6px); opacity:0;
+    transition:transform 0.14s ease, opacity 0.14s ease;
   }
+  .bulk-bar.show{ transform:translateY(0); opacity:1; }
+  /* Scoped to the History tab by the view attribute the renderers set, so
+     Live and Settings keep the plain block layout they were written for.
+     margin-top:auto drops the bar to the bottom of the panel when the list
+     is short; sticky takes over once the list is long enough to scroll. */
+  .sidebar[data-view="history"]{ display:flex; flex-direction:column; }
+  .sidebar[data-view="history"] > *{ flex:0 0 auto; }
+  .sidebar[data-view="history"] > .bulk-bar{ margin-top:auto; }
   .bulk-count{ font-size:12px; font-weight:600; flex:1 1 auto; white-space:nowrap; }
   .bulk-btn{
-    background:var(--bg); border:1px solid var(--hairline); color:var(--text);
-    font-size:11px; font-weight:600; padding:5px 11px; border-radius:var(--radius);
-    cursor:pointer; white-space:nowrap;
+    background:var(--bg); border:1px solid var(--hairline); color:var(--text-muted);
+    font-family:'Inter',sans-serif; font-size:11px; font-weight:600;
+    padding:5px 11px; border-radius:var(--radius); cursor:pointer; white-space:nowrap;
   }
-  .bulk-btn:hover{ border-color:var(--amber); color:var(--amber); }
+  .bulk-btn:hover{ border-color:var(--text-muted); color:var(--text); }
   .bulk-btn.danger:hover{ border-color:var(--red); color:var(--red); }
   /* Errors land here rather than in an alert(), so the message sits next to
      the buttons that produced it and stays readable while you fix the
@@ -620,11 +649,11 @@ const FIELD_DEFS = {
     { key: 'pressure_altitude',   label: 'Pressure Altitude',  digits: 1, unit: ' m', kind: 'altitude' },
     { key: 'alt',                 label: 'Geodetic Altitude',  digits: 1, unit: ' m', kind: 'altitude' },
     { key: 'height_agl',          label: 'Height AGL',         digits: 1, unit: ' m', kind: 'altitude' },
-    { key: 'vertical_accuracy',   label: 'Vertical Accuracy' },
-    { key: 'horizontal_accuracy', label: 'Horizontal Accuracy' },
-    { key: 'baro_accuracy',       label: 'Baro Accuracy' },
-    { key: 'speed_accuracy',      label: 'Speed Accuracy' },
-    { key: 'loc_timestamp',       label: 'Timestamp' },
+    { key: 'vertical_accuracy',   label: 'Vertical Accuracy',   formatter: fmtAccuracy },
+    { key: 'horizontal_accuracy', label: 'Horizontal Accuracy', formatter: fmtAccuracy },
+    { key: 'baro_accuracy',       label: 'Baro Accuracy',       formatter: fmtAccuracy },
+    { key: 'speed_accuracy',      label: 'Speed Accuracy',      formatter: fmtAccuracy },
+    { key: 'loc_timestamp',       label: 'Timestamp',           formatter: fmtRemoteIdTimestamp },
     { key: 'drone_op_distance',   label: 'Distance to Operator', formatter: fmtDistance },
     { key: 'station_distance',    label: 'Distance to Station', formatter: fmtDistance },
   ],
@@ -784,6 +813,45 @@ function fmtSpeed(mps) {
   return unitSystem === 'imperial' ? fmt(mpsToMph(mps), 1, ' mph') : fmt(mps, 1, ' m/s');
 }
 
+// Trims a number to at most two decimal places and drops any trailing
+// zeros, so 59.39999999999998 reads as 59.4 and 59.00 as 59.
+function round2(n) {
+  return String(Number(n.toFixed(2)));
+}
+
+// The Remote ID timestamp arrives as the decoder wrote it — sometimes a bare
+// number of seconds, sometimes prose like "4 min 59.39999999999998 s". Those
+// long tails are float representation error, not precision, so every decimal
+// number inside the value is rounded while the surrounding words are left
+// exactly as they came. Integers are left alone: there's nothing to round,
+// and rewriting them risks mangling a value shape we haven't seen.
+function fmtRemoteIdTimestamp(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? round2(value) : String(value);
+  }
+  return String(value).replace(/-?\d+\.\d+/g, (m) => round2(Number(m)));
+}
+
+// Accuracy fields are categorical strings with the unit baked in ("<1 m",
+// ">=150 m or Unknown", "<0.3 m/s") rather than numbers, so they bypassed
+// the unit toggle entirely and stayed metric in Imperial mode. This converts
+// the numbers in place and leaves the comparison operators and any trailing
+// prose ("or Unknown") untouched. Whole feet/mph, per spec — these are
+// coarse accuracy buckets, not measurements.
+function fmtAccuracy(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  const s = String(value);
+  if (unitSystem !== 'imperial') return s;
+  return s
+    // Speed first: otherwise the "m" in "m/s" is converted as a length and
+    // leaves a stray "/s" behind.
+    .replace(/(-?\d+(?:\.\d+)?)\s*m\/s\b/gi,
+             (_, n) => `${Math.round(mpsToMph(Number(n)))} mph`)
+    .replace(/(-?\d+(?:\.\d+)?)\s*m\b(?!\/)/gi,
+             (_, n) => `${Math.round(metersToFeet(Number(n)))} ft`);
+}
+
 function fieldDisplay(fdef, value) {
   if (value === null || value === undefined || value === '') return '—';
   if (fdef.formatter) return escapeHtml(fdef.formatter(value));
@@ -923,6 +991,7 @@ function renderSettingsPanel() {
     html += debugHtml;
   }
   sidebar.innerHTML = html;
+  sidebar.dataset.view = 'settings';
 
   sidebar.querySelectorAll('input[type=checkbox]').forEach(cb => {
     cb.addEventListener('change', () => {
@@ -1382,6 +1451,7 @@ function renderLiveSidebar() {
 
   if (entries.length === 0) {
     sidebar.innerHTML = '<div class="sidebar-empty">No detections yet. Waiting for data from the DroneID decoder…</div>';
+    sidebar.dataset.view = 'live';
     return;
   }
 
@@ -1439,6 +1509,7 @@ function renderLiveSidebar() {
       selectOperator(btn.dataset.focusOp);
     });
   });
+  sidebar.dataset.view = 'live';
   sidebar.scrollTop = scrollPos;
 }
 
@@ -1516,34 +1587,84 @@ function clearHistorySelection() {
   if (scrubber) scrubber.classList.remove('show');
 }
 
-function bulkBarHtml() {
-  // The bar only exists once something is ticked — or while there's a
-  // message to show, so an error doesn't vanish along with the selection
-  // that caused it.
-  if (pickedFlights.size === 0 && !bulkMessage) return '';
-  const n = pickedFlights.size;
-  const msg = bulkMessage
-    ? `<div class="bulk-msg${bulkMessage.ok ? ' ok' : ''}">${escapeHtml(bulkMessage.text)}</div>`
-    : '';
-  return `
-    <div class="bulk-bar">
-      <span class="bulk-count">${n} selected</span>
-      <button class="bulk-btn" data-bulk="merge">Merge</button>
-      <button class="bulk-btn danger" data-bulk="delete">Delete</button>
-      <button class="bulk-btn" data-bulk="clear">Clear</button>
-      ${msg}
-    </div>`;
+// The bar is built once and then only has its text updated. Rebuilding its
+// markup on every tick is what made the sidebar flicker, so nothing here
+// touches innerHTML after creation.
+function buildBulkBar() {
+  const bar = document.createElement('div');
+  bar.className = 'bulk-bar';
+  bar.id = 'bulk-bar';
+  bar.innerHTML = `
+    <span class="bulk-count" id="bulk-count"></span>
+    <button class="bulk-btn" data-bulk="merge">Merge</button>
+    <button class="bulk-btn danger" data-bulk="delete">Delete</button>
+    <button class="bulk-btn" data-bulk="clear">Clear</button>
+    <div class="bulk-msg" id="bulk-msg" hidden></div>`;
+  bar.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-bulk]');
+    if (!btn) return;
+    e.stopPropagation();
+    if (btn.dataset.bulk === 'merge') mergePickedFlights();
+    else if (btn.dataset.bulk === 'delete') deletePickedFlights();
+    else clearPickedFlights();
+  });
+  return bar;
 }
 
-function wireBulkBar() {
-  document.querySelectorAll('[data-bulk]').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (btn.dataset.bulk === 'merge') mergePickedFlights();
-      else if (btn.dataset.bulk === 'delete') deletePickedFlights();
-      else { pickedFlights.clear(); bulkMessage = null; loadHistoryList(); }
-    });
+// Creates, updates or removes the bar to match current state. Called after
+// every selection change and at the end of each list render; cheap enough
+// to call freely because it does nothing when nothing has changed shape.
+// Shown once something is ticked — or while there's a message to show, so
+// an error doesn't vanish along with the selection that caused it.
+function bulkBarWanted() {
+  return isAdmin() && mode === 'history' && (pickedFlights.size > 0 || !!bulkMessage);
+}
+
+function syncBulkBar() {
+  const sidebar = document.getElementById('sidebar');
+  if (!sidebar) return;
+  let bar = document.getElementById('bulk-bar');
+  const wanted = bulkBarWanted();
+  if (!wanted) {
+    if (bar) bar.remove();
+    return;
+  }
+  if (!bar) {
+    bar = buildBulkBar();
+    // Appended last, so it slides in at the bottom without displacing any
+    // row above it.
+    sidebar.appendChild(bar);
+    requestAnimationFrame(() => bar.classList.add('show'));
+  } else if (bar !== sidebar.lastElementChild) {
+    sidebar.appendChild(bar);   // a re-render put rows after it
+  }
+  bar.querySelector('#bulk-count').textContent = `${pickedFlights.size} selected`;
+  const msg = bar.querySelector('#bulk-msg');
+  msg.textContent = bulkMessage ? bulkMessage.text : '';
+  msg.classList.toggle('ok', !!(bulkMessage && bulkMessage.ok));
+  msg.hidden = !bulkMessage;
+}
+
+function setFlightPicked(id, picked) {
+  if (picked) pickedFlights.add(id); else pickedFlights.delete(id);
+  // Touch only the one row that changed. Re-rendering the whole list here
+  // (and re-fetching it) is what made every tick flash the sidebar.
+  const row = document.querySelector(`.track-row[data-flight="${id}"]`);
+  if (row) row.classList.toggle('picked', picked);
+  bulkMessage = null;
+  syncBulkBar();
+}
+
+function clearPickedFlights() {
+  pickedFlights.forEach(id => {
+    const row = document.querySelector(`.track-row[data-flight="${id}"]`);
+    if (row) row.classList.remove('picked');
+    const box = document.querySelector(`[data-pick="${id}"]`);
+    if (box) box.checked = false;
   });
+  pickedFlights.clear();
+  bulkMessage = null;
+  syncBulkBar();
 }
 
 async function postFlightAction(path, ids) {
@@ -1561,7 +1682,7 @@ async function mergePickedFlights() {
   const ids = Array.from(pickedFlights);
   if (ids.length < 2) {
     bulkMessage = { text: 'Select at least two flights to merge.', ok: false };
-    loadHistoryList();
+    syncBulkBar();
     return;
   }
   if (!confirm(
@@ -1576,12 +1697,12 @@ async function mergePickedFlights() {
     result = await postFlightAction('/api/flights/merge', ids);
   } catch (e) {
     bulkMessage = { text: 'Could not reach the server.', ok: false };
-    loadHistoryList();
+    syncBulkBar();
     return;
   }
   if (!result.ok) {
     bulkMessage = { text: result.data.error || 'Merge failed.', ok: false };
-    loadHistoryList();
+    syncBulkBar();
     return;
   }
   pickedFlights.clear();
@@ -1610,12 +1731,12 @@ async function deletePickedFlights() {
     result = await postFlightAction('/api/flights/delete', ids);
   } catch (e) {
     bulkMessage = { text: 'Could not reach the server.', ok: false };
-    loadHistoryList();
+    syncBulkBar();
     return;
   }
   if (!result.ok) {
     bulkMessage = { text: result.data.error || 'Delete failed.', ok: false };
-    loadHistoryList();
+    syncBulkBar();
     return;
   }
   pickedFlights.clear();
@@ -1634,7 +1755,13 @@ async function loadHistoryList() {
   // clicking a flight partway down a long list used to jump you back to
   // the top instead of staying where you were.
   const scrollPos = sidebar.scrollTop;
-  sidebar.innerHTML = '<div class="sidebar-empty">Loading flights…</div>';
+  // Only blank the sidebar on the way INTO History. Showing "Loading
+  // flights…" on every refresh meant each re-render flashed the list empty
+  // for the length of a round trip; leaving the current list up until the
+  // new one is ready makes the swap almost invisible.
+  if (sidebar.dataset.view !== 'history') {
+    sidebar.innerHTML = '<div class="sidebar-empty">Loading flights…</div>';
+  }
   const res = await fetch('/api/flights?limit=100');
   const data = await res.json();
   const flights = data.flights || [];
@@ -1642,13 +1769,13 @@ async function loadHistoryList() {
   document.getElementById('count-label').textContent = 'flights';
 
   if (flights.length === 0) {
-    // Still render the bulk bar if it has something to say — deleting the
-    // last flight lands here, and "Deleted 3 flights." shouldn't vanish
-    // along with the rows it removed.
     pickedFlights.clear();
-    sidebar.innerHTML = (isAdmin() ? bulkBarHtml() : '')
-      + '<div class="sidebar-empty">No recorded flights yet.</div>';
-    wireBulkBar();
+    sidebar.innerHTML = '<div class="sidebar-empty">No recorded flights yet.</div>';
+    sidebar.dataset.view = 'history';
+    // Keeps a message alive even when the rows it referred to are gone —
+    // deleting the last flight lands here, and "Deleted 3 flights." should
+    // still be readable.
+    syncBulkBar();
     return;
   }
 
@@ -1658,7 +1785,7 @@ async function loadHistoryList() {
   Array.from(pickedFlights).forEach(id => { if (!liveIds.has(id)) pickedFlights.delete(id); });
 
   const admin = isAdmin();
-  sidebar.innerHTML = (admin ? bulkBarHtml() : '') + flights.map(f => {
+  sidebar.innerHTML = flights.map(f => {
     const sel = f.id === historyState.flightId ? ' selected' : '';
     const picked = pickedFlights.has(f.id);
     const inProgress = !f.ended_at;
@@ -1683,15 +1810,15 @@ async function loadHistoryList() {
         <div class="track-sub">
           <span class="track-date">${fmtDateTime(f.started_at)}</span>
         </div>
-        <div class="track-sub">
+        <div class="track-sub stats">
           <span>${fmtDuration(f.started_at, f.last_point_at)}</span>
           <span>${f.point_count} pts</span>
           ${f.segment_count > 1 ? `<span title="Detection dropped out and the same aircraft came back within the merge window, so these were recorded as one flight">${f.segment_count} segments</span>` : ''}
           ${f.merged_count > 1 ? `<span title="Merged by hand from ${f.merged_count} separate flights">merged ×${f.merged_count}</span>` : ''}
           ${inProgress ? '<span style="color:#E8A33D">in progress</span>' : ''}
+          ${admin ? `<input type="checkbox" class="flight-pick" style="margin-left:auto" data-pick="${f.id}" ${picked ? 'checked' : ''} title="Select this flight for merge or delete">` : ''}
         </div>
         ${expandedHtml}
-        ${admin ? `<input type="checkbox" class="flight-pick" data-pick="${f.id}" ${picked ? 'checked' : ''} title="Select this flight for merge or delete">` : ''}
       </div>`;
   }).join('');
 
@@ -1706,13 +1833,9 @@ async function loadHistoryList() {
       // Stops the row's own click handler from also opening the flight —
       // ticking the box is a selection action, not a "show me this" action.
       e.stopPropagation();
-      const id = parseInt(box.dataset.pick, 10);
-      if (box.checked) pickedFlights.add(id); else pickedFlights.delete(id);
-      bulkMessage = null;
-      loadHistoryList();
+      setFlightPicked(parseInt(box.dataset.pick, 10), box.checked);
     });
   });
-  wireBulkBar();
   sidebar.querySelectorAll('.history-track-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1725,6 +1848,9 @@ async function loadHistoryList() {
       renameDrone(btn.dataset.rename, btn.dataset.name);
     });
   });
+  sidebar.dataset.view = 'history';
+  // Re-attached after the rows, since the innerHTML above wiped it.
+  syncBulkBar();
   sidebar.scrollTop = scrollPos;
 }
 

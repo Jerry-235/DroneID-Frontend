@@ -99,9 +99,13 @@ in History (as long as the drone reappears inside the window).
 ### Merging and deleting flights by hand (admin view only)
 
 With the admin flag set (see *Admin view* below), each row in the History tab
-gets a small checkbox at its bottom right, under the pencil. Tick one or more
-and a bar appears at the top of the list with **Merge**, **Delete** and
-**Clear**. Both actions ask for confirmation first, and neither can be undone.
+gets a small checkbox at the right-hand end of its stats line — bottom right
+of the flight's details, under the pencil, and clear of the Track Drone /
+Track Op buttons when the row is expanded. Tick one or more and an action bar
+slides up at the **bottom** of the panel with **Merge**, **Delete** and
+**Clear**; it's anchored there rather than at the top so nothing above it
+moves when it appears. Both actions ask for confirmation first, and neither
+can be undone.
 
 **Merge** folds the selected flights into the oldest one: all their points
 move across, the time span widens to cover earliest start through latest end,
