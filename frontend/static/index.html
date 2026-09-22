@@ -2232,7 +2232,6 @@ async function selectHistoryFlight(flightId) {
 
   const dronePts = allPoints.filter(p => p.lat !== null && p.lon !== null);
   const opPts = allPoints.filter(p => p.op_lat !== null && p.op_lon !== null && !(p.op_lat === 0 && p.op_lon === 0));
-  const boundsLayers = [];
 
   // Drawn per segment rather than as one continuous run: a flight that was
   // resumed after the aircraft briefly dropped off the map has a gap in the
@@ -2241,12 +2240,10 @@ async function selectHistoryFlight(flightId) {
   if (dronePts.length > 1) {
     historyState.line = L.polyline(segmentedLatLngs(dronePts, p => [p.lat, p.lon]), { color: '#F97316', weight: 3, opacity: 0.8, bubblingMouseEvents: false });
     historyLayer.addLayer(historyState.line);
-    boundsLayers.push(historyState.line);
   }
   if (opPts.length > 1) {
     historyState.opLine = L.polyline(segmentedLatLngs(opPts, p => [p.op_lat, p.op_lon]), { color: '#A78BFA', weight: 2, opacity: 0.35, bubblingMouseEvents: false });
     historyLayer.addLayer(historyState.opLine);
-    boundsLayers.push(historyState.opLine);
   }
   if (dronePts.length > 0) {
     historyState.marker = L.marker([dronePts[0].lat, dronePts[0].lon], { icon: droneIconSvg('#F97316', dronePts[0].heading) });
@@ -2261,9 +2258,29 @@ async function selectHistoryFlight(flightId) {
   }
   updateHistoryTrailStyles(); // reflects the 'drone' default set above
 
-  if (boundsLayers.length > 0) {
-    const group = L.featureGroup(boundsLayers);
-    map.fitBounds(group.getBounds(), { padding: [40, 40] });
+  // Framed from the recorded positions themselves, not from the lines drawn
+  // for them. A flight holding a single point draws no line at all — there's
+  // nothing to connect — so fitting the lines left such a flight with nothing
+  // to fit, and the map simply stayed where it was.
+  const fitPts = dronePts.map(p => [p.lat, p.lon])
+    .concat(opPts.map(p => [p.op_lat, p.op_lon]));
+  if (fitPts.length) {
+    let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+    fitPts.forEach(([la, lo]) => {
+      if (la < minLat) minLat = la;
+      if (la > maxLat) maxLat = la;
+      if (lo < minLon) minLon = lo;
+      if (lo > maxLon) maxLon = lo;
+    });
+    // A single point — or several stacked on the same spot — has no extent to
+    // frame, and fitBounds on a zero-size box slams to maximum zoom. Centre on
+    // it instead, keeping the current zoom unless that's too far out to be
+    // useful.
+    if (maxLat - minLat > 1e-7 || maxLon - minLon > 1e-7) {
+      map.fitBounds(L.latLngBounds([[minLat, minLon], [maxLat, maxLon]]), { padding: [40, 40] });
+    } else {
+      map.setView(fitPts[0], Math.max(map.getZoom(), 14));
+    }
   }
 
   range.max = allPoints.length - 1;
