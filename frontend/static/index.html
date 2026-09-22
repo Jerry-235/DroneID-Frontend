@@ -245,6 +245,28 @@
   }
   .focus-op-btn:hover{ background:rgba(52,211,153,0.2); }
   .track-date{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-muted); }
+  /* The bold title plus its copy button. The wrapper takes the stretch that
+     .track-name used to, so the pencil stays pinned right while the name
+     only takes its own text width — putting the button at the end of the
+     ID itself rather than out beside the pencil. The name still truncates
+     before the button would be pushed out of view. */
+  .name-line{ flex:1 1 auto; min-width:0; display:flex; align-items:center; gap:4px; }
+  .name-line .track-name{ flex:0 1 auto; min-width:0; }
+  .copy-btn{
+    flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center;
+    width:18px; height:18px; padding:0; margin:0; cursor:pointer;
+    background:none; border:1px solid transparent; border-radius:var(--radius);
+    color:var(--text-muted); opacity:0.75;
+  }
+  .copy-btn:hover{ opacity:1; color:var(--text); background:var(--bg); border-color:var(--hairline); }
+  .copy-btn.copied{ opacity:1; color:#34D399; }
+  .copy-btn.failed{ opacity:1; color:var(--red); }
+  .copy-btn svg{ width:12px; height:12px; }
+  @media (max-width: 700px){
+    /* a fingertip-sized target on touch screens */
+    .copy-btn{ width:26px; height:26px; }
+    .copy-btn svg{ width:14px; height:14px; }
+  }
   .pencil-btn{
     background:none; border:none; color:var(--text-muted); cursor:pointer;
     padding:2px 4px; font-size:12px; flex:0 0 auto; opacity:0.6;
@@ -1661,6 +1683,97 @@ function popupBadgeHtml(label, color) {
   return `<div class="popup-badge-row"><span class="popup-badge" style="background:${bg};color:${color};border-color:${border};">${escapeHtml(label)}</span></div>`;
 }
 
+// ---- copy-to-clipboard for serial numbers ----
+
+const COPY_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">'
+  + '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2"/></svg>';
+const CHECK_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<path d="M3 8.5l3.2 3L13 4.5"/></svg>';
+const CROSS_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">'
+  + '<path d="M4 4l8 8M12 4l-8 8"/></svg>';
+const COPY_FEEDBACK_MS = 1400;
+
+// The Live list rebuilds from scratch on every burst, so the tick can't
+// live on the button element itself — it'd be wiped within a second. This
+// remembers the last copy, and copyButtonHtml() redraws the tick into
+// whichever button currently stands for that serial.
+let lastCopy = null;   // { value, ok, until }
+
+function copyButtonHtml(value, idleLabel) {
+  const recent = lastCopy && lastCopy.value === value && Date.now() < lastCopy.until;
+  const cls = recent ? (lastCopy.ok ? ' copied' : ' failed') : '';
+  const icon = recent ? (lastCopy.ok ? CHECK_ICON : CROSS_ICON) : COPY_ICON;
+  const label = recent ? (lastCopy.ok ? 'Copied' : 'Copy failed') : idleLabel;
+  return `<button type="button" class="copy-btn${cls}" data-copy="${escapeHtml(value)}" `
+       + `data-copy-label="${escapeHtml(idleLabel)}" title="${label}" aria-label="${label}">${icon}</button>`;
+}
+
+// The bold title for a list row. Only when it's showing the drone's own
+// identifier — its serial, or its MAC if no serial has been decoded —
+// does it get a copy button. A name you've given it isn't something you'd
+// want to paste anywhere, so it doesn't.
+//   rawLabel: null for a user-given name, else the button's label.
+function nameLineHtml(name, rawLabel) {
+  const safe = escapeHtml(name);
+  return `<span class="name-line">`
+       + `<span class="track-name"${rawLabel ? ` title="${safe}"` : ''}>${safe}</span>`
+       + (rawLabel ? copyButtonHtml(name, rawLabel) : '')
+       + `</span>`;
+}
+
+// The page is normally served over plain http on the LAN, where browsers
+// withhold navigator.clipboard (it needs https or localhost). So the modern
+// API is used when it's there, with the older select-and-copy route behind
+// it — which is the one that will actually run for most people here.
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* fall through */ }
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  // readonly keeps the phone keyboard from flashing up; 16px stops iOS
+  // zooming the page on focus; fixed + transparent keeps it off-screen
+  // without being display:none (which can't be selected).
+  ta.setAttribute('readonly', '');
+  ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;font-size:16px;';
+  document.body.appendChild(ta);
+  ta.select();
+  ta.setSelectionRange(0, text.length);   // iOS ignores select() alone
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+  document.body.removeChild(ta);
+  return ok;
+}
+
+function showCopyFeedback(value, ok) {
+  lastCopy = { value, ok, until: Date.now() + COPY_FEEDBACK_MS };
+  const paint = () => document.querySelectorAll('.copy-btn').forEach(btn => {
+    if (btn.dataset.copy !== value) return;
+    const recent = Date.now() < lastCopy.until && lastCopy.value === value;
+    btn.classList.toggle('copied', recent && ok);
+    btn.classList.toggle('failed', recent && !ok);
+    btn.innerHTML = recent ? (ok ? CHECK_ICON : CROSS_ICON) : COPY_ICON;
+    const label = recent ? (ok ? 'Copied' : 'Copy failed') : (btn.dataset.copyLabel || 'Copy');
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+  });
+  paint();
+  setTimeout(paint, COPY_FEEDBACK_MS + 20);
+}
+
+// One listener, on the sidebar itself, which is never replaced — unlike
+// the rows inside it. It runs in the capture phase so it sees the click
+// before the row does, and stops it there: copying a serial shouldn't also
+// select the drone or open the flight.
+document.getElementById('sidebar').addEventListener('click', async (e) => {
+  const btn = e.target.closest && e.target.closest('[data-copy]');
+  if (!btn) return;
+  e.stopPropagation();
+  e.preventDefault();
+  const value = btn.dataset.copy;
+  showCopyFeedback(value, await copyText(value));
+}, true);
+
 function droneTooltipText(d) {
   return escapeHtml(d.nickname || d.serial || d.mac || 'Unknown aircraft');
 }
@@ -1725,13 +1838,13 @@ function renderLiveSidebar() {
       <div class="track-row${sel}" data-key="${escapeHtml(d.key)}" style="${sel ? `border-left-color:${color};` : ''}">
         <div class="row-top">
           <span class="status-chip" style="background:${chipColor};box-shadow:${d.status === 'live' ? `0 0 6px ${chipColor}` : 'none'};"></span>
-          <span class="track-name">${escapeHtml(name)}</span>
+          ${nameLineHtml(name, d.nickname ? null : (name === d.serial ? 'Copy serial number' : 'Copy MAC address'))}
           ${d.status === 'stale' ? '<span class="stale-tag">STALE</span>' : ''}
           <button class="pencil-btn" data-rename="${escapeHtml(d.key)}" data-name="${escapeHtml(name)}">✎</button>
         </div>
         <div class="track-sub">
           <span>${escapeHtml(d.mac || 'No MAC')}</span>
-          ${d.serial ? `<span class="track-serial">SN: ${escapeHtml(d.serial)}</span>` : ''}
+          ${d.serial ? `<span class="track-serial" title="${escapeHtml(d.serial)}">SN: ${escapeHtml(d.serial)}</span>` : ''}
         </div>
         <div class="track-pills">
           ${d.height_agl !== null && d.height_agl !== undefined ? `<span class="track-pill">${fmtAltitude(d.height_agl)} AGL</span>` : ''}
@@ -1985,6 +2098,18 @@ async function deletePickedFlights() {
   await loadHistoryList();
 }
 
+// /api/flights sends only the resolved display_name (nickname, else serial,
+// else MAC), not whether a nickname was involved — so a title is treated as
+// a raw identifier when it's identical to one of the flight's own IDs.
+function historyRawIdLabel(f) {
+  const n = f.display_name;
+  if (!n) return null;
+  if (n === f.serial) return 'Copy serial number';
+  if (n === f.mac) return 'Copy MAC address';
+  if (n === f.catalog_key) return 'Copy ID';
+  return null;
+}
+
 async function loadHistoryList() {
   const sidebar = document.getElementById('sidebar');
   // Preserve scroll position across the re-render below — a plain innerHTML
@@ -2041,7 +2166,7 @@ async function loadHistoryList() {
       <div class="track-row${sel}${picked ? ' picked' : ''}" data-flight="${f.id}" data-key="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">
         <div class="row-top">
           <span class="status-chip ${inProgress ? 'live' : ''}" style="${inProgress ? '' : 'background:#3A4A5A'}"></span>
-          <span class="track-name">${escapeHtml(f.display_name)}</span>
+          ${nameLineHtml(f.display_name, historyRawIdLabel(f))}
           <button class="pencil-btn" data-rename="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">✎</button>
         </div>
         <div class="track-sub">
