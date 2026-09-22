@@ -339,6 +339,104 @@
   }
   .popup-row b{color:var(--text);font-weight:500;}
   .drone-icon{ filter:drop-shadow(0 0 3px rgba(0,0,0,0.6)); }
+
+  /* ---- detail panel ----
+     Replaces the old marker popups. One element, two layouts:
+       desktop  a column on the right of the map that pushes it narrower
+                rather than covering it, so the unit you're focused on is
+                never hidden underneath;
+       mobile   a full-width lower-third sheet, flight-tracker style, with
+                the map shrunk to the space above it.
+     Both hold the aircraft and operator data in a single scroll. */
+  .detail-panel{
+    flex:0 0 auto; width:0; overflow:hidden; background:var(--panel);
+    transition:width 0.2s ease; display:flex; min-height:0;
+  }
+  .detail-panel.open{ width:340px; border-left:1px solid var(--hairline); }
+  /* Fixed width inside a width-animated shell, so the contents slide in
+     rather than reflowing and re-wrapping on every frame of the animation. */
+  .dp-inner{
+    width:340px; flex:0 0 auto; display:flex; flex-direction:column; min-height:0;
+  }
+  .dp-head{
+    flex:0 0 auto; padding:12px 14px 10px; border-bottom:1px solid var(--hairline);
+    background:var(--panel-raised);
+  }
+  .dp-grab{ display:none; }
+  .dp-title-row{ display:flex; align-items:center; gap:8px; }
+  .dp-name{
+    font-size:15px; font-weight:700; flex:1 1 auto; min-width:0;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .dp-close{
+    flex:0 0 auto; background:none; border:none; color:var(--text-muted);
+    font-size:20px; line-height:1; padding:2px 4px; cursor:pointer;
+  }
+  .dp-close:hover{ color:var(--text); }
+  .dp-sub{
+    margin-top:3px; font-family:'IBM Plex Mono',monospace; font-size:11px;
+    color:var(--text-muted); display:flex; align-items:center; gap:6px;
+  }
+  .dp-sub .status-chip{ width:7px; height:7px; }
+  .dp-actions{ margin-top:10px; display:flex; gap:6px; }
+  /* Same recessed-well treatment as the History Track Drone / Track Op
+     buttons, so the two sets read as the same control. */
+  .dp-focus{
+    flex:1 1 0; background:var(--bg); border:1px solid var(--hairline); color:var(--text-muted);
+    font-family:'Inter',sans-serif; font-size:11px; font-weight:600;
+    padding:6px 8px; border-radius:var(--radius); cursor:pointer;
+  }
+  .dp-focus:hover:not(:disabled){ color:var(--text); border-color:var(--text-muted); }
+  .dp-focus:disabled{ opacity:0.4; cursor:default; }
+  .dp-body{ flex:1 1 auto; overflow-y:auto; min-height:0; padding-bottom:12px; }
+  /* Section headers stick while their section scrolls under them, so it's
+     always clear whether a value belongs to the aircraft or the operator. */
+  .dp-section-head{
+    position:sticky; top:0; z-index:1; background:var(--panel);
+    padding:10px 14px 6px; border-bottom:1px solid var(--hairline);
+  }
+  .dp-group-title{
+    padding:10px 14px 4px; font-size:10px; font-weight:700; letter-spacing:0.08em;
+    text-transform:uppercase; color:var(--amber); opacity:0.85;
+  }
+  .dp-row{
+    display:flex; justify-content:space-between; align-items:baseline; gap:12px;
+    padding:3px 14px; font-family:'IBM Plex Mono',monospace; font-size:12px;
+    color:var(--text-muted);
+  }
+  .dp-row b{ color:var(--text); font-weight:500; text-align:right; overflow-wrap:anywhere; }
+  .dp-note{ padding:10px 14px; font-size:11px; color:var(--text-muted); line-height:1.5; }
+  .dp-section-head .popup-badge-row{ margin:0; }
+
+  @media (max-width: 700px){
+    :root{ --sheet-h:38vh; --sheet-h-expanded:75vh; }
+    @supports (height:1dvh){ :root{ --sheet-h:38dvh; --sheet-h-expanded:75dvh; } }
+    .detail-panel{
+      position:fixed; left:0; right:0; bottom:0; z-index:1100;
+      width:auto; height:0; transition:height 0.2s ease;
+      border-radius:12px 12px 0 0; box-shadow:0 -6px 20px rgba(0,0,0,0.35);
+    }
+    .detail-panel.open{ width:auto; height:var(--sheet-h); border-left:none; border-top:1px solid var(--hairline); }
+    .detail-panel.open.expanded{ height:var(--sheet-h-expanded); }
+    .dp-inner{ width:100%; }
+    .dp-head{ padding-top:6px; border-radius:12px 12px 0 0; }
+    /* The grab handle: tap to toggle between the lower third and a taller
+       sheet, the usual bottom-sheet affordance. */
+    .dp-grab{
+      display:block; width:100%; height:18px; padding:0; margin:0 0 2px;
+      background:none; border:none; cursor:pointer; position:relative;
+    }
+    .dp-grab::before{
+      content:''; position:absolute; left:50%; top:7px; width:36px; height:4px;
+      margin-left:-18px; border-radius:2px; background:var(--hairline);
+    }
+    /* Everything above the sheet gives up exactly its height, so the map,
+       list and scrubber all end where the sheet begins instead of being
+       covered by it. */
+    .main.sheet-open{ padding-bottom:var(--sheet-h); }
+    .main.sheet-open.sheet-expanded{ padding-bottom:var(--sheet-h-expanded); }
+    .main{ transition:padding-bottom 0.2s ease; }
+  }
 </style>
 </head>
 <body>
@@ -396,6 +494,26 @@
       <div class="scrub-readout" id="scrub-readout"></div>
     </div>
   </div>
+  <!-- Aircraft + operator details for whatever's selected. Built once here;
+       renderDetailPanel() only ever updates text inside it. -->
+  <aside class="detail-panel" id="detail-panel" aria-hidden="true">
+    <div class="dp-inner">
+      <div class="dp-head">
+        <button class="dp-grab" id="dp-grab" aria-label="Expand or shrink details"></button>
+        <div class="dp-title-row">
+          <span class="dp-name" id="dp-name"></span>
+          <button class="pencil-btn" id="dp-rename" title="Rename this drone">✎</button>
+          <button class="dp-close" id="dp-close" aria-label="Close details">×</button>
+        </div>
+        <div class="dp-sub" id="dp-sub"></div>
+        <div class="dp-actions">
+          <button class="dp-focus" id="dp-focus-drone">Focus Drone</button>
+          <button class="dp-focus" id="dp-focus-op">Focus Op</button>
+        </div>
+      </div>
+      <div class="dp-body" id="dp-body"></div>
+    </div>
+  </aside>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
@@ -424,8 +542,6 @@ let mode = 'live';               // 'live' | 'history'
 const droneMarkers = new Map();  // key -> {marker, opMarker, link, pathLine, path, flightId, flightLoading, pairColor, data}
 let selectedKey = null;
 let selectedTarget = null; // 'drone' | 'operator' — which marker of the pair is focused
-let suppressPopupClose = false; // true while we're closing a popup ourselves, so the
-                                 // popupclose handler doesn't mistake it for the user hitting X
 let stationCoord = null;         // { lat, lon } — server-side "home point", null until set in Settings
 let stationMarker = null;
 
@@ -884,42 +1000,255 @@ function fieldDisplay(fdef, value) {
   return escapeHtml(String(value));
 }
 
-// Renders the toggle-controlled field groups for the info box. `groups` is
-// which message-type sections to include: the drone popup passes
-// ['Basic', 'Drone'], the operator popup passes ['Operator'].
-function renderInfoBox(d, groups) {
-  let html = '';
-  groups.forEach(g => {
-    const settings = fieldSettings[g] || {};
-    const defs = (FIELD_DEFS[g] || []).filter(f => settings[f.key]);
-    if (!defs.length) return;
-    html += `<div class="popup-group-title">${escapeHtml(g)}</div>`;
-    html += defs.map(f => {
-      const val = fieldValue(d, f.key);
-      return `<div class="popup-row"><span>${escapeHtml(f.label)}</span><b>${fieldDisplay(f, val)}</b></div>`;
-    }).join('');
-  });
-  return html;
+// ---------------- detail panel ----------------
+//
+// The one place a selected unit's data is shown, replacing the old marker
+// popups: a right-hand column on desktop, a lower-third sheet on mobile.
+// Aircraft and operator share one scroll, each under its own sticky header,
+// and every row is still governed by the Settings field toggles.
+
+// Which map layer the panel describes. Settings has no layer of its own — it
+// leaves whichever of Live/History was last on the map — so the panel keeps
+// describing that one, which means flipping a toggle in Settings updates the
+// panel right there while you watch.
+let mapContext = 'live';
+// History has no "selection" to clear the way Live does: the flight stays
+// loaded on the map after you close the panel. This remembers that you did.
+let historyPanelDismissed = false;
+
+const PANEL_MQ = window.matchMedia ? window.matchMedia('(max-width: 700px)') : null;
+function isMobileLayout() { return !!(PANEL_MQ && PANEL_MQ.matches); }
+
+const PANEL_SECTIONS = [
+  { label: 'AIRCRAFT', colorKey: 'droneColor', groups: ['Basic', 'Drone'] },
+  { label: 'OPERATOR', colorKey: 'opColor',    groups: ['Operator'] },
+];
+
+const panelState = { open: false, expanded: false, sig: null, viewKey: null };
+
+function fieldDef(group, key) {
+  return (FIELD_DEFS[group] || []).find(f => f.key === key);
 }
 
-function refreshOpenInfoBoxes() {
-  // selectedKey/selectedTarget only ever come from live selections, so their
-  // presence alone means a live popup may be open — regardless of which
-  // sidebar tab (Live/History/Settings) happens to be showing right now.
-  // Gating this on mode === 'live' meant Tracked Time/Last Seen would freeze
-  // the moment you switched to Settings, even with the popup still visible.
-  if (selectedKey) {
-    const entry = droneMarkers.get(selectedKey);
-    if (entry) {
-      if (entry.marker) entry.marker.setPopupContent(popupHtml(entry.data, entryColor(entry)));
-      if (entry.opMarker) entry.opMarker.setPopupContent(operatorPopupHtml(entry.data, entryColor(entry)));
-    }
+// Everything the panel needs to draw the current selection, or null when
+// there's nothing selected in the context the map is showing.
+function panelView() {
+  if (mapContext === 'live') {
+    const entry = selectedKey ? droneMarkers.get(selectedKey) : null;
+    if (!entry) return null;
+    const d = entry.data;
+    const color = entryColor(entry);
+    const stale = d.status === 'stale';
+    // Shown whenever the aircraft broadcasts them, as the old popup did —
+    // they aren't in the Settings field list, so there's nothing to toggle.
+    const aircraftExtras = [];
+    if (d.registration_id) aircraftExtras.push(['Registration', d.registration_id]);
+    if (d.description) aircraftExtras.push(['Self ID', d.description]);
+    const operatorExtras = [];
+    if (d.operator_id) operatorExtras.push(['Operator ID', d.operator_id]);
+    return {
+      viewKey: 'live:' + d.key,
+      name: d.nickname || d.serial || d.mac || 'Unknown aircraft',
+      renameKey: d.key,
+      extras: { AIRCRAFT: aircraftExtras, OPERATOR: operatorExtras },
+      warn: d.raw_units_warning
+        ? 'Altitude, height and speed arrived in an unrecognised raw encoding and are shown unconverted.'
+        : null,
+      subHtml: `<span class="status-chip" style="background:${stale ? STALE_COLOR : color};` +
+               `box-shadow:${stale ? 'none' : `0 0 6px ${color}`}"></span>${stale ? 'Stale' : 'Live'}`,
+      data: d,
+      droneColor: color,
+      opColor: color,
+      canDrone: !!entry.marker,
+      canOp: !!entry.opMarker,
+      focused: selectedTarget,
+    };
   }
-  if (mode === 'history' && historyState.marker) {
-    const range = document.getElementById('scrub-range');
-    const idx = range ? parseInt(range.value, 10) || 0 : 0;
-    historyState.marker.setPopupContent(historyPopupHtml(idx));
+  if (historyPanelDismissed || !historyState.flightId || !historyState.points.length) return null;
+  const meta = historyState.flightMeta || {};
+  return {
+    viewKey: 'history:' + historyState.flightId,
+    name: meta.display_name || 'Recorded flight',
+    // Renaming from here would leave this flight's cached display name stale
+    // until it was reopened; the pencil on the History row handles it.
+    renameKey: null,
+    extras: {
+      AIRCRAFT: meta.registration_id ? [['Registration', meta.registration_id]] : [],
+      OPERATOR: [],
+    },
+    warn: null,
+    subHtml: `Recorded · ${escapeHtml(fmtDateTime(meta.started_at))}`,
+    data: historyPointData(historyState.idx || 0),
+    droneColor: '#F97316',
+    opColor: '#A78BFA',
+    canDrone: !!historyState.marker,
+    canOp: !!historyState.opMarker,
+    focused: historySelectedTarget,
+  };
+}
+
+function setPanelOpen(open) {
+  if (open === panelState.open) return;
+  panelState.open = open;
+  const panel = document.getElementById('detail-panel');
+  const main = document.querySelector('.main');
+  panel.classList.toggle('open', open);
+  panel.setAttribute('aria-hidden', open ? 'false' : 'true');
+  main.classList.toggle('sheet-open', open);
+  if (!open) setPanelExpanded(false);
+  // The map's container just changed size (narrower on desktop, shorter on
+  // mobile). Leaflet doesn't notice on its own; nudge it once the 200ms
+  // transition finishes — same timing as the sidebar collapse. Its default
+  // keeps the geographic centre fixed, so whatever was just panned to stays
+  // in the middle of the smaller map.
+  setTimeout(() => map.invalidateSize(), 220);
+}
+
+function setPanelExpanded(expanded) {
+  if (expanded === panelState.expanded) return;
+  panelState.expanded = expanded;
+  document.getElementById('detail-panel').classList.toggle('expanded', expanded);
+  document.querySelector('.main').classList.toggle('sheet-expanded', expanded);
+  setTimeout(() => map.invalidateSize(), 220);
+}
+
+function styleFocusButton(btn, enabled, active, color) {
+  btn.disabled = !enabled;
+  if (active && enabled) {
+    btn.style.background = hexToRgba(color, 0.12);
+    btn.style.color = color;
+    btn.style.borderColor = hexToRgba(color, 0.4);
+  } else {
+    btn.style.background = btn.style.color = btn.style.borderColor = '';
   }
+}
+
+function renderDetailPanel() {
+  const view = panelView();
+  setPanelOpen(!!view);
+  if (!view) { panelState.sig = null; panelState.viewKey = null; return; }
+
+  document.getElementById('dp-name').textContent = view.name;
+  document.getElementById('dp-sub').innerHTML = view.subHtml;
+  document.getElementById('dp-rename').style.display = view.renameKey ? '' : 'none';
+  styleFocusButton(document.getElementById('dp-focus-drone'), view.canDrone,
+                   view.focused === 'drone', view.droneColor);
+  styleFocusButton(document.getElementById('dp-focus-op'), view.canOp,
+                   view.focused === 'operator', view.opColor);
+
+  const plan = PANEL_SECTIONS.map(sec => ({
+    label: sec.label,
+    color: view[sec.colorKey],
+    groups: sec.groups
+      .map(g => ({ name: g, defs: (FIELD_DEFS[g] || []).filter(f => (fieldSettings[g] || {})[f.key]) }))
+      .filter(g => g.defs.length),
+    extras: (view.extras && view.extras[sec.label]) || [],
+  }));
+
+  // Only rebuild the markup when the SHAPE changes — a different unit, a
+  // field toggled in Settings, a colour change on going stale, an extra
+  // appearing. The rest of the time (every burst, and the 1s ticker) only
+  // the values are rewritten in place, so the panel doesn't flicker and
+  // your scroll position holds.
+  const sig = view.viewKey + '|' + (view.warn ? 'W' : '') + '|' + plan.map(s =>
+    s.label + ':' + s.color + ':' +
+    s.groups.map(g => g.name + '=' + g.defs.map(f => f.key).join(',')).join(';') + ':' +
+    s.extras.map(x => x[0]).join(',')
+  ).join('|');
+  const body = document.getElementById('dp-body');
+  if (sig !== panelState.sig) {
+    // Same unit re-laid-out (e.g. a Settings toggle): keep your place.
+    // A different unit: start it from the top.
+    const keepScroll = view.viewKey === panelState.viewKey ? body.scrollTop : 0;
+    body.innerHTML = plan.map(sec => {
+      const empty = !sec.groups.length && !sec.extras.length;
+      return `
+      <section class="dp-section">
+        <div class="dp-section-head">${popupBadgeHtml(sec.label, sec.color)}</div>
+        ${sec.label === 'AIRCRAFT' && view.warn ? `<div class="dp-note" style="color:var(--amber)">⚠ ${escapeHtml(view.warn)}</div>` : ''}
+        ${empty ? '<div class="dp-note">Every field in this section is hidden. Turn them on in Settings.</div>' : ''}
+        ${sec.groups.map(g => `
+          ${sec.groups.length > 1 ? `<div class="dp-group-title">${escapeHtml(g.name)}</div>` : ''}
+          ${g.defs.map(f => `<div class="dp-row"><span>${escapeHtml(f.label)}</span><b data-g="${escapeHtml(g.name)}" data-k="${escapeHtml(f.key)}"></b></div>`).join('')}
+        `).join('')}
+        ${sec.extras.map((x, i) => `<div class="dp-row"><span>${escapeHtml(x[0])}</span><b data-x="${escapeHtml(sec.label)}.${i}"></b></div>`).join('')}
+      </section>`;
+    }).join('');
+    body.scrollTop = keepScroll;
+    panelState.sig = sig;
+    panelState.viewKey = view.viewKey;
+  }
+
+  body.querySelectorAll('b[data-k]').forEach(b => {
+    const fdef = fieldDef(b.dataset.g, b.dataset.k);
+    if (!fdef) return;
+    const html = fieldDisplay(fdef, fieldValue(view.data, fdef.key));
+    if (b._v !== html) { b.innerHTML = html; b._v = html; }   // fieldDisplay escapes
+  });
+  body.querySelectorAll('b[data-x]').forEach(b => {
+    const [secLabel, i] = b.dataset.x.split('.');
+    const x = ((view.extras && view.extras[secLabel]) || [])[Number(i)];
+    const text = x ? String(x[1]) : '—';
+    if (b._v !== text) { b.textContent = text; b._v = text; }
+  });
+}
+
+function clearLiveSelection() {
+  selectedKey = null;
+  selectedTarget = null;
+  droneMarkers.forEach((e, k) => { updatePathVisibility(e, k); updateDroneIcon(e, k); });
+  if (mode === 'live') renderLiveSidebar();
+  renderDetailPanel();
+}
+
+function closeDetailPanel() {
+  if (mapContext === 'live') {
+    clearLiveSelection();
+  } else {
+    historyPanelDismissed = true;
+    renderDetailPanel();
+  }
+}
+
+// Focus Drone / Focus Op. The same functions the list's own buttons call,
+// so the two can never disagree: emphasise that unit's trail and move the
+// map to it.
+function focusUnit(target) {
+  if (mapContext === 'live') {
+    if (!selectedKey) return;
+    if (target === 'drone') selectTrack(selectedKey);
+    else selectOperator(selectedKey);
+  } else {
+    selectHistoryTarget(target);
+  }
+}
+
+// On a phone the list and the map can't usefully share the screen, so
+// picking something collapses the list and gives the map the width —
+// the same list-then-map flow flight-tracker apps use. Reopen it by
+// tapping its tab, as before.
+function collapseSidebarOnMobile() {
+  if (isMobileLayout() && !sidebarCollapsed) setSidebarCollapsed(true);
+}
+
+document.getElementById('dp-close').addEventListener('click', closeDetailPanel);
+document.getElementById('dp-grab').addEventListener('click', () => setPanelExpanded(!panelState.expanded));
+document.getElementById('dp-focus-drone').addEventListener('click', () => focusUnit('drone'));
+document.getElementById('dp-focus-op').addEventListener('click', () => focusUnit('operator'));
+document.getElementById('dp-rename').addEventListener('click', () => {
+  const view = panelView();
+  if (view && view.renameKey) renameDrone(view.renameKey, view.name);
+});
+// Tapping empty map closes the panel — the usual flight-tracker gesture.
+// Markers don't bubble clicks to the map, and the trails are set not to
+// either, so only a genuinely empty spot does this.
+map.on('click', () => { if (panelState.open) closeDetailPanel(); });
+if (PANEL_MQ) {
+  // Crossing the breakpoint (rotating a tablet, resizing a window) swaps
+  // the panel between its two layouts, which resizes the map.
+  const onChange = () => setTimeout(() => map.invalidateSize(), 50);
+  if (PANEL_MQ.addEventListener) PANEL_MQ.addEventListener('change', onChange);
+  else if (PANEL_MQ.addListener) PANEL_MQ.addListener(onChange);
 }
 
 function renderSettingsPanel() {
@@ -1008,7 +1337,7 @@ function renderSettingsPanel() {
     cb.addEventListener('change', () => {
       fieldSettings[cb.dataset.group][cb.dataset.key] = cb.checked;
       saveFieldSettings();
-      refreshOpenInfoBoxes();
+      renderDetailPanel();
     });
   });
 
@@ -1018,7 +1347,7 @@ function renderSettingsPanel() {
       unitSystem = btn.dataset.unit;
       saveUnitSystem();
       sidebar.querySelectorAll('.unit-btn').forEach(b => b.classList.toggle('active', b.dataset.unit === unitSystem));
-      refreshOpenInfoBoxes();
+      renderDetailPanel();
     });
   });
 
@@ -1067,7 +1396,7 @@ function renderSettingsPanel() {
       stationCoord = { lat, lon };
       placeStationMarker();
       map.setView([lat, lon], 14);
-      refreshOpenInfoBoxes();
+      renderDetailPanel();
       renderSettingsPanel();
     } catch (e) {
       statusEl.textContent = 'Could not reach the server.';
@@ -1079,7 +1408,7 @@ function renderSettingsPanel() {
       await fetch('/api/station', { method: 'DELETE' });
       stationCoord = null;
       placeStationMarker();
-      refreshOpenInfoBoxes();
+      renderDetailPanel();
       renderSettingsPanel();
     } catch (e) { /* ignore */ }
   });
@@ -1184,31 +1513,14 @@ function upsertDrone(d) {
     }
     if (!entry.marker) {
       entry.marker = L.marker(latlng, { icon: droneIconSvg(entryColor(entry), d.heading) });
-      entry.marker.on('click', () => selectTrack(d.key, { fromMapClick: true }));
-      // Leaflet's default autoClose would silently close this popup whenever
-      // a different marker's popup opens, which fights with our own
-      // drone<->operator swap logic — we manage closing explicitly instead.
-      entry.marker.on('popupclose', () => {
-        if (suppressPopupClose) return;
-        if (selectedKey === d.key && selectedTarget === 'drone') {
-          selectedKey = null;
-          selectedTarget = null;
-          droneMarkers.forEach((e, k) => { updatePathVisibility(e, k); updateDroneIcon(e, k); });
-          renderSidebar();
-        }
-      });
-      // Bind the popup ONCE, here, at creation. Re-binding on every burst
-      // (as this used to do) recreates the Popup's DOM/close-button each
-      // time — if that happened to land right as you clicked the X, or
-      // right as you clicked the marker to open it, the click could miss
-      // or get silently undone. Content updates below use setPopupContent
-      // instead, which only touches the text, never the popup object itself.
-      entry.marker.bindPopup(popupHtml(d, entryColor(entry)), { autoClose: false });
+      // Clicking selects; the data goes to the detail panel. No popup is
+      // bound, so there's no Leaflet click-to-toggle to race against — that
+      // race was the source of the old open/close flakiness.
+      entry.marker.on('click', () => selectTrack(d.key));
       entry.marker.bindTooltip(droneTooltipText(d), { direction: 'top' });
       liveLayer.addLayer(entry.marker);
     } else {
       entry.marker.setLatLng(latlng);
-      entry.marker.setPopupContent(popupHtml(d, entryColor(entry)));
       entry.marker.setTooltipContent(droneTooltipText(d));
     }
     updateDroneIcon(entry, d.key);
@@ -1216,7 +1528,6 @@ function upsertDrone(d) {
     // a track that has just gone stale by definition isn't sending points
     // any more, so this is the only chance its trail gets to go gray too.
     updatePathVisibility(entry, d.key);
-    if (selectedKey === d.key && selectedTarget === 'drone') entry.marker.openPopup();
     if (!hasCentered) { map.setView(latlng, 14); hasCentered = true; }
   }
 
@@ -1232,28 +1543,16 @@ function upsertDrone(d) {
     if (!entry.opMarker) {
       entry.opMarker = L.marker(opLatlng, { icon: opIconSvg(entryColor(entry)) });
       entry.opMarker.bindTooltip('Operator / ground station', { direction: 'top' });
-      entry.opMarker.on('click', () => selectOperator(d.key, { fromMapClick: true }));
-      entry.opMarker.on('popupclose', () => {
-        if (suppressPopupClose) return;
-        if (selectedKey === d.key && selectedTarget === 'operator') {
-          selectedKey = null;
-          selectedTarget = null;
-          droneMarkers.forEach((e, k) => { updatePathVisibility(e, k); updateDroneIcon(e, k); });
-          renderSidebar();
-        }
-      });
-      entry.opMarker.bindPopup(operatorPopupHtml(d, entryColor(entry)), { autoClose: false });
+      entry.opMarker.on('click', () => selectOperator(d.key));
       liveLayer.addLayer(entry.opMarker);
     } else {
       entry.opMarker.setLatLng(opLatlng);
       entry.opMarker.setIcon(opIconSvg(entryColor(entry)));
-      entry.opMarker.setPopupContent(operatorPopupHtml(d, entryColor(entry)));
     }
-    if (selectedKey === d.key && selectedTarget === 'operator') entry.opMarker.openPopup();
     if (hasPos) {
       const linePts = [[d.lat, d.lon], opLatlng];
       if (!entry.link) {
-        entry.link = L.polyline(linePts, { color: entryColor(entry), weight: 1, dashArray: '4,4', opacity: 0.6 });
+        entry.link = L.polyline(linePts, { color: entryColor(entry), weight: 1, dashArray: '4,4', opacity: 0.6, bubblingMouseEvents: false });
         liveLayer.addLayer(entry.link);
       } else {
         entry.link.setLatLngs(linePts);
@@ -1263,6 +1562,9 @@ function upsertDrone(d) {
   }
 
   if (mode === 'live') renderSidebar();
+  // Covers new bursts, going stale, and a first position or operator fix
+  // arriving (which is what enables the Focus buttons).
+  if (d.key === selectedKey && mapContext === 'live') renderDetailPanel();
 }
 
 function updateDroneIcon(entry, key) {
@@ -1291,7 +1593,7 @@ function updatePathVisibility(entry, key) {
   } else if (entry.path.length >= 2) {
     const style = { color: entryColor(entry), weight: 3, opacity: 0.9 };
     if (!entry.pathLine) {
-      entry.pathLine = L.polyline(entry.path, style);
+      entry.pathLine = L.polyline(entry.path, { ...style, bubblingMouseEvents: false });
       liveLayer.addLayer(entry.pathLine);
     } else {
       entry.pathLine.setLatLngs(entry.path);
@@ -1304,7 +1606,7 @@ function updatePathVisibility(entry, key) {
   } else if (entry.opPath.length >= 2) {
     const style = { color: entryColor(entry), weight: 3, opacity: 0.9 };
     if (!entry.opPathLine) {
-      entry.opPathLine = L.polyline(entry.opPath, style);
+      entry.opPathLine = L.polyline(entry.opPath, { ...style, bubblingMouseEvents: false });
       liveLayer.addLayer(entry.opPathLine);
     } else {
       entry.opPathLine.setLatLngs(entry.opPath);
@@ -1316,15 +1618,12 @@ function updatePathVisibility(entry, key) {
 function removeDrone(key) {
   const entry = droneMarkers.get(key);
   if (entry) {
-    // Close any open popup explicitly and remove from both the layer group
-    // AND the map directly — belt-and-suspenders, in case group-removal
-    // alone ever leaves a stray DOM node behind (this is the best guess I
-    // have at the "icon lingers until page refresh" report without being
-    // able to reproduce it directly; if it still happens after this, the
-    // browser console at the moment of drop would be the next thing to check).
+    // Removed from both the layer group AND the map directly —
+    // belt-and-suspenders, in case group-removal alone ever leaves a stray
+    // DOM node behind (a best guess at the old "icon lingers until page
+    // refresh" report, never reproduced directly).
     [entry.marker, entry.opMarker, entry.link].forEach(layer => {
       if (!layer) return;
-      if (typeof layer.closePopup === 'function') layer.closePopup();
       liveLayer.removeLayer(layer);
       map.removeLayer(layer);
     });
@@ -1343,6 +1642,7 @@ function removeDrone(key) {
   if (selectedKey === key) {
     selectedKey = null;
     selectedTarget = null;
+    renderDetailPanel();   // the thing it was describing is gone
   }
   if (mode === 'live') renderSidebar();
 }
@@ -1365,83 +1665,26 @@ function droneTooltipText(d) {
   return escapeHtml(d.nickname || d.serial || d.mac || 'Unknown aircraft');
 }
 
-function popupHtml(d, color) {
-  const name = d.nickname || d.serial || d.mac;
-  const warn = d.raw_units_warning
-    ? `<div class="popup-row" style="color:#E8A33D"><span>⚠ alt/height/speed</span><b>unverified units</b></div>`
-    : '';
-  const extras = [
-    d.registration_id ? `<div class="popup-row"><span>Registration</span><b>${escapeHtml(d.registration_id)}</b></div>` : '',
-    d.operator_id ? `<div class="popup-row"><span>Operator ID</span><b>${escapeHtml(d.operator_id)}</b></div>` : '',
-    d.description ? `<div class="popup-row"><span>Self ID</span><b>${escapeHtml(d.description)}</b></div>` : '',
-  ].join('');
-  return `
-    ${popupBadgeHtml('AIRCRAFT', color || '#E8A33D')}
-    <div class="popup-title">${escapeHtml(name)} <button class="pencil-btn" onclick="renameDrone('${escapeHtml(d.key)}','${escapeHtml(name)}')">✎</button></div>
-    ${renderInfoBox(d, ['Basic', 'Drone'])}
-    ${extras}
-    ${warn}
-  `;
-}
-
-function operatorPopupHtml(d, color) {
-  const name = d.nickname || d.serial || d.mac;
-  return `
-    ${popupBadgeHtml('OPERATOR', color || '#A78BFA')}
-    <div class="popup-title">${escapeHtml(name)}</div>
-    ${renderInfoBox(d, ['Basic', 'Operator'])}
-  `;
-}
-
-function closeEntryPopups(entry) {
-  if (!entry) return;
-  suppressPopupClose = true;
-  if (entry.marker && entry.marker.isPopupOpen()) entry.marker.closePopup();
-  if (entry.opMarker && entry.opMarker.isPopupOpen()) entry.opMarker.closePopup();
-  suppressPopupClose = false;
-}
-
-function selectTrack(key, opts) {
-  const fromMapClick = !!(opts && opts.fromMapClick);
-  const prevEntry = selectedKey ? droneMarkers.get(selectedKey) : null;
-  if (prevEntry && (selectedKey !== key || selectedTarget !== 'drone')) {
-    closeEntryPopups(prevEntry);
-  }
+function selectTrack(key) {
   selectedKey = key;
   selectedTarget = 'drone';
   const entry = droneMarkers.get(key);
   if (entry) {
-    if (entry.marker) {
-      map.panTo(entry.marker.getLatLng());
-      // When the click came from the marker itself, Leaflet's own built-in
-      // click-to-open handling (wired up automatically by bindPopup) is
-      // already about to run right after this handler, for this same click
-      // event. Calling openPopup() ourselves here too would make its "is it
-      // already open?" check see a popup we just opened and toggle it
-      // straight back closed — that's what made clicking the drone feel
-      // unreliable. So: let Leaflet open it in that case; only open it
-      // ourselves when we got here some other way (sidebar row, etc.).
-      if (!fromMapClick) entry.marker.openPopup();
-    }
+    if (entry.marker) map.panTo(entry.marker.getLatLng());
     updatePathVisibility(entry, key);
   }
-  // dim every other track's path so the selected drone's route stands out,
-  // and refresh every drone icon's halo ring (only the selected one keeps it)
+  // Only the focused track keeps a trail and a halo ring.
   droneMarkers.forEach((e, k) => { updatePathVisibility(e, k); updateDroneIcon(e, k); });
+  collapseSidebarOnMobile();
   renderSidebar();
+  renderDetailPanel();
 }
 
-function selectOperator(key, opts) {
-  const fromMapClick = !!(opts && opts.fromMapClick);
-  const prevEntry = selectedKey ? droneMarkers.get(selectedKey) : null;
-  if (prevEntry && (selectedKey !== key || selectedTarget !== 'operator')) {
-    closeEntryPopups(prevEntry);
-  }
+function selectOperator(key) {
   selectedKey = key;
   selectedTarget = 'operator';
   const entry = droneMarkers.get(key);
   if (entry) {
-    if (entry.opMarker && !fromMapClick) entry.opMarker.openPopup();
     if (entry.marker && entry.opMarker) {
       map.fitBounds(L.latLngBounds([entry.marker.getLatLng(), entry.opMarker.getLatLng()]), { padding: [60, 60] });
     } else if (entry.opMarker) {
@@ -1450,7 +1693,9 @@ function selectOperator(key, opts) {
     updatePathVisibility(entry, key);
   }
   droneMarkers.forEach((e, k) => { updatePathVisibility(e, k); updateDroneIcon(e, k); });
+  collapseSidebarOnMobile();
   renderSidebar();
+  renderDetailPanel();
 }
 
 function renderLiveSidebar() {
@@ -1555,26 +1800,6 @@ function historyPointData(idx) {
   };
 }
 
-function historyPopupHtml(idx) {
-  const d = historyPointData(idx);
-  const name = historyState.flightMeta ? historyState.flightMeta.display_name : '';
-  return `
-    ${popupBadgeHtml('AIRCRAFT', '#F97316')}
-    <div class="popup-title">${escapeHtml(name)}</div>
-    ${renderInfoBox(d, ['Basic', 'Drone'])}
-  `;
-}
-
-function historyOperatorPopupHtml(idx) {
-  const d = historyPointData(idx);
-  const name = historyState.flightMeta ? historyState.flightMeta.display_name : '';
-  return `
-    ${popupBadgeHtml('OPERATOR', '#A78BFA')}
-    <div class="popup-title">${escapeHtml(name)}</div>
-    ${renderInfoBox(d, ['Basic', 'Operator'])}
-  `;
-}
-
 // ---- admin-only bulk merge/delete on the History tab ----
 //
 // Flight ids the operator has ticked, and the last thing the bulk bar had to
@@ -1596,6 +1821,7 @@ function clearHistorySelection() {
   };
   const scrubber = document.getElementById('scrubber');
   if (scrubber) scrubber.classList.remove('show');
+  renderDetailPanel();   // closes it: the flight it was describing is gone
 }
 
 // The bar is built once and then only has its text updated. Rebuilding its
@@ -1869,6 +2095,8 @@ async function selectHistoryFlight(flightId) {
   stopPlayback();
   historyLayer.clearLayers();
   historySelectedTarget = 'drone'; // always default back to Track Drone on a fresh flight selection
+  historyPanelDismissed = false;
+  collapseSidebarOnMobile();
   const myRequestId = ++historyRequestId;
   const res = await fetch(`/api/flights/${flightId}`);
   const data = await res.json();
@@ -1904,25 +2132,23 @@ async function selectHistoryFlight(flightId) {
   // middle, and joining across it would invent a flight path that never
   // happened. Separate strokes leave the gap visible for what it is.
   if (dronePts.length > 1) {
-    historyState.line = L.polyline(segmentedLatLngs(dronePts, p => [p.lat, p.lon]), { color: '#F97316', weight: 3, opacity: 0.8 });
+    historyState.line = L.polyline(segmentedLatLngs(dronePts, p => [p.lat, p.lon]), { color: '#F97316', weight: 3, opacity: 0.8, bubblingMouseEvents: false });
     historyLayer.addLayer(historyState.line);
     boundsLayers.push(historyState.line);
   }
   if (opPts.length > 1) {
-    historyState.opLine = L.polyline(segmentedLatLngs(opPts, p => [p.op_lat, p.op_lon]), { color: '#A78BFA', weight: 2, opacity: 0.6, dashArray: '4,4' });
+    historyState.opLine = L.polyline(segmentedLatLngs(opPts, p => [p.op_lat, p.op_lon]), { color: '#A78BFA', weight: 2, opacity: 0.6, dashArray: '4,4', bubblingMouseEvents: false });
     historyLayer.addLayer(historyState.opLine);
     boundsLayers.push(historyState.opLine);
   }
   if (dronePts.length > 0) {
     historyState.marker = L.marker([dronePts[0].lat, dronePts[0].lon], { icon: droneIconSvg('#F97316', dronePts[0].heading) });
-    historyState.marker.bindPopup(historyPopupHtml(0), { autoClose: false });
     historyState.marker.on('click', () => selectHistoryTarget('drone'));
     historyLayer.addLayer(historyState.marker);
   }
   if (opPts.length > 0) {
     historyState.opMarker = L.marker([opPts[0].op_lat, opPts[0].op_lon], { icon: opIconSvg('#A78BFA') });
     historyState.opMarker.bindTooltip('Operator / ground station', { direction: 'top' });
-    historyState.opMarker.bindPopup(historyOperatorPopupHtml(0), { autoClose: false });
     historyState.opMarker.on('click', () => selectHistoryTarget('operator'));
     historyLayer.addLayer(historyState.opMarker);
   }
@@ -1937,19 +2163,21 @@ async function selectHistoryFlight(flightId) {
   range.value = 0;
   scrubber.classList.add('show');
   scrubToIndex(0);
-  if (historyState.marker) historyState.marker.openPopup();
   loadHistoryList(); // refresh selection highlight + show the Track Drone/Track Op buttons
 }
 
 function selectHistoryTarget(target) {
   historySelectedTarget = target;
-  if (target === 'drone') {
-    if (historyState.opMarker) historyState.opMarker.closePopup();
-    if (historyState.marker) historyState.marker.openPopup();
-  } else {
-    if (historyState.marker) historyState.marker.closePopup();
-    if (historyState.opMarker) historyState.opMarker.openPopup();
-  }
+  // Moves to wherever that unit is at the current scrub position, matching
+  // Live's Focus behaviour. (Loading a flight sets the target directly and
+  // fits the whole route instead, so it doesn't come through here.)
+  const m = target === 'drone' ? historyState.marker : historyState.opMarker;
+  if (m) map.panTo(m.getLatLng());
+  // Focusing a unit is a clear "show me this", so it brings the panel back
+  // if you'd closed it.
+  historyPanelDismissed = false;
+  collapseSidebarOnMobile();
+  renderDetailPanel();
   updateHistoryTrailStyles();
   // Update just the two track-target buttons in place rather than
   // re-fetching/re-rendering the whole flight list for a simple toggle.
@@ -1982,6 +2210,7 @@ function updateHistoryTrailStyles() {
 function scrubToIndex(idx) {
   const p = historyState.points[idx];
   if (!p) return;
+  historyState.idx = idx;
 
   const hasDrone = p.lat !== null && p.lat !== undefined && p.lon !== null && p.lon !== undefined;
   const hasOp = p.op_lat !== null && p.op_lat !== undefined && p.op_lon !== null && p.op_lon !== undefined
@@ -1993,11 +2222,9 @@ function scrubToIndex(idx) {
   if (hasDrone && historyState.marker) {
     historyState.marker.setLatLng([p.lat, p.lon]);
     historyState.marker.setIcon(droneIconSvg('#F97316', p.heading));
-    historyState.marker.setPopupContent(historyPopupHtml(idx));
   }
   if (hasOp && historyState.opMarker) {
     historyState.opMarker.setLatLng([p.op_lat, p.op_lon]);
-    historyState.opMarker.setPopupContent(historyOperatorPopupHtml(idx));
   }
 
   // Dashed link follows the drone through playback, connecting to wherever
@@ -2006,7 +2233,7 @@ function scrubToIndex(idx) {
   if (hasDrone && hasOp) {
     const linkPts = [[p.lat, p.lon], [p.op_lat, p.op_lon]];
     if (!historyState.link) {
-      historyState.link = L.polyline(linkPts, { color: '#A78BFA', weight: 2, dashArray: '6,6', opacity: 0.7 });
+      historyState.link = L.polyline(linkPts, { color: '#A78BFA', weight: 2, dashArray: '6,6', opacity: 0.7, bubblingMouseEvents: false });
       historyLayer.addLayer(historyState.link);
     } else {
       historyState.link.setLatLngs(linkPts);
@@ -2020,6 +2247,9 @@ function scrubToIndex(idx) {
     <span class="scrub-datetime">${fmtDateTime(p.ts)}</span>
     <span class="scrub-point">Point <b>${idx}</b> / ${historyState.points.length - 1}</span>
   `;
+  // Values only change here, not the row set, so this is an in-place
+  // update — cheap enough to run on every playback step.
+  if (mapContext === 'history') renderDetailPanel();
 }
 
 function stopPlayback() {
@@ -2094,6 +2324,10 @@ function switchMode(next) {
     document.getElementById('count-label').textContent = 'settings';
     renderSettingsPanel();
   }
+  // Settings leaves the map (and so the panel) on whichever of Live/History
+  // was showing, so only those two change what the panel describes.
+  if (next === 'live' || next === 'history') mapContext = next;
+  renderDetailPanel();
 }
 
 document.getElementById('tab-live').addEventListener('click', () => switchMode('live'));
@@ -2157,10 +2391,11 @@ function connectWs() {
 connectWs();
 loadStation();
 
-// Ticks any currently-open popup once a second so "Tracked Time" counts up
-// live even between bursts, without waiting on new data to arrive.
+// Ticks the open panel once a second so "Tracked Time" and "Last Seen" count
+// up live even between bursts. Cheap: with the row set unchanged it only
+// rewrites the values that actually differ.
 setInterval(() => {
-  if (selectedKey) refreshOpenInfoBoxes();
+  if (panelState.open) renderDetailPanel();
 }, 1000);
 
 // Health indicator tooltips: now position:fixed (see CSS) rather than
