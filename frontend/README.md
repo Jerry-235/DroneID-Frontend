@@ -85,9 +85,12 @@ back under a slightly different identity (a re-randomized MAC, or a serial
 that hadn't been decoded yet the first time round). Two side effects worth
 knowing about:
 
-- Giving two genuinely different drones the **same friendly name** will
-  merge them if they appear within the window of each other. That's the
-  behavior as specified; rename one if you don't want it.
+- The **friendly name** only counts when the serials don't contradict it.
+  Two drones you've given the same name stay separate flights, and both
+  still raise their own Discord alert, as long as both serials are known and
+  differ. The name arm exists for an aircraft that comes back with a
+  re-randomized MAC before its serial has been decoded, and it still bridges
+  that. Two *un-serialled* drones sharing a name could still be merged.
 - A merged flight's recorded path has a real gap in it. Points carry a
   `segment` number so neither the live trail nor History playback draws a
   straight line across it — you'll see separate strokes instead.
@@ -96,12 +99,57 @@ A flight left open by a server restart is picked back up by the same
 mechanism, so restarting the app mid-flight no longer strands a half-flight
 in History (as long as the drone reappears inside the window).
 
+### The detail panel
+
+Selecting a drone or its operator — from the list, by clicking it on the
+map, or with a Focus button — opens a details panel. (It replaced the old
+pop-up bubbles on the markers.)
+
+- **Desktop:** a 340px column on the right. It pushes the map narrower
+  instead of covering it, so the unit you just moved to is never hidden
+  underneath.
+- **Mobile (700px wide and under):** a full-width sheet across the lower
+  third of the screen, like other flight trackers. The map, list and
+  scrubber shrink to the space above it. Tap the grab handle to expand it
+  to about three-quarters of the screen. On a phone, picking something also
+  collapses the list so the map gets the width; tap the tab to reopen it.
+
+Aircraft and operator data share one scroll, each under a header that
+stays pinned while its section scrolls. Every row still follows the Basic
+/ Drone / Operator toggles in Settings. Changing a toggle, or the units,
+updates the panel straight away, even with Settings open. Registration,
+Self ID and Operator ID show whenever the aircraft broadcasts them, as the
+pop-ups did.
+
+**Focus Drone** and **Focus Op** are the focus controls — the Live rows no
+longer carry a Focus Op button of their own. Each brings up that unit's
+trail and glides the map to it.
+
+The two behave identically on purpose: both pan to their own unit and leave
+the zoom alone, so toggling between drone and operator holds steady. (Focus
+Op used to zoom out to fit both, which changed the zoom level on every
+toggle.) The dashed link line and the panel's distance readouts are what
+tie the pair together.
+
+- **Live:** the row still selects the drone when you click it anywhere
+  else; the "Operator Detected" indicator stays on the row.
+- **History:** focus pans to the unit at the current scrub point. Loading a
+  flight still fits the whole route. The flight rows no longer carry their
+  own Track Drone / Track Op buttons — the panel's pair replaced them.
+
+In History, the operator's own trail is a solid purple line — bold while
+you're tracking the operator, faded when you aren't. The only dashed purple
+on the map is the straight drone-to-operator link.
+
+Close with **×** or by tapping an empty patch of map. In Live that clears
+the selection. In History the flight stays loaded; click one of its markers,
+or reopen the flight from the list, to bring the panel back.
+
 ### Merging and deleting flights by hand (admin view only)
 
 With the admin flag set (see *Admin view* below), each row in the History tab
 gets a small checkbox at the right-hand end of its stats line — bottom right
-of the flight's details, under the pencil, and clear of the Track Drone /
-Track Op buttons when the row is expanded. Tick one or more and an action bar
+of the flight's details, under the pencil. Tick one or more and an action bar
 slides up at the **bottom** of the panel with **Merge**, **Delete** and
 **Clear**; it's anchored there rather than at the top so nothing above it
 moves when it appears. Both actions ask for confirmation first, and neither
@@ -120,7 +168,8 @@ Merging is refused, with the reason shown in the bar, when:
   or every one has to agree on a MAC (`Cannot merge mismatched info`). Either
   alone is enough, since a MAC can be re-randomized between flights while the
   serial holds, and an early flight may only ever have been seen by MAC. A
-  flight carrying neither can't be matched to anything, so it never merges;
+  flight carrying neither can't be matched to anything, so it never merges.
+  A shared friendly name is never enough on its own here;
 - a flight is still in progress — a live track is writing points into it, so
   it has to close out first.
 
@@ -370,10 +419,9 @@ determined from reaching those controls.
   actually emits so we can convert it properly instead of flagging it.
 - **Renaming uses a plain `prompt()` dialog** for now — functional, not
   polished; an inline edit box would be a nice small upgrade later.
-- **Friendly-name matching in flight merging is exact and case-sensitive**,
-  and it is the one matching arm that can join two genuinely different
-  aircraft. See the merge section above; it's deliberate, but it's the arm
-  most likely to surprise you.
+- **Friendly-name matching in flight merging is exact and case-sensitive.**
+  It can no longer join two aircraft with known-different serials, but it
+  can still join two that have never reported a serial at all.
 - **Merging can't un-merge.** Once two segments are recorded on one flight
   row there's no UI to split them apart again, so if the window turns out to
   be too generous for your airspace, lower
@@ -386,3 +434,11 @@ determined from reaching those controls.
   WebSocket API.
 - `db.py` — SQLite persistence layer.
 - `static/index.html` — the map UI (Leaflet, vanilla JS, no build step).
+- `static/icons/` — tab and bookmark icons, built from the same delta the
+  live map draws for a drone, in the app's own palette. Three themed marks
+  are defined in `build-icons.py`: `a` (the bare dart), `b` (dart in a ring),
+  `c` (dart in reticle corners — shipped). `python3
+  build-icons.py a` rebuilds the whole set from a different one; the
+  filenames don't change, so `index.html` needs no edit. Needs Playwright's
+  Chromium to rasterize; without it the SVGs are still written and only the
+  PNG/ICO step is skipped.

@@ -146,9 +146,9 @@
   /* Admin-only multi-select on History rows. It rides at the right-hand end
      of the stats line — still bottom-right of the flight's own details and
      under the pencil, but in normal flow rather than absolutely positioned,
-     so it can't sit on top of the Track Drone / Track Op buttons when the
-     row expands. Styled to match those buttons: recessed dark well with a
-     hairline border, picking up the drone orange once ticked. */
+     so it stays clear of everything else in the row. Styled like the
+     panel's Focus buttons: recessed dark well with a hairline border,
+     picking up the drone orange once ticked. */
   .flight-pick{
     appearance:none; -webkit-appearance:none;
     width:16px; height:16px; margin:0; flex:0 0 auto; cursor:pointer;
@@ -195,22 +195,6 @@
      selection. */
   .bulk-msg{ flex:1 1 100%; font-size:11px; line-height:1.4; color:var(--red); }
   .bulk-msg.ok{ color:var(--text-muted); }
-  .history-track-buttons{
-    margin-top:8px; padding-top:7px; border-top:1px solid var(--hairline);
-    display:flex; gap:6px;
-  }
-  .history-track-btn{
-    flex:1 1 auto; background:var(--bg); border:1px solid var(--hairline); color:var(--text-muted);
-    font-family:'Inter',sans-serif; font-size:11px; font-weight:600;
-    padding:5px 8px; border-radius:var(--radius); cursor:pointer;
-  }
-  .history-track-btn:hover{ color:var(--text); border-color:var(--text-muted); }
-  .history-track-btn.active-drone{
-    background:rgba(249,115,22,0.12); color:#F97316; border-color:rgba(249,115,22,0.4);
-  }
-  .history-track-btn.active-operator{
-    background:rgba(167,139,250,0.12); color:#A78BFA; border-color:rgba(167,139,250,0.4);
-  }
   .unit-toggle-row{ padding:0 14px 14px; display:flex; gap:8px; }
   .unit-btn{
     flex:1 1 auto; background:var(--bg); border:1px solid var(--hairline); color:var(--text-muted);
@@ -395,8 +379,8 @@
   }
   .dp-sub .status-chip{ width:7px; height:7px; }
   .dp-actions{ margin-top:10px; display:flex; gap:6px; }
-  /* Same recessed-well treatment as the History Track Drone / Track Op
-     buttons, so the two sets read as the same control. */
+  /* Recessed dark well with a hairline border, matching the other small
+     controls in the app. */
   .dp-focus{
     flex:1 1 0; background:var(--bg); border:1px solid var(--hairline); color:var(--text-muted);
     font-family:'Inter',sans-serif; font-size:11px; font-weight:600;
@@ -2167,17 +2151,6 @@ async function loadHistoryList() {
     const sel = f.id === historyState.flightId ? ' selected' : '';
     const picked = pickedFlights.has(f.id);
     const inProgress = !f.ended_at;
-    const isOpen = f.id === historyState.flightId;
-    // Only known once this flight's points have actually been fetched
-    // (i.e. it's the currently open one) — the flight list itself doesn't
-    // carry point-level data, so Track Op only appears once we can confirm
-    // this flight actually has operator positions recorded.
-    const hasOpData = isOpen && !!historyState.opMarker;
-    const expandedHtml = isOpen ? `
-        <div class="history-track-buttons">
-          <button class="history-track-btn${historySelectedTarget === 'drone' ? ' active-drone' : ''}" data-target="drone">Track Drone</button>
-          ${hasOpData ? `<button class="history-track-btn${historySelectedTarget === 'operator' ? ' active-operator' : ''}" data-target="operator">Track Op</button>` : ''}
-        </div>` : '';
     return `
       <div class="track-row${sel}${picked ? ' picked' : ''}" data-flight="${f.id}" data-key="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">
         <div class="row-top">
@@ -2196,13 +2169,12 @@ async function loadHistoryList() {
           ${inProgress ? '<span style="color:#E8A33D">in progress</span>' : ''}
           ${admin ? `<input type="checkbox" class="flight-pick" style="margin-left:auto" data-pick="${f.id}" ${picked ? 'checked' : ''} title="Select this flight for merge or delete">` : ''}
         </div>
-        ${expandedHtml}
       </div>`;
   }).join('');
 
   sidebar.querySelectorAll('.track-row').forEach(row => {
     row.addEventListener('click', (e) => {
-      if (e.target.dataset.rename || e.target.dataset.target || e.target.dataset.pick) return;
+      if (e.target.dataset.rename || e.target.dataset.pick) return;
       selectHistoryFlight(parseInt(row.dataset.flight, 10));
     });
   });
@@ -2212,12 +2184,6 @@ async function loadHistoryList() {
       // ticking the box is a selection action, not a "show me this" action.
       e.stopPropagation();
       setFlightPicked(parseInt(box.dataset.pick, 10), box.checked);
-    });
-  });
-  sidebar.querySelectorAll('.history-track-btn').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      selectHistoryTarget(btn.dataset.target);
     });
   });
   sidebar.querySelectorAll('[data-rename]').forEach(btn => {
@@ -2304,7 +2270,7 @@ async function selectHistoryFlight(flightId) {
   range.value = 0;
   scrubber.classList.add('show');
   scrubToIndex(0);
-  loadHistoryList(); // refresh selection highlight + show the Track Drone/Track Op buttons
+  loadHistoryList(); // refresh which row is highlighted as the open flight
 }
 
 function selectHistoryTarget(target) {
@@ -2320,12 +2286,6 @@ function selectHistoryTarget(target) {
   collapseSidebarOnMobile();
   renderDetailPanel();
   updateHistoryTrailStyles();
-  // Update just the two track-target buttons in place rather than
-  // re-fetching/re-rendering the whole flight list for a simple toggle.
-  document.querySelectorAll('.history-track-btn').forEach(btn => {
-    btn.classList.toggle('active-drone', btn.dataset.target === 'drone' && btn.dataset.target === target);
-    btn.classList.toggle('active-operator', btn.dataset.target === 'operator' && btn.dataset.target === target);
-  });
 }
 
 function updateHistoryTrailStyles() {

@@ -277,12 +277,26 @@ def _find_resumable_flight(catalog_key, mac, serial, nickname, cutoff_ts, exclud
     time around. Each arm is guarded by its own NULL check so a track with,
     say, no serial yet can't match every serial-less flight in the table.
 
+    The friendly-name arm carries one extra condition: it only counts when
+    the serials don't contradict it. If this track and the candidate flight
+    both carry a serial and the two differ, they are provably different
+    aircraft, and a name the operator happened to reuse can't outvote that.
+    Without this, naming two drones the same thing was enough to fold them
+    into one flight and swallow the second one's new-drone alert.
+
+    That guard is deliberately NOT applied to the MAC arm. Two aircraft
+    sharing a MAC essentially doesn't happen, so the same MAC reporting a
+    different serial is far more likely to be one aircraft whose Basic ID
+    decoded badly on one of the two passes — which is exactly the kind of
+    gap this is meant to bridge.
+
     exclude_ids keeps this from stealing a flight that some other live track
     currently has open.
 
     Returns a dict (id, catalog_key, segment_count, last_activity) or None."""
     conn = _require_conn()
-    params = [cutoff_ts, catalog_key, mac, mac, serial, serial, nickname, nickname]
+    params = [cutoff_ts, catalog_key, mac, mac, serial, serial,
+              nickname, nickname, serial, serial]
     exclude_sql = ""
     if exclude_ids:
         exclude_sql = f" AND f.id NOT IN ({','.join('?' * len(exclude_ids))})"
@@ -298,7 +312,11 @@ def _find_resumable_flight(catalog_key, mac, serial, nickname, cutoff_ts, exclud
                 f.catalog_key = ?
              OR (? IS NOT NULL AND f.mac = ?)
              OR (? IS NOT NULL AND f.serial = ?)
-             OR (? IS NOT NULL AND d.nickname = ?)
+             OR (
+                  ? IS NOT NULL AND d.nickname = ?
+                  -- ...but only if the serials don't say otherwise
+                  AND (? IS NULL OR f.serial IS NULL OR f.serial = ?)
+                )
           )
           {exclude_sql}
         ORDER BY last_activity DESC
