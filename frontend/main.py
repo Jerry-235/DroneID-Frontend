@@ -28,7 +28,8 @@ import zmq
 import zmq.asyncio
 import zmq.utils.monitor
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -921,6 +922,15 @@ async def stale_sweeper():
 
 app = FastAPI(title="DroneID Live Map")
 
+# Compress HTTP responses. A long flight's point list is megabytes of JSON
+# that repeats the same field names and strings on every row, so it shrinks
+# about 20x (a 7,492-point flight: 4.3 MB -> 0.19 MB) — the difference
+# between a second-plus and near-instant over WiFi or to a phone. Level 5
+# gets almost all of level 9's saving in a fraction of the CPU time. Small
+# responses (under 1 KB) are left alone, and the WebSocket is untouched: this
+# middleware only handles plain HTTP.
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
+
 
 class RenameBody(BaseModel):
     nickname: str
@@ -1085,7 +1095,20 @@ async def api_get_flight(flight_id: int):
     if not flight:
         return JSONResponse({"error": "flight not found"}, status_code=404)
     points = await db.get_flight_points(flight_id)
-    return {"flight": flight, "points": points}
+    # Serialised here and returned as a finished Response, rather than
+    # returning the dict for FastAPI to encode. FastAPI's default path first
+    # walks every value through its own recursive encoder in pure Python —
+    # ~190k values for a long flight — before it even starts serialising,
+    # which is the slow part for a response this size. The data is already
+    # plain JSON types straight from SQLite, so that pass has nothing to do.
+    # Same serialisation settings as FastAPI's own JSONResponse, so the body
+    # is exactly what it would have produced (SQLite can't store NaN, so
+    # allow_nan=False can't trip).
+    body = json.dumps(
+        {"flight": flight, "points": points},
+        ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+    )
+    return Response(content=body, media_type="application/json")
 
 
 MISMATCH_MESSAGE = "Cannot merge mismatched info"
