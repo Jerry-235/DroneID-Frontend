@@ -223,7 +223,7 @@
   }
   .track-op-row{
     margin-top:8px; padding-top:7px; border-top:1px solid var(--hairline);
-    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    display:flex; align-items:center; gap:8px;
   }
   .track-op-indicator{
     display:flex; align-items:center; gap:5px;
@@ -238,12 +238,6 @@
     animation:op-pulse 1.6s ease-in-out infinite;
   }
   @keyframes op-pulse{ 0%,100%{opacity:1;} 50%{opacity:0.4;} }
-  .focus-op-btn{
-    background:rgba(52,211,153,0.1); color:#34D399; border:1px solid rgba(52,211,153,0.35);
-    font-size:10px; font-weight:600; padding:3px 8px; border-radius:var(--radius); cursor:pointer;
-    font-family:'Inter',sans-serif; flex:0 0 auto;
-  }
-  .focus-op-btn:hover{ background:rgba(52,211,153,0.2); }
   .track-date{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-muted); }
   /* The bold title plus its copy button. The wrapper takes the stretch that
      .track-name used to, so the pencil stays pinned right while the name
@@ -1123,7 +1117,13 @@ function setPanelOpen(open) {
   // transition finishes — same timing as the sidebar collapse. Its default
   // keeps the geographic centre fixed, so whatever was just panned to stays
   // in the middle of the smaller map.
-  setTimeout(() => map.invalidateSize(), 220);
+  setTimeout(() => {
+    map.invalidateSize();
+    // Opening the panel resizes the map mid-glide, which can cut the pan
+    // short and leave the unit off-centre. Re-assert it once the transition
+    // has settled — no animation, it's already almost there.
+    if (open) focusMap(focusedLatLng(), false);
+  }, 220);
 }
 
 function setPanelExpanded(expanded) {
@@ -1131,7 +1131,10 @@ function setPanelExpanded(expanded) {
   panelState.expanded = expanded;
   document.getElementById('detail-panel').classList.toggle('expanded', expanded);
   document.querySelector('.main').classList.toggle('sheet-expanded', expanded);
-  setTimeout(() => map.invalidateSize(), 220);
+  setTimeout(() => {
+    map.invalidateSize();
+    focusMap(focusedLatLng(), false);   // keep the unit centred as the sheet grows/shrinks
+  }, 220);
 }
 
 function styleFocusButton(btn, enabled, active, color) {
@@ -1215,11 +1218,24 @@ function renderDetailPanel() {
   });
 }
 
+// Which row is highlighted is the only thing in the live list that changes
+// when you focus something, so repaint just that. Rebuilding the whole list
+// on every Focus click (which is what renderSidebar did) made the sidebar
+// flicker and threw away your scroll position.
+function updateLiveRowSelection() {
+  document.querySelectorAll('#sidebar .track-row[data-key]:not([data-flight])').forEach(row => {
+    const sel = row.dataset.key === selectedKey;
+    const entry = droneMarkers.get(row.dataset.key);
+    row.classList.toggle('selected', sel);
+    row.style.borderLeftColor = (sel && entry) ? entryColor(entry) : '';
+  });
+}
+
 function clearLiveSelection() {
   selectedKey = null;
   selectedTarget = null;
   droneMarkers.forEach((e, k) => { updatePathVisibility(e, k); updateDroneIcon(e, k); });
-  if (mode === 'live') renderLiveSidebar();
+  if (mode === 'live') updateLiveRowSelection();
   renderDetailPanel();
 }
 
@@ -1778,38 +1794,45 @@ function droneTooltipText(d) {
   return escapeHtml(d.nickname || d.serial || d.mac || 'Unknown aircraft');
 }
 
-function selectTrack(key) {
+// Where the currently focused unit is right now, in whichever mode the map
+// is showing — or null if there's nothing focused, or it has no position.
+function focusedLatLng() {
+  if (mapContext === 'live') {
+    const entry = selectedKey ? droneMarkers.get(selectedKey) : null;
+    if (!entry) return null;
+    const m = selectedTarget === 'operator' ? entry.opMarker : entry.marker;
+    return m ? m.getLatLng() : null;
+  }
+  const m = historySelectedTarget === 'operator' ? historyState.opMarker : historyState.marker;
+  return m ? m.getLatLng() : null;
+}
+
+// Both Focus buttons move the map identically: glide to their own unit and
+// leave the zoom alone. Focus Op used to zoom out to fit drone and operator
+// together, so toggling between the two changed the zoom level under you
+// every time — the pair feels much steadier kept symmetric.
+function focusMap(latlng, animate) {
+  if (!latlng) return;
+  map.panTo(latlng, { animate: animate !== false, duration: 0.35 });
+}
+
+function selectLiveTarget(key, target) {
   selectedKey = key;
-  selectedTarget = 'drone';
+  selectedTarget = target;
   const entry = droneMarkers.get(key);
   if (entry) {
-    if (entry.marker) map.panTo(entry.marker.getLatLng());
-    updatePathVisibility(entry, key);
+    const m = target === 'operator' ? entry.opMarker : entry.marker;
+    if (m) focusMap(m.getLatLng());
   }
-  // Only the focused track keeps a trail and a halo ring.
+  // Only the focused track keeps a trail, and only it keeps a halo ring.
   droneMarkers.forEach((e, k) => { updatePathVisibility(e, k); updateDroneIcon(e, k); });
   collapseSidebarOnMobile();
-  renderSidebar();
+  if (mode === 'live') updateLiveRowSelection();
   renderDetailPanel();
 }
 
-function selectOperator(key) {
-  selectedKey = key;
-  selectedTarget = 'operator';
-  const entry = droneMarkers.get(key);
-  if (entry) {
-    if (entry.marker && entry.opMarker) {
-      map.fitBounds(L.latLngBounds([entry.marker.getLatLng(), entry.opMarker.getLatLng()]), { padding: [60, 60] });
-    } else if (entry.opMarker) {
-      map.panTo(entry.opMarker.getLatLng());
-    }
-    updatePathVisibility(entry, key);
-  }
-  droneMarkers.forEach((e, k) => { updatePathVisibility(e, k); updateDroneIcon(e, k); });
-  collapseSidebarOnMobile();
-  renderSidebar();
-  renderDetailPanel();
-}
+function selectTrack(key) { selectLiveTarget(key, 'drone'); }
+function selectOperator(key) { selectLiveTarget(key, 'operator'); }
 
 function renderLiveSidebar() {
   const sidebar = document.getElementById('sidebar');
@@ -1855,14 +1878,13 @@ function renderLiveSidebar() {
           <span class="track-op-indicator" style="color:${opColor};">
             <span class="op-dot${hasOp ? ' op-yes' : ''}" style="${hasOp ? `background:${color};box-shadow:0 0 6px ${color};` : ''}"></span>${hasOp ? 'Operator Detected' : 'No Operator Detected'}
           </span>
-          ${hasOp ? `<button class="focus-op-btn" data-focus-op="${escapeHtml(d.key)}" style="color:${color};border-color:${hexToRgba(color,0.35)};background:${hexToRgba(color,0.1)};">Focus Op</button>` : ''}
         </div>
       </div>`;
   }).join('');
 
   sidebar.querySelectorAll('.track-row').forEach(row => {
     row.addEventListener('click', (e) => {
-      if (e.target.dataset.rename || e.target.dataset.focusOp) return; // buttons handle their own clicks below
+      if (e.target.dataset.rename) return; // the pencil handles its own clicks below
       selectTrack(row.dataset.key);
     });
   });
@@ -1870,12 +1892,6 @@ function renderLiveSidebar() {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       renameDrone(btn.dataset.rename, btn.dataset.name);
-    });
-  });
-  sidebar.querySelectorAll('[data-focus-op]').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      selectOperator(btn.dataset.focusOp);
     });
   });
   sidebar.dataset.view = 'live';
@@ -2262,7 +2278,7 @@ async function selectHistoryFlight(flightId) {
     boundsLayers.push(historyState.line);
   }
   if (opPts.length > 1) {
-    historyState.opLine = L.polyline(segmentedLatLngs(opPts, p => [p.op_lat, p.op_lon]), { color: '#A78BFA', weight: 2, opacity: 0.6, dashArray: '4,4', bubblingMouseEvents: false });
+    historyState.opLine = L.polyline(segmentedLatLngs(opPts, p => [p.op_lat, p.op_lon]), { color: '#A78BFA', weight: 2, opacity: 0.35, bubblingMouseEvents: false });
     historyLayer.addLayer(historyState.opLine);
     boundsLayers.push(historyState.opLine);
   }
@@ -2297,7 +2313,7 @@ function selectHistoryTarget(target) {
   // Live's Focus behaviour. (Loading a flight sets the target directly and
   // fits the whole route instead, so it doesn't come through here.)
   const m = target === 'drone' ? historyState.marker : historyState.opMarker;
-  if (m) map.panTo(m.getLatLng());
+  if (m) focusMap(m.getLatLng());
   // Focusing a unit is a clear "show me this", so it brings the panel back
   // if you'd closed it.
   historyPanelDismissed = false;
@@ -2323,11 +2339,15 @@ function updateHistoryTrailStyles() {
     historyState.line.setStyle({ weight: droneFocused ? 3 : 2, opacity: droneFocused ? 0.9 : 0.6 });
   }
   if (historyState.opLine) {
+    // Always a solid purple line: bold when you're tracking the operator,
+    // faded back when you aren't. It used to go dashed when unfocused,
+    // which read as another version of the drone-operator link line — the
+    // only dashed purple on the map should be that link.
     const opFocused = historySelectedTarget === 'operator';
     historyState.opLine.setStyle({
       weight: opFocused ? 3 : 2,
-      opacity: opFocused ? 0.9 : 0.6,
-      dashArray: opFocused ? null : '4,4',
+      opacity: opFocused ? 0.9 : 0.35,
+      dashArray: null,
     });
   }
 }
