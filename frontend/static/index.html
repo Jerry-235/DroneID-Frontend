@@ -856,26 +856,34 @@ function saveUnitSystem() {
 let unitSystem = loadUnitSystem();
 
 // ---------------- admin view gate ----------------
-// Purely a client-side declutter for casual viewers, not real access
-// control — anyone who opens dev tools can flip this themselves. Visiting
-// once with ?jerry=1 unlocks it permanently for that browser; the flag then
-// lives in localStorage and the param is stripped from the URL so it's not
-// visible or accidentally shared via a bookmark/link.
-const ADMIN_KEY = 'droneid_admin_v1';
+// The server decides, from the network the request came in on (see
+// ADMIN_NETS in main.py) — not this browser. That replaced the old
+// ?jerry=1 localStorage flag, which could only hide controls: anyone who
+// opened dev tools could set it, and the endpoints behind those controls
+// answered to everyone regardless.
+//
+// So this is now only about drawing the right UI. The server refuses the
+// admin endpoints itself, whatever this says, which is what actually makes
+// the distinction mean something.
+let adminAllowed = false;
+let clientAddress = null;   // how the server sees us — shown in Settings so it's
+                            // obvious which route this tab came in on
 
-function checkAdminUnlock() {
-  const params = new URLSearchParams(location.search);
-  if (params.get('jerry') === '1') {
-    try { localStorage.setItem(ADMIN_KEY, '1'); } catch (e) { /* ignore */ }
-    params.delete('jerry');
-    const clean = location.pathname + (params.toString() ? '?' + params.toString() : '') + location.hash;
-    history.replaceState({}, '', clean);
+function isAdmin() { return adminAllowed; }
+
+async function loadAccess() {
+  try {
+    const res = await fetch('/api/access');
+    const data = await res.json();
+    adminAllowed = !!(data && data.admin);
+    clientAddress = (data && data.client) || null;
+  } catch (e) {
+    adminAllowed = false;   // can't ask — show the plain view
   }
-}
-checkAdminUnlock();
-
-function isAdmin() {
-  try { return localStorage.getItem(ADMIN_KEY) === '1'; } catch (e) { return false; }
+  // The answer usually lands after the first render, so redraw whichever
+  // view cares about it.
+  if (mode === 'settings') renderSettingsPanel();
+  else if (mode === 'history') loadHistoryList();
 }
 
 function metersToFeet(m) { return m * 3.28084; }
@@ -1387,6 +1395,13 @@ function renderSettingsPanel() {
   html += unitsHtml;
   const admin = isAdmin();
   if (admin) {
+    html += `
+      <div class="settings-group-title">Access</div>
+      <div class="settings-note">
+        Admin controls are on for this connection${clientAddress
+          ? ` — the server sees you as <code>${escapeHtml(clientAddress)}</code>`
+          : ''}. Reaching the app over the other route gives the read-only view.
+      </div>`;
     html += stationHtml;
     html += discordHtml;
     html += debugHtml;
@@ -1883,7 +1898,22 @@ function selectOperator(key) { selectLiveTarget(key, 'operator'); }
 function renderLiveSidebar() {
   const sidebar = document.getElementById('sidebar');
   const scrollPos = sidebar.scrollTop;
-  const entries = Array.from(droneMarkers.values()).sort((a, b) => (b.data.last_seen || 0) - (a.data.last_seen || 0));
+  // Ordered by when each drone was first discovered, oldest at the top.
+  //
+  // This used to sort by last_seen, newest first — which meant that with more
+  // than one drone in the air the list re-sorted every time any of them sent
+  // a burst, and they took turns shoving each other out of the top spot
+  // several times a second. first_seen never changes for the life of a track,
+  // so the order is fixed the moment a drone appears: a new detection is
+  // appended at the bottom and nothing above it moves. (A drone that drops
+  // off and is rediscovered is genuinely new, and joins at the bottom.)
+  //
+  // The key is the tie-break, so two drones first seen in the same burst
+  // still have one settled order rather than swapping on every render.
+  const entries = Array.from(droneMarkers.values()).sort((a, b) => {
+    const byDiscovery = (a.data.first_seen || 0) - (b.data.first_seen || 0);
+    return byDiscovery || String(a.data.key).localeCompare(String(b.data.key));
+  });
   document.getElementById('track-count').textContent = entries.length;
   document.getElementById('count-label').textContent = 'tracked';
 
@@ -2613,6 +2643,7 @@ function connectWs() {
 
 connectWs();
 loadStation();
+loadAccess();
 
 // Ticks the open panel once a second so "Tracked Time" and "Last Seen" count
 // up live even between bursts. Cheap: with the row set unchanged it only
