@@ -364,8 +364,12 @@
   }
   .dp-grab{ display:none; }
   .dp-title-row{ display:flex; align-items:center; gap:8px; }
+  /* Same arrangement as a list row: the wrapper takes the stretch so the
+     name keeps only its text width and the copy button sits at the end of
+     the ID, with the pencil still pinned right. */
+  .dp-name-line{ flex:1 1 auto; min-width:0; display:flex; align-items:center; gap:4px; }
   .dp-name{
-    font-size:15px; font-weight:700; flex:1 1 auto; min-width:0;
+    font-size:15px; font-weight:700; flex:0 1 auto; min-width:0;
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
   }
   .dp-close{
@@ -501,14 +505,16 @@
       <div class="dp-head">
         <button class="dp-grab" id="dp-grab" aria-label="Expand or shrink details"></button>
         <div class="dp-title-row">
-          <span class="dp-name" id="dp-name"></span>
+          <span class="dp-name-line">
+            <span class="dp-name" id="dp-name"></span><span id="dp-copy-slot"></span>
+          </span>
           <button class="pencil-btn" id="dp-rename" title="Rename this drone">✎</button>
           <button class="dp-close" id="dp-close" aria-label="Close details">×</button>
         </div>
         <div class="dp-sub" id="dp-sub"></div>
         <div class="dp-actions">
           <button class="dp-focus" id="dp-focus-drone">Focus Drone</button>
-          <button class="dp-focus" id="dp-focus-op">Focus Op</button>
+          <button class="dp-focus" id="dp-focus-op">Focus Operator</button>
         </div>
       </div>
       <div class="dp-body" id="dp-body"></div>
@@ -1019,12 +1025,23 @@ let historyPanelDismissed = false;
 const PANEL_MQ = window.matchMedia ? window.matchMedia('(max-width: 700px)') : null;
 function isMobileLayout() { return !!(PANEL_MQ && PANEL_MQ.matches); }
 
+// One bubble per section, each sitting above its own data. BASIC leads,
+// then AIRCRAFT in the place the plain "Drone" label used to occupy, then
+// OPERATOR. Colours come from the view: in Live all three take the drone's
+// own identity colour, so the panel reads as belonging to that aircraft;
+// History has no per-drone colour, so it uses its own fixed set.
 const PANEL_SECTIONS = [
-  { label: 'AIRCRAFT', colorKey: 'droneColor', groups: ['Basic', 'Drone'] },
+  { label: 'BASIC',    colorKey: 'basicColor', groups: ['Basic'] },
+  { label: 'AIRCRAFT', colorKey: 'droneColor', groups: ['Drone'] },
   { label: 'OPERATOR', colorKey: 'opColor',    groups: ['Operator'] },
 ];
 
-const panelState = { open: false, expanded: false, sig: null, viewKey: null };
+// The bubble colour for History's Basic section. Deliberately distinct from
+// History's drone orange and operator purple, since a recorded flight has no
+// live identity colour to borrow.
+const HISTORY_BASIC_COLOR = '#60A5FA';
+
+const panelState = { open: false, expanded: false, sig: null, viewKey: null, copySig: null };
 
 function fieldDef(group, key) {
   return (FIELD_DEFS[group] || []).find(f => f.key === key);
@@ -1041,22 +1058,31 @@ function panelView() {
     const stale = d.status === 'stale';
     // Shown whenever the aircraft broadcasts them, as the old popup did —
     // they aren't in the Settings field list, so there's nothing to toggle.
-    const aircraftExtras = [];
-    if (d.registration_id) aircraftExtras.push(['Registration', d.registration_id]);
-    if (d.description) aircraftExtras.push(['Self ID', d.description]);
+    const title = d.nickname || d.serial || d.mac || 'Unknown aircraft';
+    // Registration and Self ID are identity, so they belong under BASIC now
+    // that it's a section of its own.
+    const basicExtras = [];
+    if (d.registration_id) basicExtras.push(['Registration', d.registration_id]);
+    if (d.description) basicExtras.push(['Self ID', d.description]);
     const operatorExtras = [];
     if (d.operator_id) operatorExtras.push(['Operator ID', d.operator_id]);
     return {
       viewKey: 'live:' + d.key,
-      name: d.nickname || d.serial || d.mac || 'Unknown aircraft',
+      name: title,
       renameKey: d.key,
-      extras: { AIRCRAFT: aircraftExtras, OPERATOR: operatorExtras },
+      // Offered only when the title is the aircraft's own ID, exactly as in
+      // the list — a name you chose isn't something you'd paste anywhere.
+      copyLabel: d.nickname ? null
+        : (title === d.serial ? 'Copy serial number' : 'Copy MAC address'),
+      focusVerb: 'Track',
+      extras: { BASIC: basicExtras, OPERATOR: operatorExtras },
       warn: d.raw_units_warning
         ? 'Altitude, height and speed arrived in an unrecognised raw encoding and are shown unconverted.'
         : null,
       subHtml: `<span class="status-chip" style="background:${stale ? STALE_COLOR : color};` +
                `box-shadow:${stale ? 'none' : `0 0 6px ${color}`}"></span>${stale ? 'Stale' : 'Live'}`,
       data: d,
+      basicColor: color,
       droneColor: color,
       opColor: color,
       canDrone: !!entry.marker,
@@ -1072,13 +1098,16 @@ function panelView() {
     // Renaming from here would leave this flight's cached display name stale
     // until it was reopened; the pencil on the History row handles it.
     renameKey: null,
+    copyLabel: historyRawIdLabel(meta),
+    focusVerb: 'Focus',
     extras: {
-      AIRCRAFT: meta.registration_id ? [['Registration', meta.registration_id]] : [],
+      BASIC: meta.registration_id ? [['Registration', meta.registration_id]] : [],
       OPERATOR: [],
     },
     warn: null,
     subHtml: `Recorded · ${escapeHtml(fmtDateTime(meta.started_at))}`,
     data: historyPointData(historyState.idx || 0),
+    basicColor: HISTORY_BASIC_COLOR,
     droneColor: '#F97316',
     opColor: '#A78BFA',
     canDrone: !!historyState.marker,
@@ -1135,11 +1164,24 @@ function styleFocusButton(btn, enabled, active, color) {
 function renderDetailPanel() {
   const view = panelView();
   setPanelOpen(!!view);
-  if (!view) { panelState.sig = null; panelState.viewKey = null; return; }
+  if (!view) { panelState.sig = null; panelState.viewKey = null; panelState.copySig = null; return; }
 
   document.getElementById('dp-name').textContent = view.name;
   document.getElementById('dp-sub').innerHTML = view.subHtml;
   document.getElementById('dp-rename').style.display = view.renameKey ? '' : 'none';
+
+  // Rebuilt only when what it would copy changes — not on every tick, or
+  // the button would be recreated under your finger and lose its tick.
+  const copySig = view.copyLabel ? view.name + '|' + view.copyLabel : '';
+  if (copySig !== panelState.copySig) {
+    document.getElementById('dp-copy-slot').innerHTML =
+      view.copyLabel ? copyButtonHtml(view.name, view.copyLabel) : '';
+    panelState.copySig = copySig;
+  }
+
+  const verb = view.focusVerb || 'Focus';
+  document.getElementById('dp-focus-drone').textContent = verb + ' Drone';
+  document.getElementById('dp-focus-op').textContent = verb + ' Operator';
   styleFocusButton(document.getElementById('dp-focus-drone'), view.canDrone,
                    view.focused === 'drone', view.droneColor);
   styleFocusButton(document.getElementById('dp-focus-op'), view.canOp,
@@ -1232,9 +1274,8 @@ function closeDetailPanel() {
   }
 }
 
-// Focus Drone / Focus Op. The same functions the list's own buttons call,
-// so the two can never disagree: emphasise that unit's trail and move the
-// map to it.
+// Focus/Track Drone and Focus/Track Operator — the panel's two controls.
+// They emphasise that unit's trail and move the map to it.
 function focusUnit(target) {
   if (mapContext === 'live') {
     if (!selectedKey) return;
@@ -1761,11 +1802,12 @@ function showCopyFeedback(value, ok) {
   setTimeout(paint, COPY_FEEDBACK_MS + 20);
 }
 
-// One listener, on the sidebar itself, which is never replaced — unlike
-// the rows inside it. It runs in the capture phase so it sees the click
-// before the row does, and stops it there: copying a serial shouldn't also
-// select the drone or open the flight.
-document.getElementById('sidebar').addEventListener('click', async (e) => {
+// One listener for every copy button on the page — list rows and the detail
+// panel alike — since the elements holding them are replaced constantly. It
+// runs in the capture phase so it sees the click before the row does, and
+// stops it there: copying a serial shouldn't also select the drone or open
+// the flight.
+document.addEventListener('click', async (e) => {
   const btn = e.target.closest && e.target.closest('[data-copy]');
   if (!btn) return;
   e.stopPropagation();
@@ -1792,7 +1834,7 @@ function focusedLatLng() {
 }
 
 // Both Focus buttons move the map identically: glide to their own unit and
-// leave the zoom alone. Focus Op used to zoom out to fit drone and operator
+// leave the zoom alone. The operator button used to zoom out to fit both
 // together, so toggling between the two changed the zoom level under you
 // every time — the pair feels much steadier kept symmetric.
 function focusMap(latlng, animate) {
