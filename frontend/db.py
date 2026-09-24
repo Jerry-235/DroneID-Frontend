@@ -31,7 +31,16 @@ Four tables:
 
 Plain sqlite3 (stdlib, no extra dependency), single connection, serialized
 through an asyncio.Lock + to_thread since this is a single-operator, small-
-scale tool — no need for a connection pool or an async DB driver here.
+scale tool — no need for a connection pool or an async DB driver here. One
+consequence worth knowing: every call takes the same lock, so one long read
+(a several-thousand-point flight) briefly holds up point writes. At the
+observed ~50ms for the largest flights on record that's invisible, but it is
+the thing to look at first if ingest ever appears to stutter while someone
+is browsing History.
+
+Note on drones.notes: created by the first schema and never used since —
+kept only because dropping a column would need a table rebuild on every
+existing deployment for no gain. Free for a future per-drone notes field.
 """
 
 import asyncio
@@ -79,6 +88,14 @@ def _connect(path: str = DB_PATH) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # Every received point is its own transaction (one INSERT + one UPDATE),
+    # and with the default synchronous=FULL that means a real disk flush per
+    # point per aircraft — the single most expensive thing this process does,
+    # on hardware that may well be an SD card. NORMAL keeps WAL's crash
+    # safety (the database cannot be corrupted by it); the only exposure is
+    # losing the last moments of writes if the machine loses power outright,
+    # which for a live sensor feed is the least of that event's problems.
+    conn.execute("PRAGMA synchronous=NORMAL")
 
     point_cols_sql = ",\n            ".join(f"{c} {_point_col_type(c)}" for c in POINT_COLUMNS)
 
@@ -110,6 +127,12 @@ def _connect(path: str = DB_PATH) -> sqlite3.Connection:
             merged_count  INTEGER NOT NULL DEFAULT 1
         );
         CREATE INDEX IF NOT EXISTS idx_flights_catalog ON flights(catalog_key, started_at);
+        -- find_resumable_flight matches on MAC and serial as well as catalog
+        -- key, and runs once for every aircraft that appears. Without these it
+        -- scanned the whole flights table each time, which only gets slower
+        -- as the history grows.
+        CREATE INDEX IF NOT EXISTS idx_flights_mac ON flights(mac);
+        CREATE INDEX IF NOT EXISTS idx_flights_serial ON flights(serial);
 
         CREATE TABLE IF NOT EXISTS track_points (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -188,7 +211,11 @@ def _upsert_catalog(catalog_key, mac, serial, registration_id, ua_type, protocol
         INSERT INTO drones (catalog_key, mac, serial, registration_id, ua_type, protocol_version, first_seen, last_seen)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(catalog_key) DO UPDATE SET
-            mac=excluded.mac,
+            -- COALESCE like every other field here: a burst that simply didn't
+            -- re-report the MAC (Basic ID arriving on its own, say) used to
+            -- blank out the one we already had, which then showed as "No MAC"
+            -- in the UI until the next burst that happened to carry it.
+            mac=COALESCE(excluded.mac, drones.mac),
             serial=COALESCE(excluded.serial, drones.serial),
             registration_id=COALESCE(excluded.registration_id, drones.registration_id),
             ua_type=COALESCE(excluded.ua_type, drones.ua_type),
@@ -397,6 +424,10 @@ def _merge_flights(flight_ids):
     transaction."""
     conn = _require_conn()
     ordered = _get_flights_by_ids(flight_ids)
+    if len(ordered) < 2:
+        # The API validates this first; this is here so a direct/mis-wired
+        # caller gets a clear error instead of an IndexError on ordered[0].
+        raise ValueError("merge_flights needs at least two existing flights")
     target = ordered[0]
     target_id = target["id"]
     others = [f["id"] for f in ordered[1:]]
@@ -510,15 +541,6 @@ def _get_flight_points(flight_id):
     return [dict(r) for r in rows]
 
 
-def _search_flights_for_catalog_key(catalog_key, limit):
-    conn = _require_conn()
-    rows = conn.execute(
-        "SELECT id FROM flights WHERE catalog_key = ? ORDER BY started_at DESC LIMIT ?",
-        (catalog_key, limit),
-    ).fetchall()
-    return [r["id"] for r in rows]
-
-
 # ---- async-facing API ----
 
 async def upsert_catalog(catalog_key, mac, serial, registration_id, ua_type, protocol_version, ts=None):
@@ -577,10 +599,6 @@ async def get_flight(flight_id):
 
 async def get_flight_points(flight_id):
     return await run(_get_flight_points, flight_id)
-
-
-async def flights_for_catalog_key(catalog_key, limit=20):
-    return await run(_search_flights_for_catalog_key, catalog_key, limit)
 
 
 def _get_setting(key):

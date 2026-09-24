@@ -74,8 +74,9 @@
     width:8px;height:8px;border-radius:50%; background:var(--red);
     box-shadow:0 0 0 3px rgba(224,100,90,0.15); transition:background .2s, box-shadow .2s;
   }
-  .dot.connected{ background:#34D399; box-shadow:0 0 0 3px rgba(52,211,153,0.15); }
-  .dot.health-ok{ background:#34D399; box-shadow:0 0 0 3px rgba(52,211,153,0.15); }
+  /* .connected is the websocket dot, .health-ok a feed dot — same green, so
+     one rule rather than two identical ones. */
+  .dot.connected, .dot.health-ok{ background:#34D399; box-shadow:0 0 0 3px rgba(52,211,153,0.15); }
   .dot.health-yellow{ background:var(--amber); box-shadow:0 0 0 3px rgba(232,163,61,0.15); }
   .health-group{
     display:flex; align-items:center; gap:12px;
@@ -113,7 +114,11 @@
   .track-row:hover{background:var(--panel-raised);}
   .track-row.selected{background:var(--panel-raised);border-left:2px solid var(--amber);padding-left:12px;}
   .track-row .row-top{ display:flex; align-items:center; gap:8px; }
-  .status-chip{ width:7px;height:7px;border-radius:50%;flex:0 0 auto; }
+  /* The background is set inline per row (identity colour on Live, state
+     colour on History); the amber here is the fallback that an in-progress
+     History flight relies on — it used to set no colour at all, so the chip
+     on the one row that most wants to stand out rendered invisible. */
+  .status-chip{ width:7px;height:7px;border-radius:50%;flex:0 0 auto; background:var(--amber); }
   /* Says in words what the gray icon says on the map, for when the track
      you're wondering about is off-screen or one of several grayed at once. */
   .stale-tag{
@@ -280,11 +285,6 @@
     background:transparent; color:var(--text-muted); border:1px solid var(--hairline);
   }
   .settings-btn-ghost:hover{ color:var(--text); border-color:var(--text-muted); }
-  .popup-group-title{
-    font-size:10px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
-    color:var(--amber); margin:8px 0 4px; opacity:0.85;
-  }
-  .popup-group-title:first-of-type{margin-top:2px;}
 
   .map-wrap{ flex:1 1 auto; display:flex; flex-direction:column; min-height:0; }
   #map{flex:1 1 auto;background:#DDE3E8;}
@@ -322,22 +322,15 @@
     background:var(--panel-raised); color:var(--text); border-color:var(--hairline);
   }
   .leaflet-bar a:hover{ background:var(--panel); }
-  .leaflet-popup-content-wrapper{
-    background:var(--panel-raised); color:var(--text);
-    border-radius:var(--radius); border:1px solid var(--hairline);
-  }
-  .leaflet-popup-tip{background:var(--panel-raised);}
+  /* The popup-* rules that used to live here (content wrapper, tip, title,
+     row) went with the popups themselves when the detail panel replaced them.
+     These two stayed: they style the section bubbles at the top of each panel
+     section, which is where that badge moved to. */
   .popup-badge-row{ margin-bottom:6px; }
   .popup-badge{
     display:inline-block; padding:2px 7px; border-radius:3px; border:1px solid;
     font-size:10px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase;
   }
-  .popup-title{font-weight:700;font-size:13px;margin-bottom:6px;display:flex;align-items:center;gap:6px;}
-  .popup-row{
-    font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-muted);
-    display:flex; justify-content:space-between; gap:12px;
-  }
-  .popup-row b{color:var(--text);font-weight:500;}
   .drone-icon{ filter:drop-shadow(0 0 3px rgba(0,0,0,0.6)); }
 
   /* ---- detail panel ----
@@ -493,14 +486,15 @@
     <div class="scrubber-bar" id="scrubber">
       <div class="scrub-controls">
         <button class="scrub-btn" id="scrub-play">▶</button>
-        <input type="range" class="scrub-range" id="scrub-range" min="0" max="0" value="0" step="1">
+        <input type="range" class="scrub-range" id="scrub-range" min="0" max="0" value="0" step="1"
+               aria-label="Scrub through this flight's recorded points">
       </div>
       <div class="scrub-readout" id="scrub-readout"></div>
     </div>
   </div>
   <!-- Aircraft + operator details for whatever's selected. Built once here;
        renderDetailPanel() only ever updates text inside it. -->
-  <aside class="detail-panel" id="detail-panel" aria-hidden="true">
+  <aside class="detail-panel" id="detail-panel" aria-hidden="true" inert>
     <div class="dp-inner">
       <div class="dp-head">
         <button class="dp-grab" id="dp-grab" aria-label="Expand or shrink details"></button>
@@ -572,7 +566,7 @@ function nextPairColor() {
 const STALE_COLOR = '#7C8B99';
 
 // The color everything belonging to this track should currently be drawn in
-// — icon, operator diamond, pair link, trail, popup badge, sidebar accents.
+// — icon, operator diamond, pair link, trail, panel bubbles, sidebar accents.
 // One place to ask, so no part of the pair can be left showing the live
 // color after the rest has gone gray.
 function entryColor(entry) {
@@ -755,11 +749,11 @@ function fmtLastSeen(secondsSinceLastPoint) {
 }
 
 // ---------------- field-toggle settings (Settings tab) ----------------
-// Defines every metric the info box can show. Group names here are the
-// display names used in both the Settings panel and the popups: "Basic"
-// (Basic ID message + the live status indicator), "Drone" (Location/Vector
-// Message — renders on the drone's own popup), "Operator" (System Message —
-// renders on the operator marker's popup only).
+// Defines every metric the detail panel can show. The group names are what
+// the Settings list is organised by; PANEL_SECTIONS maps them onto the
+// panel's own sections. "Basic" is the Basic ID message plus the live status
+// indicator, "Drone" the Location/Vector Message (shown under AIRCRAFT), and
+// "Operator" the System Message (shown under OPERATOR).
 const FIELD_DEFS = {
   'Basic': [
     { key: 'protocol_version', label: 'Protocol Version' },
@@ -1071,9 +1065,8 @@ function panelView() {
       name: title,
       renameKey: d.key,
       // Offered only when the title is the aircraft's own ID, exactly as in
-      // the list — a name you chose isn't something you'd paste anywhere.
-      copyLabel: d.nickname ? null
-        : (title === d.serial ? 'Copy serial number' : 'Copy MAC address'),
+      // the list.
+      copyLabel: d.nickname ? null : rawIdCopyLabel(title, d),
       focusVerb: 'Track',
       extras: { BASIC: basicExtras, OPERATOR: operatorExtras },
       warn: d.raw_units_warning
@@ -1123,6 +1116,11 @@ function setPanelOpen(open) {
   const main = document.querySelector('.main');
   panel.classList.toggle('open', open);
   panel.setAttribute('aria-hidden', open ? 'false' : 'true');
+  // aria-hidden alone doesn't stop the buttons inside a closed panel from
+  // taking keyboard focus — tabbing would land you on controls nobody can
+  // see. inert removes them from the tab order too (ignored by older
+  // browsers, which are no worse off than before).
+  if (open) panel.removeAttribute('inert'); else panel.setAttribute('inert', '');
   main.classList.toggle('sheet-open', open);
   if (!open) setPanelExpanded(false);
   // The map's container just changed size (narrower on desktop, shorter on
@@ -1331,8 +1329,8 @@ function renderSettingsPanel() {
     <div class="settings-group-title">Debug</div>
     <div class="settings-note">
       Injects one synthetic drone orbiting the station if set,
-      through the real live pipeline for exercising the map, popups, and history without
-      RF hardware.
+      through the real live pipeline for exercising the map, detail panel, and
+      history without RF hardware.
     </div>
     <div class="station-form">
       <div class="station-form-buttons">
@@ -1374,7 +1372,7 @@ function renderSettingsPanel() {
       </div>
     </div>`;
 
-  let html = '<div class="settings-note" style="padding-top:12px;">Choose which fields appear in the info box shown when you click a drone on the map or scrub through its history. Applies everywhere — not per-drone.</div>';
+  let html = '<div class="settings-note" style="padding-top:12px;">Choose which fields appear in the details panel shown when you select a drone on the map or scrub through its history. Applies everywhere — not per-drone.</div>';
   Object.keys(FIELD_DEFS).forEach((group, i) => {
     html += `<div class="settings-group-title"${i === 0 ? ' style="border-top:none;"' : ''}>${escapeHtml(group)}</div>`;
     html += FIELD_DEFS[group].map(f => {
@@ -1509,12 +1507,16 @@ function renderSettingsPanel() {
 async function renameDrone(catalogKey, currentName) {
   const next = prompt('Name this drone (applies to all its flights, past and future):', currentName || '');
   if (next === null) return;
-  const res = await fetch(`/api/drones/${encodeURIComponent(catalogKey)}/name`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ nickname: next })
-  });
-  if (res.ok && mode === 'history') loadHistoryList();
+  try {
+    const res = await fetch(`/api/drones/${encodeURIComponent(catalogKey)}/name`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nickname: next })
+    });
+    // Live picks the new name up from the broadcast the server sends; History
+    // has to re-read the list, since the name is joined in at query time.
+    if (res.ok && mode === 'history') loadHistoryList();
+  } catch (e) { /* server unreachable — the old name simply stays */ }
 }
 
 // ---------------- LIVE mode ----------------
@@ -1572,7 +1574,6 @@ function upsertDrone(d) {
     const last = entry.path[entry.path.length - 1];
     if (!last || last[0] !== d.lat || last[1] !== d.lon) {
       entry.path.push(latlng);
-      updatePathVisibility(entry, d.key);
     }
     if (!entry.marker) {
       entry.marker = L.marker(latlng, { icon: droneIconSvg(entryColor(entry), d.heading) });
@@ -1587,10 +1588,6 @@ function upsertDrone(d) {
       entry.marker.setTooltipContent(droneTooltipText(d));
     }
     updateDroneIcon(entry, d.key);
-    // Also re-run on plain status updates, not just when a new point lands:
-    // a track that has just gone stale by definition isn't sending points
-    // any more, so this is the only chance its trail gets to go gray too.
-    updatePathVisibility(entry, d.key);
     if (!hasCentered) { map.setView(latlng, 14); hasCentered = true; }
   }
 
@@ -1601,7 +1598,6 @@ function upsertDrone(d) {
     const lastOp = entry.opPath[entry.opPath.length - 1];
     if (!lastOp || lastOp[0] !== d.op_lat || lastOp[1] !== d.op_lon) {
       entry.opPath.push(opLatlng);
-      updatePathVisibility(entry, d.key);
     }
     if (!entry.opMarker) {
       entry.opMarker = L.marker(opLatlng, { icon: opIconSvg(entryColor(entry)) });
@@ -1624,9 +1620,18 @@ function upsertDrone(d) {
     }
   }
 
+  // Once, at the end. This ran up to three times per burst (after each path
+  // push and again after the marker moved), and each call re-feeds the whole
+  // accumulated trail to Leaflet — on a long flight that's thousands of
+  // points redrawn three times for one new sample. It also has to run on a
+  // plain status update with no new position at all, since a track that has
+  // just gone stale is by definition not sending points any more and this is
+  // the only chance its trail gets to go gray.
+  updatePathVisibility(entry, d.key);
+
   if (mode === 'live') renderSidebar();
   // Covers new bursts, going stale, and a first position or operator fix
-  // arriving (which is what enables the Focus buttons).
+  // arriving (which is what enables the Track buttons).
   if (d.key === selectedKey && mapContext === 'live') renderDetailPanel();
 }
 
@@ -1685,17 +1690,18 @@ function removeDrone(key) {
     // belt-and-suspenders, in case group-removal alone ever leaves a stray
     // DOM node behind (a best guess at the old "icon lingers until page
     // refresh" report, never reproduced directly).
-    [entry.marker, entry.opMarker, entry.link].forEach(layer => {
+    // The trails go with it. They used to be faded to gray and left behind
+    // instead — but nothing ever removed them afterwards, and the entry
+    // holding them was deleted on the next line, so every dropped track left
+    // a permanent ghost trail that only a page reload could clear. Since the
+    // marker itself is gone, a line hanging in space with nothing at either
+    // end isn't telling you anything the History tab doesn't tell you
+    // better.
+    [entry.marker, entry.opMarker, entry.link, entry.pathLine, entry.opPathLine].forEach(layer => {
       if (!layer) return;
       liveLayer.removeLayer(layer);
       map.removeLayer(layer);
     });
-    // leave the flight path visible but fade it to show it's no longer live
-    // — only relevant if this drone/operator was actually focused when it
-    // dropped, since the path is otherwise already hidden per the
-    // focus-only rule.
-    if (entry.pathLine) entry.pathLine.setStyle({ color: '#7C8B99', opacity: 0.35, weight: 2 });
-    if (entry.opPathLine) entry.opPathLine.setStyle({ color: '#7C8B99', opacity: 0.35, weight: 2 });
     droneMarkers.delete(key);
   }
   // Otherwise selectedKey/selectedTarget would keep pointing at a track that
@@ -1749,10 +1755,24 @@ function copyButtonHtml(value, idleLabel) {
        + `data-copy-label="${escapeHtml(idleLabel)}" title="${label}" aria-label="${label}">${icon}</button>`;
 }
 
+// Whether a displayed title is the aircraft's own identifier rather than a
+// name someone typed, and if so what the copy button should call it. A name
+// you chose isn't something you'd paste anywhere, so it gets no button.
+//
+// One implementation for all three places that ask — the Live row, the
+// History row, and the panel head — which each used to carry their own
+// slightly different ternary. `ids` is anything holding serial/mac/
+// catalog_key: a live track's data or a flight's metadata alike.
+function rawIdCopyLabel(title, ids) {
+  if (!title || !ids) return null;
+  if (title === ids.serial) return 'Copy serial number';
+  if (title === ids.mac) return 'Copy MAC address';
+  if (title === ids.catalog_key) return 'Copy ID';
+  return null;
+}
+
 // The bold title for a list row. Only when it's showing the drone's own
-// identifier — its serial, or its MAC if no serial has been decoded —
-// does it get a copy button. A name you've given it isn't something you'd
-// want to paste anywhere, so it doesn't.
+// identifier does it get a copy button (see rawIdCopyLabel).
 //   rawLabel: null for a user-given name, else the button's label.
 function nameLineHtml(name, rawLabel) {
   const safe = escapeHtml(name);
@@ -1887,7 +1907,7 @@ function renderLiveSidebar() {
       <div class="track-row${sel}" data-key="${escapeHtml(d.key)}" style="${sel ? `border-left-color:${color};` : ''}">
         <div class="row-top">
           <span class="status-chip" style="background:${chipColor};box-shadow:${d.status === 'live' ? `0 0 6px ${chipColor}` : 'none'};"></span>
-          ${nameLineHtml(name, d.nickname ? null : (name === d.serial ? 'Copy serial number' : 'Copy MAC address'))}
+          ${nameLineHtml(name, d.nickname ? null : rawIdCopyLabel(name, d))}
           ${d.status === 'stale' ? '<span class="stale-tag">STALE</span>' : ''}
           <button class="pencil-btn" data-rename="${escapeHtml(d.key)}" data-name="${escapeHtml(name)}">✎</button>
         </div>
@@ -1926,8 +1946,19 @@ function renderLiveSidebar() {
 
 // ---------------- HISTORY mode ----------------
 
-let historyState = { flightId: null, flightMeta: null, points: [], marker: null, opMarker: null, line: null, opLine: null, link: null, playing: false, timer: null };
-let historySelectedTarget = 'drone'; // 'drone' | 'operator' — which popup is tracked during playback
+// The shape of an empty History selection, in one place — it was written out
+// three times, and `idx` (which the detail panel reads) was missing from all
+// of them, so it only existed once a scrub had happened.
+function emptyHistoryState() {
+  return {
+    flightId: null, flightMeta: null, points: [], idx: 0,
+    marker: null, opMarker: null, line: null, opLine: null, link: null,
+    playing: false, timer: null,
+  };
+}
+
+let historyState = emptyHistoryState();
+let historySelectedTarget = 'drone'; // 'drone' | 'operator' — which unit the panel and map follow
 let historyRequestId = 0; // guards against a slow/stale fetch finishing after a newer flight was
                            // already selected — without this, both flights' markers could end up
                            // on the map at once (the intermittent "duplicate drone" bug)
@@ -1970,10 +2001,7 @@ function clearHistorySelection() {
   // Bumped so a flight fetch already in flight is discarded rather than
   // repopulating the map for a flight that has just been deleted.
   historyRequestId++;
-  historyState = {
-    flightId: null, flightMeta: null, points: [], marker: null, opMarker: null,
-    line: null, opLine: null, link: null, playing: false, timer: null,
-  };
+  historyState = emptyHistoryState();
   const scrubber = document.getElementById('scrubber');
   if (scrubber) scrubber.classList.remove('show');
   renderDetailPanel();   // closes it: the flight it was describing is gone
@@ -2144,12 +2172,7 @@ async function deletePickedFlights() {
 // else MAC), not whether a nickname was involved — so a title is treated as
 // a raw identifier when it's identical to one of the flight's own IDs.
 function historyRawIdLabel(f) {
-  const n = f.display_name;
-  if (!n) return null;
-  if (n === f.serial) return 'Copy serial number';
-  if (n === f.mac) return 'Copy MAC address';
-  if (n === f.catalog_key) return 'Copy ID';
-  return null;
+  return rawIdCopyLabel(f && f.display_name, f);
 }
 
 async function loadHistoryList() {
@@ -2166,8 +2189,17 @@ async function loadHistoryList() {
   if (sidebar.dataset.view !== 'history') {
     sidebar.innerHTML = '<div class="sidebar-empty">Loading flights…</div>';
   }
-  const res = await fetch('/api/flights?limit=100');
-  const data = await res.json();
+  let data;
+  try {
+    const res = await fetch('/api/flights?limit=100');
+    data = await res.json();
+  } catch (e) {
+    // Without this the promise rejected into nothing and the sidebar sat on
+    // "Loading flights…" forever with no clue why.
+    sidebar.innerHTML = '<div class="sidebar-empty">Could not reach the server. Retrying on the next update…</div>';
+    sidebar.dataset.view = 'history';
+    return;
+  }
   const flights = data.flights || [];
   document.getElementById('track-count').textContent = flights.length;
   document.getElementById('count-label').textContent = 'flights';
@@ -2196,7 +2228,7 @@ async function loadHistoryList() {
     return `
       <div class="track-row${sel}${picked ? ' picked' : ''}" data-flight="${f.id}" data-key="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">
         <div class="row-top">
-          <span class="status-chip ${inProgress ? 'live' : ''}" style="${inProgress ? '' : 'background:#3A4A5A'}"></span>
+          <span class="status-chip" style="${inProgress ? '' : 'background:#3A4A5A'}"></span>
           ${nameLineHtml(f.display_name, historyRawIdLabel(f))}
           <button class="pencil-btn" data-rename="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">✎</button>
         </div>
@@ -2247,19 +2279,29 @@ async function selectHistoryFlight(flightId) {
   historyPanelDismissed = false;
   collapseSidebarOnMobile();
   const myRequestId = ++historyRequestId;
-  const res = await fetch(`/api/flights/${flightId}`);
-  const data = await res.json();
+  let data;
+  try {
+    const res = await fetch(`/api/flights/${flightId}`);
+    data = await res.json();
+    if (!res.ok) throw new Error((data && data.error) || 'request failed');
+  } catch (e) {
+    // A flight deleted from another tab, or the server gone away. Say so in
+    // the scrubber readout rather than throwing into nothing and leaving the
+    // row looking like it's still loading.
+    if (myRequestId !== historyRequestId) return;
+    document.getElementById('scrub-readout').textContent = 'Could not load this flight.';
+    document.getElementById('scrubber').classList.add('show');
+    return;
+  }
   if (myRequestId !== historyRequestId) return; // a newer selection happened while this was in flight — discard this stale one
   // Master, unfiltered, in timestamp order — the scrub index maps 1:1 to
   // this array so the drone and operator positions at any given index are
   // guaranteed to be from the same moment in time, even though either one
   // individually might be missing (null) at some rows.
   const allPoints = data.points || [];
-  historyState = {
+  historyState = Object.assign(emptyHistoryState(), {
     flightId, flightMeta: data.flight || null, points: allPoints,
-    marker: null, opMarker: null, line: null, opLine: null, link: null,
-    playing: false, timer: null,
-  };
+  });
 
   const scrubber = document.getElementById('scrubber');
   const range = document.getElementById('scrub-range');
@@ -2419,6 +2461,7 @@ function scrubToIndex(idx) {
 function stopPlayback() {
   historyState.playing = false;
   if (historyState.timer) clearInterval(historyState.timer);
+  historyState.timer = null;   // or a later stop would clear an id that's already dead
   document.getElementById('scrub-play').textContent = '▶';
 }
 
@@ -2471,7 +2514,13 @@ function switchMode(next) {
   document.getElementById('tab-live').classList.toggle('active', next === 'live');
   document.getElementById('tab-history').classList.toggle('active', next === 'history');
   document.getElementById('tab-settings').classList.toggle('active', next === 'settings');
-  document.getElementById('scrubber').classList.toggle('show', next === 'history' && historyState.points.length > 0);
+  // Tied to which layer the map will be showing, not to which tab is open.
+  // Settings deliberately leaves the history flight on the map and the panel
+  // keeps describing it, so hiding the scrubber there took away the one
+  // control that makes watching a field toggle take effect worthwhile.
+  const nextContext = next === 'settings' ? mapContext : next;
+  document.getElementById('scrubber').classList.toggle(
+    'show', nextContext === 'history' && historyState.points.length > 0);
 
   if (next === 'live') {
     map.removeLayer(historyLayer);
@@ -2528,7 +2577,10 @@ function connectWs() {
   ws.onerror = () => ws.close();
 
   ws.onmessage = (evt) => {
-    const msg = JSON.parse(evt.data);
+    let msg;
+    // A truncated or non-JSON frame used to throw out of the handler as an
+    // uncaught error. Skipping it leaves the socket healthy for the next one.
+    try { msg = JSON.parse(evt.data); } catch (e) { return; }
     if (msg.type === 'snapshot') {
       // Authoritative: prune any marker for a drone that dropped while we
       // were disconnected (a plain reconnect gap doesn't send 'dropped'
@@ -2543,7 +2595,14 @@ function connectWs() {
       upsertDrone(msg.drone);
     } else if (msg.type === 'status') {
       const entry = droneMarkers.get(msg.key);
-      if (entry) { entry.data.status = msg.status; upsertDrone(entry.data); }
+      // Only act on a real change: re-running upsertDrone rebuilds the whole
+      // Live sidebar, and there's nothing to redraw for a status we already
+      // have. (The server now only sends transitions, but a reconnect or an
+      // older server can still repeat one.)
+      if (entry && entry.data.status !== msg.status) {
+        entry.data.status = msg.status;
+        upsertDrone(entry.data);
+      }
     } else if (msg.type === 'dropped') {
       removeDrone(msg.key);
     } else if (msg.type === 'health') {

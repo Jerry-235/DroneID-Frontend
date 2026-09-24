@@ -5,12 +5,32 @@ Subscribes to the DroneID zmq_decoder.py output (default tcp://127.0.0.1:4224,
 per bkerler/DroneID's README: `./zmq_decoder.py --zmqsetting 127.0.0.1:4224
 --zmqclients 127.0.0.1:4222,127.0.0.1:4223`), maintains live in-memory track
 state keyed by Approach A (UAS serial from Basic ID, falling back to MAC),
-and serves:
-  - GET  /api/drones     current snapshot of all known tracks
-  - WS   /ws             live push of updates as they arrive
-  - GET  /                the map UI (static/index.html)
+persists every sample to SQLite through db.py, and serves:
 
-No persistence yet (that's the next phase) — this is the live-view slice.
+  live view
+  - GET  /api/drones                  snapshot of all known tracks
+  - GET  /api/health                  ZMQ/Bluetooth/WiFi feed liveness
+  - WS   /ws                          snapshot on connect, then live push
+
+  history
+  - GET  /api/flights                 past + in-progress flights
+  - GET  /api/flights/{id}            one flight's metadata and full path
+  - POST /api/flights/merge           fold several flights into one
+  - POST /api/flights/delete          remove flights and their points
+
+  catalog / config
+  - GET   /api/drones/catalog         all user-assigned nicknames
+  - PATCH /api/drones/{key}/name      rename (applies retroactively)
+  - GET/PUT/DELETE /api/station       the station ("home point") location
+  - GET  /api/discord_webhook         whether an alert webhook is configured
+  - POST /api/discord_webhook/test    send a test alert
+
+  debug
+  - POST /api/test/drone/start|stop, GET /api/test/drone/status
+
+  UI
+  - GET  /                            the map UI (static/index.html)
+  - GET  /favicon.ico                 redirect to the real icon
 """
 
 import asyncio
@@ -21,6 +41,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
@@ -164,7 +185,6 @@ class DroneTrack:
     operator_id: Optional[str] = None
     description: Optional[str] = None      # Self ID text, if any
     ua_type: Optional[object] = None       # int or descriptive string, decoder-dependent
-    source: Optional[str] = None  # "wifi" or "bt", whichever last reported
     raw_units_warning: bool = False  # set when alt/height/speed arrived in an unrecognized
                                       # raw/scaled shape we chose not to guess-convert
 
@@ -193,7 +213,6 @@ class DroneTrack:
     op_classification_type: Optional[str] = None
 
     nickname: Optional[str] = None
-    notes: Optional[str] = None
     flight_id: Optional[int] = None  # current open flight row in the DB, if any
     segment: int = 0                 # which detection segment of that flight we're in:
                                      # 0 the first time, +1 each time this flight gets
@@ -226,6 +245,13 @@ class TrackStore:
     def __init__(self):
         self.tracks: dict[str, DroneTrack] = {}
         self.mac_to_key: dict[str, str] = {}
+        # Called as on_rekey(old_key, new_key) when a track that was being
+        # followed under a bare MAC gets folded into a serial-keyed one (i.e.
+        # its Basic ID finally decoded). Anything else keyed by track key —
+        # the open-flight map, connected clients' markers — has to be told,
+        # or it keeps referring to a key that no longer exists. Set by the
+        # app; left None in tests that only exercise correlation.
+        self.on_rekey = None
 
     def _resolve_key(self, mac: Optional[str], serial: Optional[str]) -> str:
         if serial:
@@ -265,7 +291,12 @@ class TrackStore:
         return serial, registration
 
     @staticmethod
-    def _get_loc(msg: dict) -> Optional[dict]:
+    def _get_loc(msg: dict) -> tuple[Optional[dict], bool]:
+        """Returns (fields, nested) for a Location/Vector message, or
+        (None, False) if this message isn't one. `nested` is True for the
+        newer/raw shape that puts the readings under a "coord" sub-object —
+        the caller needs to know, because that shape's numbers may be in raw
+        F3411 units rather than decoded ones."""
         for key in ("Location/Vector Message", "Location Vector"):
             if key in msg:
                 loc = msg[key]
@@ -277,15 +308,33 @@ class TrackStore:
                     # coord's values winning on any overlapping key.
                     merged = dict(loc)
                     merged.update(coord)
-                    return merged
-                return loc
-        return None
+                    return merged, True
+                return loc, False
+        return None, False
 
     @staticmethod
     def _get_system(msg: dict) -> Optional[dict]:
         for key in ("System Message", "System"):
             if key in msg:
                 return msg[key]
+        return None
+
+    @staticmethod
+    def _get_self_id(msg: dict) -> Optional[str]:
+        """The free-text description a drone broadcasts about itself, under
+        whichever key the upstream decoder used. zmq_decoder.py emits
+        "Self ID"; dji_receiver.py (AntSDR path) emits "Self-ID Message" and
+        is also the one source that puts a real model name in there, so
+        missing this key meant silently dropping exactly the most useful
+        value of the lot."""
+        for key in ("Self ID", "Self-ID Message", "Self-ID", "SelfID"):
+            block = msg.get(key)
+            if isinstance(block, dict):
+                text = block.get("text") or block.get("description") or block.get("Text")
+                if text:
+                    return str(text)
+            elif isinstance(block, str) and block:
+                return block
         return None
 
     def apply_burst(self, mac: Optional[str], messages: list[dict]) -> DroneTrack:
@@ -299,6 +348,19 @@ class TrackStore:
             old = self.tracks.pop(mac, None) if mac and key != mac else None
             track = old or DroneTrack(key=key, mac=mac)
             self.tracks[key] = track
+            if old is not None:
+                # The folded-in track still carried its old MAC as .key, which
+                # is what everything downstream keys off: the DB catalog row it
+                # writes to, the open-flight map, and the marker each connected
+                # browser is holding. Left unchanged, this aircraft would keep
+                # filing under the weaker key while also appearing on the map
+                # twice — once under the MAC (never updated again, and never
+                # dropped either, since the sweeper only walks self.tracks) and
+                # once under the serial.
+                old_key = old.key
+                old.key = key
+                if old_key != key and self.on_rekey:
+                    self.on_rekey(old_key, key)
 
         if mac:
             track.mac = mac
@@ -319,14 +381,16 @@ class TrackStore:
                 op_id = msg["Operator ID"].get("id")
                 if op_id:
                     track.operator_id = op_id
-            elif "Self ID" in msg:
-                text = msg["Self ID"].get("text")
-                if text:
-                    track.description = text
 
-            loc = self._get_loc(msg)
+            # Separate `if`, not an `elif` on the branch above: some decoders
+            # pack more than one message into a single dict, and chaining
+            # these meant whichever came second was never looked at.
+            self_id = self._get_self_id(msg)
+            if self_id:
+                track.description = self_id
+
+            loc, loc_nested = self._get_loc(msg)
             if loc:
-                track.source = "wifi/bt"
                 lat = parse_latlon(loc.get("latitude"))
                 lon = parse_latlon(loc.get("longitude"))
                 if lat is not None and lon is not None and not (lat == 0 and lon == 0):
@@ -335,10 +399,7 @@ class TrackStore:
                 alt = clean_float(loc.get("geodetic_altitude"))
                 hagl = clean_float(loc.get("height_agl"))
                 speed = clean_float(loc.get("speed"))
-                is_raw_shape = isinstance(loc.get("geodetic_altitude"), int) and "coord" in msg.get(
-                    "Location Vector", msg.get("Location/Vector Message", {})
-                )
-                if is_raw_shape:
+                if loc_nested and isinstance(loc.get("geodetic_altitude"), int):
                     # F3411 alt/speed can use more than one scale/offset scheme
                     # depending on flags; rather than guess, pass the raw value
                     # through and flag it so the UI shows "unverified" instead
@@ -390,7 +451,10 @@ class TrackStore:
                     track.op_location_type = sysm.get("operator_location_type")
                 if sysm.get("classification_type"):
                     track.op_classification_type = sysm.get("classification_type")
-                if sysm.get("protocol_version") and not track.protocol_version:
+                # Overwrites, like every other field here. It used to only fill
+                # a blank, which meant a stale protocol version could never be
+                # corrected by a later burst from this one message type.
+                if sysm.get("protocol_version"):
                     track.protocol_version = sysm.get("protocol_version")
 
         track.touch()
@@ -403,6 +467,8 @@ class TrackStore:
 store = TrackStore()
 catalog_nicknames: dict[str, str] = {}   # catalog_key -> user-assigned nickname, cached from DB
 active_flights: dict[str, int] = {}      # catalog_key -> currently-open flight row id
+last_status_sent: dict[str, str] = {}    # catalog_key -> last status the sweeper announced,
+                                         # so it only speaks up when one actually changes
 
 
 class ConnectionManager:
@@ -419,7 +485,11 @@ class ConnectionManager:
     async def broadcast(self, message: dict):
         dead = []
         payload = json.dumps(message)
-        for ws in self.active:
+        # Snapshot the set first: send_text awaits, and a browser connecting
+        # (or dropping) during one of those awaits mutates self.active mid-loop
+        # — "Set changed size during iteration", which would abort the whole
+        # broadcast and, from the zmq listener, get logged as an ingest error.
+        for ws in list(self.active):
             try:
                 await ws.send_text(payload)
             except Exception:
@@ -431,15 +501,40 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-def parse_message_payload(raw: bytes) -> Optional[dict]:
+def _on_track_rekey(old_key: str, new_key: str):
+    """A track has stopped being followed under `old_key` (its MAC) and is now
+    `new_key` (its serial). Move its open flight across so points keep landing
+    on the same row, and tell clients the old marker is gone — nothing else
+    ever will, since the sweeper only ages out keys still in store.tracks."""
+    flight_id = active_flights.pop(old_key, None)
+    if flight_id is not None:
+        active_flights.setdefault(new_key, flight_id)
+    last_status_sent.pop(old_key, None)
+    log.info("Track %s is now keyed as %s (serial decoded)", old_key, new_key)
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return  # no loop (unit test / sync context) — nothing to notify
+    asyncio.create_task(manager.broadcast({"type": "dropped", "key": old_key}))
+
+
+store.on_rekey = _on_track_rekey
+
+
+def parse_message_payload(raw: bytes):
     """The decoder can emit either a bare JSON list of messages, or (in some
     forks/newer builds) a JSON object with a topic/MAC wrapper. Handle both,
-    and also tolerate an optional 'TOPIC {json}' framing on the PUB socket."""
+    and also tolerate an optional 'TOPIC {json}' framing on the PUB socket.
+
+    Returns whatever JSON shape arrived (list or dict) for extract_bursts to
+    normalize, or None if none of the candidates parsed."""
     text = raw.decode("utf-8", errors="replace").strip()
-    for candidate in (text, text.split(" ", 1)[-1] if " " in text else text):
+    candidates = [text]
+    if " " in text:
+        candidates.append(text.split(" ", 1)[1])
+    for candidate in candidates:
         try:
-            data = json.loads(candidate)
-            return data
+            return json.loads(candidate)
         except json.JSONDecodeError:
             continue
     return None
@@ -515,8 +610,10 @@ async def persist_update(track: DroneTrack):
     "Opening one" is where re-acquisition is handled. Before starting a
     genuinely new flight, we look for one this aircraft was flying until it
     dropped off the map less than FLIGHT_MERGE_WINDOW_S ago — matched on
-    catalog key, MAC, serial, or friendly name — and continue that one
-    instead. Two consequences, both intended: History shows a single flight
+    catalog key, MAC, serial, or friendly name, with the name only counting
+    when the two serials don't contradict it (see db.find_resumable_flight)
+    — and continue that one instead. Two consequences, both intended:
+    History shows a single flight
     spanning the gap rather than a pile of fragments, and the Discord
     "new drone detected" alert doesn't re-fire for an aircraft that was
     already announced minutes earlier and merely blinked out of range."""
@@ -562,6 +659,15 @@ async def persist_update(track: DroneTrack):
         asyncio.create_task(send_new_drone_alert(track))
 
 
+def zmq_ctx():
+    """One ZMQ context for all three subscriptions. Each listener used to make
+    its own, which means three sets of I/O threads and three lots of buffers
+    for what is a handful of small messages a second — and nothing to close
+    them with either. Context.instance() hands back the same shared one every
+    time, created on first use inside the running loop."""
+    return zmq.asyncio.Context.instance()
+
+
 async def watch_connection_state(monitor, channel: str):
     """Reads events off an already-attached ZMQ socket monitor. Must be
     given the monitor socket itself (from get_monitor_socket(), called
@@ -598,8 +704,7 @@ def attach_connection_monitor(sock, channel: str):
 
 
 async def zmq_listener():
-    ctx = zmq.asyncio.Context()
-    sock = ctx.socket(zmq.SUB)
+    sock = zmq_ctx().socket(zmq.SUB)
     attach_connection_monitor(sock, "zmq")
     sock.connect(ZMQ_ADDR)
     sock.setsockopt(zmq.SUBSCRIBE, b"")
@@ -625,8 +730,7 @@ async def sniffer_health_listener(addr: str, channel: str):
     receiver.py on 4222, wifi_receiver.py on 4223 by default). Doesn't parse
     content — tracks both the TCP-level connection state (process alive?)
     and message arrival timing (actively sending vs. idle)."""
-    ctx = zmq.asyncio.Context()
-    sock = ctx.socket(zmq.SUB)
+    sock = zmq_ctx().socket(zmq.SUB)
     attach_connection_monitor(sock, channel)
     sock.connect(addr)
     sock.setsockopt(zmq.SUBSCRIBE, b"")
@@ -685,6 +789,25 @@ if DISCORD_ROLE_ID and not DISCORD_ROLE_ID.isdigit():
 # Cached separately from the DB so building an alert never needs a DB round
 # trip on the hot path; kept in sync with /api/station's PUT/DELETE.
 station_cache: Optional[dict] = None
+
+
+def parse_station(raw: Optional[str]) -> Optional[dict]:
+    """{"lat": float, "lon": float} from the stored settings string, or None if
+    it's unset, unparseable, or missing a coordinate. One implementation for
+    all three callers (startup, the GET endpoint, the test simulator), which
+    each had their own slightly different version of this try/except."""
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    lat, lon = data.get("lat"), data.get("lon")
+    if lat is None or lon is None:
+        return None
+    return {"lat": lat, "lon": lon}
 
 
 def haversine_meters(lat1, lon1, lat2, lon2) -> float:
@@ -854,14 +977,9 @@ def _test_drone_burst(t: float, origin_lat: float, origin_lon: float) -> list[di
 async def test_drone_simulator():
     global test_drone_running
     origin_lat, origin_lon = TEST_DEFAULT_ORIGIN
-    raw = await db.get_setting("station")
-    if raw:
-        try:
-            data = json.loads(raw)
-            if data.get("lat") is not None and data.get("lon") is not None:
-                origin_lat, origin_lon = data["lat"], data["lon"]
-        except (json.JSONDecodeError, AttributeError):
-            pass
+    station = parse_station(await db.get_setting("station"))
+    if station:
+        origin_lat, origin_lon = station["lat"], station["lon"]
     log.info("Test drone simulator started, orbiting (%s, %s)", origin_lat, origin_lon)
     t0 = time.time()
     try:
@@ -877,9 +995,14 @@ async def test_drone_simulator():
 
 
 async def stale_sweeper():
-    """Periodically re-broadcast status transitions (live -> stale -> dropped)
-    so the UI can fade/remove icons even without new packets arriving, and
-    close out the DB flight record once a track is dropped.
+    """Broadcast status transitions (live -> stale -> dropped) so the UI can
+    fade/remove icons even without new packets arriving, and close out the DB
+    flight record once a track is dropped.
+
+    Only actual transitions go out. It used to re-send every track's status on
+    every tick, so a quiet map still pushed a message per track every 5s, and
+    each one made the browser rebuild its whole sidebar — for news it already
+    had.
 
     The whole loop body is wrapped in try/except: without it, a single
     unexpected error here (e.g. a transient DB hiccup in db.end_flight)
@@ -898,10 +1021,14 @@ async def stale_sweeper():
                 age = now - track.last_seen
                 if age > DROP_AFTER_S:
                     drop_keys.append(key)
-                else:
-                    await manager.broadcast({"type": "status", "key": key, "status": track.status()})
+                    continue
+                status = track.status()
+                if last_status_sent.get(key) != status:
+                    last_status_sent[key] = status
+                    await manager.broadcast({"type": "status", "key": key, "status": status})
             for key in drop_keys:
                 store.tracks.pop(key, None)
+                last_status_sent.pop(key, None)
                 flight_id = active_flights.pop(key, None)
                 if flight_id is not None:
                     try:
@@ -920,7 +1047,32 @@ async def stale_sweeper():
             log.exception("Error in stale sweeper loop — will retry on next tick")
 
 
-app = FastAPI(title="DroneID Live Map")
+@asynccontextmanager
+async def lifespan(_app: "FastAPI"):
+    """Opens the DB, warms the caches, and starts the background listeners.
+
+    This is the modern replacement for @app.on_event("startup"), which FastAPI
+    has deprecated. Nothing is torn down on the way out: the process exits
+    immediately afterwards, the listener tasks die with the loop, and SQLite in
+    WAL mode needs no explicit close to stay consistent."""
+    global station_cache
+    db.init(os.environ.get("DRONEID_DB_PATH", os.path.join(os.path.dirname(__file__), "droneid.db")))
+    catalog_nicknames.update(await db.get_catalog())
+    station_cache = parse_station(await db.get_setting("station"))
+    tasks = [
+        asyncio.create_task(zmq_listener()),
+        asyncio.create_task(sniffer_health_listener(BT_ZMQ_ADDR, "bluetooth")),
+        asyncio.create_task(sniffer_health_listener(WIFI_ZMQ_ADDR, "wifi")),
+        asyncio.create_task(health_broadcaster()),
+        asyncio.create_task(stale_sweeper()),
+    ]
+    # Held only so they aren't garbage-collected mid-flight: asyncio keeps
+    # nothing but a weak reference to a bare create_task().
+    _app.state.background_tasks = tasks
+    yield
+
+
+app = FastAPI(title="DroneID Live Map", lifespan=lifespan)
 
 # Compress HTTP responses. A long flight's point list is megabytes of JSON
 # that repeats the same field names and strings on every row, so it shrinks
@@ -941,37 +1093,13 @@ class StationBody(BaseModel):
     lon: float
 
 
-@app.on_event("startup")
-async def startup():
-    global station_cache
-    db.init(os.environ.get("DRONEID_DB_PATH", os.path.join(os.path.dirname(__file__), "droneid.db")))
-    catalog_nicknames.update(await db.get_catalog())
-    raw_station = await db.get_setting("station")
-    if raw_station:
-        try:
-            station_cache = json.loads(raw_station)
-        except json.JSONDecodeError:
-            station_cache = None
-    asyncio.create_task(zmq_listener())
-    asyncio.create_task(sniffer_health_listener(BT_ZMQ_ADDR, "bluetooth"))
-    asyncio.create_task(sniffer_health_listener(WIFI_ZMQ_ADDR, "wifi"))
-    asyncio.create_task(health_broadcaster())
-    asyncio.create_task(stale_sweeper())
-
-
 @app.get("/api/station")
 async def api_get_station():
     """The station/home-point location, stored server-side (not per-browser)
     so it's the same on every device that opens this app. None for both
     fields if it hasn't been set yet."""
-    raw = await db.get_setting("station")
-    if not raw:
-        return {"lat": None, "lon": None}
-    try:
-        data = json.loads(raw)
-        return {"lat": data.get("lat"), "lon": data.get("lon")}
-    except (json.JSONDecodeError, AttributeError):
-        return {"lat": None, "lon": None}
+    station = parse_station(await db.get_setting("station"))
+    return station or {"lat": None, "lon": None}
 
 
 @app.put("/api/station")
@@ -1080,9 +1208,16 @@ async def api_rename_drone(catalog_key: str, body: RenameBody):
     return {"ok": True, "catalog_key": catalog_key, "nickname": nickname}
 
 
+MAX_FLIGHT_PAGE = 500
+
+
 @app.get("/api/flights")
 async def api_list_flights(limit: int = 50, offset: int = 0):
-    """Past (and in-progress) flights, most recent first."""
+    """Past (and in-progress) flights, most recent first. limit is capped:
+    without it, one mistyped query string could ask for the entire table and
+    hold the single DB lock (and so all ingest) for as long as that took."""
+    limit = max(1, min(int(limit), MAX_FLIGHT_PAGE))
+    offset = max(0, int(offset))
     return {"flights": await db.list_flights(limit, offset)}
 
 
@@ -1129,8 +1264,8 @@ def flights_are_same_aircraft(flights: list[dict]) -> bool:
         return False
     serials = [f.get("serial") for f in flights]
     macs = [f.get("mac") for f in flights]
-    all_serials_agree = all(s for s in serials) and len(set(serials)) == 1
-    all_macs_agree = all(m for m in macs) and len(set(macs)) == 1
+    all_serials_agree = all(serials) and len(set(serials)) == 1
+    all_macs_agree = all(macs) and len(set(macs)) == 1
     return all_serials_agree or all_macs_agree
 
 
@@ -1200,15 +1335,30 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             await websocket.receive_text()  # client doesn't send anything meaningful; just keep alive
     except WebSocketDisconnect:
+        pass
+    finally:
+        # finally, not just the WebSocketDisconnect branch: any other error
+        # here (a network reset surfacing as something else, a send failing
+        # mid-snapshot) would otherwise leave a dead socket in the broadcast
+        # set forever, and every broadcast from then on would try it and fail.
         manager.disconnect(websocket)
 
 
-app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 @app.get("/")
 async def index():
-    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "index.html"))
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    """Browsers ask for /favicon.ico at the site root regardless of the <link>
+    tags in the page — some bookmark and tab-restore paths only ever look
+    there. Served from the real icon so that request isn't a 404."""
+    return FileResponse(os.path.join(STATIC_DIR, "icons", "favicon.ico"))
 
 
 if __name__ == "__main__":
