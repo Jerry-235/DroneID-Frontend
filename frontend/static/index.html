@@ -137,8 +137,15 @@
   /* Keeps the stats line the same height whether or not the row carries a
      checkbox, so turning admin view on doesn't resize every row. */
   .track-sub.stats{ min-height:18px; }
+  /* A full ANSI/CTA-2063-A serial is 20 characters and needs about 159px here;
+     this used to be capped at 150, so every one of them lost its last
+     character or two to an ellipsis for the sake of 9px — in a 300px sidebar.
+     The cap is gone. The row it sits in already wraps, so a serial that
+     genuinely can't share a line with the MAC drops to its own line and gets
+     the full width instead of being cut. The ellipsis stays as a last resort
+     for something absurdly long, which is the only case it was ever for. */
   .track-serial{
-    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:150px;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%;
   }
   .track-pills{
     margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;
