@@ -883,17 +883,43 @@ let unitSystem = loadUnitSystem();
 let adminAllowed = false;
 let clientAddress = null;   // how the server sees us — shown in Settings so it's
                             // obvious which route this tab came in on
+// 'admin' | 'readonly' | 'no-endpoint' | 'unreachable'. Kept apart from the
+// boolean because "the server says no" and "the server has never heard of this
+// question" are completely different problems, and telling them apart is the
+// difference between checking your network and checking your deployment.
+let accessState = 'readonly';
 
 function isAdmin() { return adminAllowed; }
 
 async function loadAccess() {
+  adminAllowed = false;
+  clientAddress = null;
   try {
     const res = await fetch('/api/access');
-    const data = await res.json();
-    adminAllowed = !!(data && data.admin);
-    clientAddress = (data && data.client) || null;
+    if (res.status === 404) {
+      // The endpoint isn't there at all. index.html is newer than main.py —
+      // either main.py wasn't copied across with it, or the server hasn't been
+      // restarted since. Silently showing the read-only view here is what made
+      // this look like an access-control problem rather than a deploy one.
+      accessState = 'no-endpoint';
+      console.warn(
+        'DroneID: GET /api/access returned 404. This page expects a main.py ' +
+        'with network-based admin access; the server is running an older one, ' +
+        'or has not been restarted since it was updated. No admin controls ' +
+        'will appear on any network until that is fixed.'
+      );
+    } else if (!res.ok) {
+      accessState = 'unreachable';
+      console.warn('DroneID: GET /api/access failed with HTTP ' + res.status);
+    } else {
+      const data = await res.json();
+      adminAllowed = !!(data && data.admin);
+      clientAddress = (data && data.client) || null;
+      accessState = adminAllowed ? 'admin' : 'readonly';
+    }
   } catch (e) {
-    adminAllowed = false;   // can't ask — show the plain view
+    accessState = 'unreachable';
+    console.warn('DroneID: could not reach /api/access —', e);
   }
   // The answer usually lands after the first render, so redraw whichever
   // view cares about it.
@@ -1409,7 +1435,23 @@ function renderSettingsPanel() {
   });
   html += unitsHtml;
   const admin = isAdmin();
-  if (admin) {
+  // Said out loud rather than left to be puzzled over: a server that predates
+  // the network-based admin check can never grant admin from any network, and
+  // without this the only symptom is controls quietly missing everywhere.
+  if (accessState === 'no-endpoint' || accessState === 'unreachable') {
+    html += `
+      <div class="settings-group-title">Access</div>
+      <div class="settings-note">
+        ${accessState === 'no-endpoint'
+          ? 'This page asked the server which controls to show and the server didn\'t '
+            + 'recognise the question, so it\'s showing the read-only view. '
+            + '<code>main.py</code> is older than this page, or the server hasn\'t been '
+            + 'restarted since it was updated — admin controls won\'t appear on any '
+            + 'network until that\'s sorted.'
+          : 'Couldn\'t reach the server to ask which controls to show, so it\'s showing '
+            + 'the read-only view.'}
+      </div>`;
+  } else if (admin) {
     html += `
       <div class="settings-group-title">Access</div>
       <div class="settings-note">
@@ -1417,6 +1459,8 @@ function renderSettingsPanel() {
           ? ` — the server sees you as <code>${escapeHtml(clientAddress)}</code>`
           : ''}. Reaching the app over the other route gives the read-only view.
       </div>`;
+  }
+  if (admin) {
     html += stationHtml;
     html += discordHtml;
     html += debugHtml;

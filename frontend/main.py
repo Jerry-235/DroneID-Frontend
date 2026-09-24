@@ -34,6 +34,7 @@ persists every sample to SQLite through db.py, and serves:
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import math
@@ -48,7 +49,7 @@ from typing import Optional
 import zmq
 import zmq.asyncio
 import zmq.utils.monitor
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -1047,6 +1048,126 @@ async def stale_sweeper():
             log.exception("Error in stale sweeper loop — will retry on next tick")
 
 
+# ---- admin access, decided by which network the request arrived on ----
+#
+# Two routes reach this box: OpenVPN (10.10.102.0/24) and Tailscale
+# (100.64.0.0/10, Tailscale's CGNAT range). Anything arriving from a network
+# listed here gets the admin controls — Station, Discord, Debug, and the
+# destructive merge/delete on History. Everything else gets the read-only
+# view, and the admin endpoints refuse it outright rather than merely hiding
+# the buttons.
+#
+# Be clear about what this is: network-topology trust, not authentication. It
+# says "you came in over the trusted tunnel", which means every device and
+# every person on that tunnel is an admin, and it's only as good as the
+# tunnel's own access control. For this box, on a private tailnet, that is
+# exactly the intended trade. If you later want per-user rather than
+# per-network, Tailscale can identify the actual user behind a connection
+# (`tailscale whois <ip>:<port>`, or the Tailscale-User-Login header when
+# served through `tailscale serve`) — that would slot in at is_admin_request()
+# without anything else changing.
+#
+# Loopback is always admin so you can never lock yourself out of your own
+# box: a browser on the NUC, or curl over SSH, still works even if the
+# ranges below are misconfigured.
+ADMIN_NETS_DEFAULT = ",".join([
+    "100.64.0.0/10",        # Tailscale IPv4 (CGNAT range — all tailnet addresses live here)
+    "fd7a:115c:a1e0::/48",  # Tailscale IPv6, in case the browser prefers it (MagicDNS names often resolve to both)
+    "127.0.0.0/8",          # loopback: the box itself
+    "::1/128",
+])
+
+
+def _parse_nets(raw: str) -> list:
+    nets = []
+    for chunk in (raw or "").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(chunk, strict=False))
+        except ValueError:
+            log.warning("Ignoring unparseable network in DRONEID_ADMIN_NETS: %r", chunk)
+    return nets
+
+
+ADMIN_NETS = _parse_nets(os.environ.get("DRONEID_ADMIN_NETS", ADMIN_NETS_DEFAULT))
+
+# Off by default, and it must stay off unless this app sits behind a reverse
+# proxy you control: X-Forwarded-For is a request header like any other, so
+# any client can simply claim to be on the tailnet. Only turn it on when a
+# trusted proxy is the one setting it, and make sure that proxy overwrites the
+# header rather than appending to whatever the client sent.
+TRUST_FORWARDED_FOR = os.environ.get("DRONEID_TRUST_FORWARDED_FOR", "").strip().lower() in ("1", "true", "yes")
+
+_access_logged: set = set()
+
+
+def client_ip(conn) -> Optional[str]:
+    """Peer address of a request or websocket, or None if the server can't
+    tell (which is treated as not-admin)."""
+    if TRUST_FORWARDED_FOR:
+        forwarded = conn.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+    client = getattr(conn, "client", None)
+    return getattr(client, "host", None) if client else None
+
+
+def ip_is_admin(ip: Optional[str]) -> bool:
+    if not ip:
+        return False
+    try:
+        addr = ipaddress.ip_address(ip.split("%")[0])  # drop any IPv6 zone id
+    except ValueError:
+        return False
+    # A v4 client arriving on a dual-stack socket shows up as ::ffff:10.0.0.1;
+    # compare it as the v4 address it actually is, so a v4 range in the list
+    # still matches.
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped:
+        addr = mapped
+    return any(addr in net for net in ADMIN_NETS)
+
+
+def is_admin_request(conn) -> bool:
+    ip = client_ip(conn)
+    allowed = ip_is_admin(ip)
+    # Once per address, not per request — enough to answer "why am I not
+    # getting the admin controls" from the log without flooding it.
+    if ip and ip not in _access_logged:
+        _access_logged.add(ip)
+        log.info("New client %s — admin access %s", ip, "GRANTED" if allowed else "NOT granted")
+    return allowed
+
+
+# Method + exact path of everything only an admin may call. Kept as one table
+# rather than a decorator per route so there's a single place to audit, and so
+# an endpoint can't quietly end up ungated because its decorator was missed.
+ADMIN_ONLY_ROUTES = {
+    ("PUT", "/api/station"),
+    ("DELETE", "/api/station"),
+    ("POST", "/api/discord_webhook/test"),
+    ("POST", "/api/test/drone/start"),
+    ("POST", "/api/test/drone/stop"),
+    ("POST", "/api/flights/merge"),
+    ("POST", "/api/flights/delete"),
+    # Renaming is deliberately NOT here: the pencil shows for everyone, as it
+    # always has, and a wrong name is trivially fixable. Add
+    # ("PATCH", "/api/drones/<key>/name") to ADMIN_ONLY_PREFIXES below if you
+    # change your mind.
+}
+# Same idea for paths carrying a parameter — matched on the method plus a
+# path prefix instead of the whole path.
+ADMIN_ONLY_PREFIXES: set = set()
+
+
+def route_needs_admin(method: str, path: str) -> bool:
+    if (method, path) in ADMIN_ONLY_ROUTES:
+        return True
+    return any(method == m and path.startswith(p) for m, p in ADMIN_ONLY_PREFIXES)
+
+
 @asynccontextmanager
 async def lifespan(_app: "FastAPI"):
     """Opens the DB, warms the caches, and starts the background listeners.
@@ -1084,6 +1205,21 @@ app = FastAPI(title="DroneID Live Map", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 
 
+@app.middleware("http")
+async def admin_gate(request: Request, call_next):
+    """Refuses the admin-only endpoints to clients outside ADMIN_NETS. This is
+    the actual enforcement — the UI hiding those controls is only a courtesy,
+    and anyone can call an endpoint directly."""
+    if route_needs_admin(request.method, request.url.path) and not is_admin_request(request):
+        log.warning("Refused %s %s from %s (not an admin network)",
+                    request.method, request.url.path, client_ip(request))
+        return JSONResponse(
+            {"error": "This control is only available over the admin network."},
+            status_code=403,
+        )
+    return await call_next(request)
+
+
 class RenameBody(BaseModel):
     nickname: str
 
@@ -1091,6 +1227,15 @@ class RenameBody(BaseModel):
 class StationBody(BaseModel):
     lat: float
     lon: float
+
+
+@app.get("/api/access")
+async def api_access(request: Request):
+    """What this client is allowed to do, so the UI can match what the server
+    will actually permit. `client` is the address the server sees you as —
+    handy for working out why you're not getting the admin view."""
+    ip = client_ip(request)
+    return {"admin": ip_is_admin(ip), "client": ip}
 
 
 @app.get("/api/station")
