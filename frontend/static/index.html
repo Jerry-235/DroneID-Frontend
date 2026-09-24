@@ -549,7 +549,22 @@ let stationMarker = null;
 // the dashed drone<->operator link, and a highlight ring on the drone icon
 // when either half of the pair is selected — keeps the pairing visually
 // obvious even with several drones/operators on screen at once.
-const PAIR_COLORS = ['#F97316', '#6366F1', '#F43F5E', '#A78BFA', '#60A5FA', '#4ADE80', '#F472B6', '#FBBF24'];
+// Light purple (#A78BFA) used to sit fourth, right next to the indigo in
+// second — the two were the closest pair in the whole set (ΔE2000 14.9, where
+// about 20 is the point two colours read as clearly different at a glance),
+// and with three or four drones up at once you couldn't tell which icon
+// belonged to which row. Blue was already in the set, so it moved up into
+// that slot and the light purple is gone: the closest pair is now rose/pink
+// at 18.6, and indigo/blue sit at 20.9 with rose between them in assignment
+// order, so you need four simultaneous drones before both are even in play.
+//
+// Blue then moved again, from fourth to last: it and the indigo are the only
+// two blues left, and putting the whole rest of the set between them means
+// all seven have to be in the air at once before they can appear together.
+//
+// Light purple stays History's operator colour, which is now free of any
+// live identity colour it could be confused with.
+const PAIR_COLORS = ['#F97316', '#6366F1', '#F43F5E', '#4ADE80', '#F472B6', '#FBBF24', '#60A5FA'];
 let pairColorIndex = 0;
 function nextPairColor() {
   const c = PAIR_COLORS[pairColorIndex % PAIR_COLORS.length];
@@ -1789,12 +1804,14 @@ function rawIdCopyLabel(title, ids) {
 // The bold title for a list row. Only when it's showing the drone's own
 // identifier does it get a copy button (see rawIdCopyLabel).
 //   rawLabel: null for a user-given name, else the button's label.
-function nameLineHtml(name, rawLabel) {
+function nameLineInnerHtml(name, rawLabel) {
   const safe = escapeHtml(name);
-  return `<span class="name-line">`
-       + `<span class="track-name"${rawLabel ? ` title="${safe}"` : ''}>${safe}</span>`
-       + (rawLabel ? copyButtonHtml(name, rawLabel) : '')
-       + `</span>`;
+  return `<span class="track-name"${rawLabel ? ` title="${safe}"` : ''}>${safe}</span>`
+       + (rawLabel ? copyButtonHtml(name, rawLabel) : '');
+}
+
+function nameLineHtml(name, rawLabel) {
+  return `<span class="name-line">${nameLineInnerHtml(name, rawLabel)}</span>`;
 }
 
 // The page is normally served over plain http on the LAN, where browsers
@@ -1920,58 +1937,148 @@ function renderLiveSidebar() {
   if (entries.length === 0) {
     sidebar.innerHTML = '<div class="sidebar-empty">No detections yet. Waiting for data from the DroneID decoder…</div>';
     sidebar.dataset.view = 'live';
+    // Cleared, not just left behind: without this, the last drone dropping and
+    // then coming straight back would produce a row signature identical to the
+    // one still recorded here, the rebuild below would be skipped as
+    // unnecessary, and the list would stay showing "No detections yet" with a
+    // live drone on the map.
+    sidebar.dataset.rows = '';
     return;
   }
 
-  sidebar.innerHTML = entries.map((entry) => {
-    const d = entry.data;
-    // Same source of truth as the map markers, so a grayed icon never has a
-    // still-colored row (or the reverse) sitting next to it.
-    const color = entryColor(entry);
-    const name = d.nickname || d.serial || d.mac;
-    const sel = d.key === selectedKey ? ' selected' : '';
-    const hasOp = d.op_lat !== null && d.op_lat !== undefined && d.op_lon !== null && d.op_lon !== undefined;
-    const chipColor = d.status === 'live' ? color : STALE_COLOR;
-    const opColor = hasOp ? color : STALE_COLOR;
-    return `
-      <div class="track-row${sel}" data-key="${escapeHtml(d.key)}" style="${sel ? `border-left-color:${color};` : ''}">
-        <div class="row-top">
-          <span class="status-chip" style="background:${chipColor};box-shadow:${d.status === 'live' ? `0 0 6px ${chipColor}` : 'none'};"></span>
-          ${nameLineHtml(name, d.nickname ? null : rawIdCopyLabel(name, d))}
-          ${d.status === 'stale' ? '<span class="stale-tag">STALE</span>' : ''}
-          <button class="pencil-btn" data-rename="${escapeHtml(d.key)}" data-name="${escapeHtml(name)}">✎</button>
-        </div>
-        <div class="track-sub">
-          <span>${escapeHtml(d.mac || 'No MAC')}</span>
-          ${d.serial ? `<span class="track-serial" title="${escapeHtml(d.serial)}">SN: ${escapeHtml(d.serial)}</span>` : ''}
-        </div>
-        <div class="track-pills">
-          ${d.height_agl !== null && d.height_agl !== undefined ? `<span class="track-pill">${fmtAltitude(d.height_agl)} AGL</span>` : ''}
-          ${d.speed !== null && d.speed !== undefined ? `<span class="track-pill">${fmtSpeed(d.speed)}</span>` : ''}
-          ${d.heading !== null && d.heading !== undefined ? `<span class="track-pill">${fmt(d.heading,0,'°')}</span>` : ''}
-        </div>
-        <div class="track-op-row">
-          <span class="track-op-indicator" style="color:${opColor};">
-            <span class="op-dot${hasOp ? ' op-yes' : ''}" style="${hasOp ? `background:${color};box-shadow:0 0 6px ${color};` : ''}"></span>${hasOp ? 'Operator Detected' : 'No Operator Detected'}
-          </span>
-        </div>
-      </div>`;
-  }).join('');
+  // The row set only changes when a drone is discovered or dropped — which,
+  // with the discovery-order sort above, is the only time the markup needs
+  // rebuilding at all.
+  const rowsSig = entries.map(e => e.data.key).join('|');
+  if (sidebar.dataset.view !== 'live' || sidebar.dataset.rows !== rowsSig) {
+    sidebar.innerHTML = entries.map(e => liveRowShell(e.data)).join('');
+    sidebar.dataset.view = 'live';
+    sidebar.dataset.rows = rowsSig;
+    // Attached once per rebuild, which is now rare rather than several times
+    // a second.
+    sidebar.querySelectorAll('.track-row').forEach(row => {
+      row.addEventListener('click', (e) => {
+        if (e.target.dataset.rename) return; // the pencil handles its own clicks below
+        selectTrack(row.dataset.key);
+      });
+    });
+    sidebar.querySelectorAll('[data-rename]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        renameDrone(btn.dataset.rename, btn.dataset.name);
+      });
+    });
+    sidebar.scrollTop = scrollPos;
+  }
 
-  sidebar.querySelectorAll('.track-row').forEach(row => {
-    row.addEventListener('click', (e) => {
-      if (e.target.dataset.rename) return; // the pencil handles its own clicks below
-      selectTrack(row.dataset.key);
-    });
+  // Values are written into the existing rows on every burst. Matching by
+  // dataset rather than a querySelector on the key, since a key is a serial
+  // or MAC and doesn't have to be selector-safe.
+  const byKey = new Map();
+  sidebar.querySelectorAll('.track-row[data-key]').forEach(r => byKey.set(r.dataset.key, r));
+  entries.forEach(e => {
+    const row = byKey.get(e.data.key);
+    if (row) updateLiveRow(row, e);
   });
-  sidebar.querySelectorAll('[data-rename]').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      renameDrone(btn.dataset.rename, btn.dataset.name);
-    });
-  });
-  sidebar.dataset.view = 'live';
-  sidebar.scrollTop = scrollPos;
+  updateLiveRowSelection();
+}
+
+// The fixed skeleton of a row. Everything that changes as the drone flies is
+// written into these [data-f] slots by updateLiveRow, so the elements
+// themselves survive from burst to burst.
+//
+// This whole arrangement replaced rebuilding the list's innerHTML on every
+// burst, which is what made rows finicky to click with several drones up: a
+// click only fires if the press and the release land on the same element, and
+// with three drones reporting about once a second each, the row you pressed
+// was being destroyed and replaced under your finger before you let go.
+// Clicking the map icon worked more often because markers were always updated
+// in place, never recreated. Now the rows behave the same way.
+function liveRowShell(d) {
+  const key = escapeHtml(d.key);
+  return `
+    <div class="track-row" data-key="${key}">
+      <div class="row-top">
+        <span class="status-chip" data-f="chip"></span>
+        <span class="name-line" data-f="nameline"></span>
+        <span class="stale-tag" data-f="stale" hidden>STALE</span>
+        <button class="pencil-btn" data-f="pencil" data-rename="${key}" data-name="">✎</button>
+      </div>
+      <div class="track-sub">
+        <span data-f="mac"></span>
+        <span class="track-serial" data-f="sn" hidden></span>
+      </div>
+      <div class="track-pills">
+        <span class="track-pill" data-f="agl" hidden></span>
+        <span class="track-pill" data-f="spd" hidden></span>
+        <span class="track-pill" data-f="hdg" hidden></span>
+      </div>
+      <div class="track-op-row">
+        <span class="track-op-indicator" data-f="opwrap">
+          <span class="op-dot" data-f="opdot"></span><span data-f="optext"></span>
+        </span>
+      </div>
+    </div>`;
+}
+
+function setText(el, text) {
+  if (el && el.textContent !== text) el.textContent = text;
+}
+
+// A metric that isn't being broadcast hides its pill rather than showing a
+// dash, exactly as the old markup omitted it.
+function setPill(el, text) {
+  if (!el) return;
+  el.hidden = !text;
+  if (text) setText(el, text);
+}
+
+function updateLiveRow(row, entry) {
+  const d = entry.data;
+  const f = k => row.querySelector(`[data-f="${k}"]`);
+  // Same source of truth as the map markers, so a grayed icon never has a
+  // still-colored row (or the reverse) sitting next to it.
+  const color = entryColor(entry);
+  const isLive = d.status === 'live';
+  const hasOp = d.op_lat !== null && d.op_lat !== undefined && d.op_lon !== null && d.op_lon !== undefined;
+  const name = d.nickname || d.serial || d.mac;
+  const rawLabel = d.nickname ? null : rawIdCopyLabel(name, d);
+
+  const chipColor = isLive ? color : STALE_COLOR;
+  const chip = f('chip');
+  chip.style.background = chipColor;
+  chip.style.boxShadow = isLive ? `0 0 6px ${chipColor}` : 'none';
+
+  // The one part that still needs new markup — but only when the name or its
+  // copy button actually changes, so the button isn't rebuilt under your
+  // finger mid-click and lose its tick.
+  const nameSig = name + '\u0000' + (rawLabel || '');
+  if (row._nameSig !== nameSig) {
+    f('nameline').innerHTML = nameLineInnerHtml(name, rawLabel);
+    f('pencil').dataset.name = name;
+    row._nameSig = nameSig;
+  }
+
+  f('stale').hidden = d.status !== 'stale';
+
+  setText(f('mac'), d.mac || 'No MAC');
+  const sn = f('sn');
+  sn.hidden = !d.serial;
+  if (d.serial) {
+    setText(sn, `SN: ${d.serial}`);
+    sn.title = d.serial;
+  }
+
+  setPill(f('agl'), (d.height_agl !== null && d.height_agl !== undefined) ? `${fmtAltitude(d.height_agl)} AGL` : null);
+  setPill(f('spd'), (d.speed !== null && d.speed !== undefined) ? fmtSpeed(d.speed) : null);
+  setPill(f('hdg'), (d.heading !== null && d.heading !== undefined) ? fmt(d.heading, 0, '°') : null);
+
+  f('opwrap').style.color = hasOp ? color : STALE_COLOR;
+  const dot = f('opdot');
+  dot.classList.toggle('op-yes', hasOp);
+  dot.style.background = hasOp ? color : '';
+  dot.style.boxShadow = hasOp ? `0 0 6px ${color}` : '';
+  setText(f('optext'), hasOp ? 'Operator Detected' : 'No Operator Detected');
 }
 
 // ---------------- HISTORY mode ----------------
