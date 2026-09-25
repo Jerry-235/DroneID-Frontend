@@ -381,6 +381,23 @@ def _resume_flight(flight_id, catalog_key, mac, serial) -> int:
     return (row["segment_count"] - 1) if row else 0
 
 
+def _refile_flight(flight_id, catalog_key, mac, serial):
+    """Move an open flight onto the catalog key its aircraft is now known by.
+
+    Needed when a track first seen as a bare MAC has its serial decoded: the
+    flight row keeps pointing at the MAC catalog row otherwise, so the name
+    shown in History — and any rename, which the UI makes against the serial —
+    resolves against the wrong row. The caller must have created the new
+    catalog row first; flights.catalog_key is a foreign key."""
+    conn = _require_conn()
+    conn.execute(
+        "UPDATE flights SET catalog_key = ?, mac = COALESCE(?, mac), "
+        "serial = COALESCE(?, serial) WHERE id = ?",
+        (catalog_key, mac, serial, flight_id),
+    )
+    conn.commit()
+
+
 def _get_flights_by_ids(flight_ids):
     """Flight rows for an explicit id list, ordered oldest first. Used by the
     merge/delete paths, which need to validate every row before touching any
@@ -575,6 +592,10 @@ async def find_resumable_flight(catalog_key, mac, serial, nickname, cutoff_ts, e
 
 async def resume_flight(flight_id, catalog_key, mac, serial) -> int:
     return await run(_resume_flight, flight_id, catalog_key, mac, serial)
+
+
+async def refile_flight(flight_id, catalog_key, mac, serial):
+    await run(_refile_flight, flight_id, catalog_key, mac, serial)
 
 
 async def get_flights_by_ids(flight_ids):

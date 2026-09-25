@@ -114,10 +114,9 @@
   .track-row:hover{background:var(--panel-raised);}
   .track-row.selected{background:var(--panel-raised);border-left:2px solid var(--amber);padding-left:12px;}
   .track-row .row-top{ display:flex; align-items:center; gap:8px; }
-  /* The background is set inline per row (identity colour on Live, state
-     colour on History); the amber here is the fallback that an in-progress
-     History flight relies on — it used to set no colour at all, so the chip
-     on the one row that most wants to stand out rendered invisible. */
+  /* Background is set inline per row (identity colour on Live, state colour
+     on History). The amber is the fallback an in-progress History flight
+     relies on, which otherwise had no colour at all. */
   .status-chip{ width:7px;height:7px;border-radius:50%;flex:0 0 auto; background:var(--amber); }
   /* Says in words what the gray icon says on the map, for when the track
      you're wondering about is off-screen or one of several grayed at once. */
@@ -137,13 +136,10 @@
   /* Keeps the stats line the same height whether or not the row carries a
      checkbox, so turning admin view on doesn't resize every row. */
   .track-sub.stats{ min-height:18px; }
-  /* A full ANSI/CTA-2063-A serial is 20 characters and needs about 159px here;
-     this used to be capped at 150, so every one of them lost its last
-     character or two to an ellipsis for the sake of 9px — in a 300px sidebar.
-     The cap is gone. The row it sits in already wraps, so a serial that
-     genuinely can't share a line with the MAC drops to its own line and gets
-     the full width instead of being cut. The ellipsis stays as a last resort
-     for something absurdly long, which is the only case it was ever for. */
+  /* No width cap: a full 20-character CTA-2063-A serial needs ~159px, and the
+     row wraps, so one that can't share a line with the MAC drops to its own
+     line rather than being cut. The ellipsis is a last resort for absurd
+     values. */
   .track-serial{
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%;
   }
@@ -174,11 +170,9 @@
     border:solid #F97316; border-width:0 2px 2px 0; transform:rotate(45deg);
   }
   .track-row.picked{ background:var(--panel-raised); }
-  /* Sits at the END of the list, pinned to the bottom of the scrollport.
-     Appending rather than inserting at the top is deliberate: nothing above
-     it moves when it appears, so ticking the first checkbox doesn't shove
-     the whole list down. Sticky keeps its flow box, so the last row is
-     never hidden behind it either. */
+  /* Appended at the end and pinned to the bottom of the scrollport, so
+     nothing above it moves when it appears. Sticky keeps its flow box, so the
+     last row isn't hidden behind it. */
   .bulk-bar{
     position:sticky; bottom:0; z-index:5; background:var(--panel-raised);
     border-top:1px solid var(--hairline); padding:10px 12px;
@@ -235,11 +229,9 @@
   }
   @keyframes op-pulse{ 0%,100%{opacity:1;} 50%{opacity:0.4;} }
   .track-date{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-muted); }
-  /* The bold title plus its copy button. The wrapper takes the stretch that
-     .track-name used to, so the pencil stays pinned right while the name
-     only takes its own text width — putting the button at the end of the
-     ID itself rather than out beside the pencil. The name still truncates
-     before the button would be pushed out of view. */
+  /* The wrapper takes the stretch so the name keeps only its text width and
+     the copy button sits at the end of the ID, with the pencil pinned right.
+     The name truncates before the button can be pushed out of view. */
   .name-line{ flex:1 1 auto; min-width:0; display:flex; align-items:center; gap:4px; }
   .name-line .track-name{ flex:0 1 auto; min-width:0; }
   .copy-btn{
@@ -267,7 +259,6 @@
     padding:12px 14px 4px; font-size:11px; font-weight:700; letter-spacing:0.05em;
     color:var(--amber); text-transform:uppercase; border-top:1px solid var(--hairline);
   }
-  .settings-group-title:first-child{border-top:none;margin-top:0;}
   .settings-row{
     display:flex; align-items:center; gap:8px; padding:5px 14px; cursor:pointer; font-size:12px;
   }
@@ -329,10 +320,7 @@
     background:var(--panel-raised); color:var(--text); border-color:var(--hairline);
   }
   .leaflet-bar a:hover{ background:var(--panel); }
-  /* The popup-* rules that used to live here (content wrapper, tip, title,
-     row) went with the popups themselves when the detail panel replaced them.
-     These two stayed: they style the section bubbles at the top of each panel
-     section, which is where that badge moved to. */
+  /* Section bubbles at the top of each detail-panel section. */
   .popup-badge-row{ margin-bottom:6px; }
   .popup-badge{
     display:inline-block; padding:2px 7px; border-radius:3px; border:1px solid;
@@ -552,25 +540,15 @@ let selectedTarget = null; // 'drone' | 'operator' — which marker of the pair 
 let stationCoord = null;         // { lat, lon } — server-side "home point", null until set in Settings
 let stationMarker = null;
 
-// Each tracked drone gets a persistent color, used for its operator marker,
-// the dashed drone<->operator link, and a highlight ring on the drone icon
-// when either half of the pair is selected — keeps the pairing visually
-// obvious even with several drones/operators on screen at once.
-// Light purple (#A78BFA) used to sit fourth, right next to the indigo in
-// second — the two were the closest pair in the whole set (ΔE2000 14.9, where
-// about 20 is the point two colours read as clearly different at a glance),
-// and with three or four drones up at once you couldn't tell which icon
-// belonged to which row. Blue was already in the set, so it moved up into
-// that slot and the light purple is gone: the closest pair is now rose/pink
-// at 18.6, and indigo/blue sit at 20.9 with rose between them in assignment
-// order, so you need four simultaneous drones before both are even in play.
-//
-// Blue then moved again, from fourth to last: it and the indigo are the only
-// two blues left, and putting the whole rest of the set between them means
-// all seven have to be in the air at once before they can appear together.
-//
-// Light purple stays History's operator colour, which is now free of any
-// live identity colour it could be confused with.
+// Each tracked drone gets a persistent colour, shared by its operator marker,
+// the dashed link between them and the icon's highlight ring — so a pair stays
+// recognisable with several on screen at once.
+// Ordered so similar colours are handed out as far apart as possible. The
+// closest pair is rose/pink (ΔE2000 18.6); indigo and blue are the only two
+// blues and sit at opposite ends, so all seven must be live before they can
+// appear together. Around ΔE 20 is where two colours read as clearly
+// different at a glance. History's operator purple is deliberately not in
+// here, so it can never be mistaken for a live drone.
 const PAIR_COLORS = ['#F97316', '#6366F1', '#F43F5E', '#4ADE80', '#F472B6', '#FBBF24', '#60A5FA'];
 let pairColorIndex = 0;
 function nextPairColor() {
@@ -579,12 +557,9 @@ function nextPairColor() {
   return c;
 }
 
-// A track that's gone quiet (45s by default, DRONEID_STALE_AFTER_S on the
-// server) drops its identity color for this neutral gray and parks at its
-// last known position until it's dropped altogether 60s later. Deliberately
-// not in PAIR_COLORS, so gray never doubles as some drone's identity — but
-// it does mean several stale tracks look alike, which is fine: they're all
-// saying the same thing.
+// A track gone quiet (DRONEID_STALE_AFTER_S) drops its identity colour for
+// this gray and parks at its last position until dropped. Kept out of
+// PAIR_COLORS so gray never doubles as a drone's identity.
 const STALE_COLOR = '#7C8B99';
 
 // The color everything belonging to this track should currently be drawn in
@@ -878,15 +853,9 @@ function saveUnitSystem() {
 let unitSystem = loadUnitSystem();
 
 // ---------------- admin view gate ----------------
-// The server decides, from the network the request came in on (see
-// ADMIN_NETS in main.py) — not this browser. That replaced the old
-// ?jerry=1 localStorage flag, which could only hide controls: anyone who
-// opened dev tools could set it, and the endpoints behind those controls
-// answered to everyone regardless.
-//
-// So this is now only about drawing the right UI. The server refuses the
-// admin endpoints itself, whatever this says, which is what actually makes
-// the distinction mean something.
+// The server decides, from the network the request arrived on (ADMIN_NETS in
+// main.py). This only draws the matching UI — the server refuses the admin
+// endpoints itself whatever this says, which is what makes it mean anything.
 let adminAllowed = false;
 let clientAddress = null;   // how the server sees us — shown in Settings so it's
                             // obvious which route this tab came in on
@@ -1071,6 +1040,9 @@ let mapContext = 'live';
 // History has no "selection" to clear the way Live does: the flight stays
 // loaded on the map after you close the panel. This remembers that you did.
 let historyPanelDismissed = false;
+// Set while a whole recorded route is being framed, so the panel opening
+// underneath doesn't immediately pan back to a single point.
+let suppressPanelRecentre = false;
 
 const PANEL_MQ = window.matchMedia ? window.matchMedia('(max-width: 700px)') : null;
 function isMobileLayout() { return !!(PANEL_MQ && PANEL_MQ.matches); }
@@ -1186,10 +1158,12 @@ function setPanelOpen(open) {
   // in the middle of the smaller map.
   setTimeout(() => {
     map.invalidateSize();
-    // Opening the panel resizes the map mid-glide, which can cut the pan
-    // short and leave the unit off-centre. Re-assert it once the transition
-    // has settled — no animation, it's already almost there.
-    if (open) focusMap(focusedLatLng(), false);
+    // Opening the panel resizes the map mid-glide, which can cut the pan short
+    // and leave the unit off-centre. Re-assert it once the transition has
+    // settled — unless the view was deliberately framed to fit a whole
+    // recorded route, in which case re-centring on a single point would throw
+    // most of that route off-screen.
+    if (open && !suppressPanelRecentre) focusMap(focusedLatLng(), false);
   }, 220);
 }
 
@@ -1621,7 +1595,13 @@ function upsertDrone(d) {
   if (d.flight_id && entry.flightId !== d.flight_id && !entry.flightLoading) {
     entry.flightLoading = true;
     entry.flightId = d.flight_id;
+    const wantFlight = d.flight_id;
     fetch(`/api/flights/${d.flight_id}`).then(r => r.json()).then(data => {
+      // The track may have dropped, or moved on to another flight, while this
+      // was in the air. Writing into a discarded entry would build a trail
+      // nothing references any more and add it to the map, where no code path
+      // could ever remove it.
+      if (droneMarkers.get(d.key) !== entry || entry.flightId !== wantFlight) return;
       const points = data.points || [];
       // A flight that was resumed after a short disappearance still holds
       // the earlier segments' points, but the live trail only wants the
@@ -1647,7 +1627,14 @@ function upsertDrone(d) {
       entry.opPath = mergeKeepingLive(fetchedOp, entry.opPath);
       updatePathVisibility(entry, d.key);
       entry.flightLoading = false;
-    }).catch(() => { entry.flightLoading = false; });
+    }).catch(() => {
+      // Clearing flightId as well as the in-flight flag, so the next burst
+      // tries again. Leaving it set meant one failed request (a server blip on
+      // page load) permanently disabled backfill for that track, and its trail
+      // silently began at the moment of the failure.
+      entry.flightLoading = false;
+      if (entry.flightId === wantFlight) entry.flightId = null;
+    });
   }
 
   if (hasPos) {
@@ -1701,13 +1688,10 @@ function upsertDrone(d) {
     }
   }
 
-  // Once, at the end. This ran up to three times per burst (after each path
-  // push and again after the marker moved), and each call re-feeds the whole
-  // accumulated trail to Leaflet — on a long flight that's thousands of
-  // points redrawn three times for one new sample. It also has to run on a
-  // plain status update with no new position at all, since a track that has
-  // just gone stale is by definition not sending points any more and this is
-  // the only chance its trail gets to go gray.
+  // Once per burst, at the end: each call re-feeds the whole accumulated trail
+  // to Leaflet, which is thousands of points on a long flight. It has to run
+  // even when no new position arrived, since a track that has just gone stale
+  // isn't sending points and this is its trail's only chance to go gray.
   updatePathVisibility(entry, d.key);
 
   if (mode === 'live') renderSidebar();
@@ -1767,17 +1751,10 @@ function updatePathVisibility(entry, key) {
 function removeDrone(key) {
   const entry = droneMarkers.get(key);
   if (entry) {
-    // Removed from both the layer group AND the map directly —
-    // belt-and-suspenders, in case group-removal alone ever leaves a stray
-    // DOM node behind (a best guess at the old "icon lingers until page
-    // refresh" report, never reproduced directly).
-    // The trails go with it. They used to be faded to gray and left behind
-    // instead — but nothing ever removed them afterwards, and the entry
-    // holding them was deleted on the next line, so every dropped track left
-    // a permanent ghost trail that only a page reload could clear. Since the
-    // marker itself is gone, a line hanging in space with nothing at either
-    // end isn't telling you anything the History tab doesn't tell you
-    // better.
+    // Everything the track owns goes, trails included: the entry holding them
+    // is deleted on the next line, so anything left on the map here could
+    // never be removed again. Taken off the layer group and the map both, in
+    // case group removal alone leaves a stray node behind.
     [entry.marker, entry.opMarker, entry.link, entry.pathLine, entry.opPathLine].forEach(layer => {
       if (!layer) return;
       liveLayer.removeLayer(layer);
@@ -1837,13 +1814,10 @@ function copyButtonHtml(value, idleLabel) {
 }
 
 // Whether a displayed title is the aircraft's own identifier rather than a
-// name someone typed, and if so what the copy button should call it. A name
+// name someone typed, and if so what the copy button should call it — a name
 // you chose isn't something you'd paste anywhere, so it gets no button.
-//
-// One implementation for all three places that ask — the Live row, the
-// History row, and the panel head — which each used to carry their own
-// slightly different ternary. `ids` is anything holding serial/mac/
-// catalog_key: a live track's data or a flight's metadata alike.
+// Shared by the Live row, the History row and the panel head. `ids` is
+// anything carrying serial/mac/catalog_key.
 function rawIdCopyLabel(title, ids) {
   if (!title || !ids) return null;
   if (title === ids.serial) return 'Copy serial number';
@@ -1936,10 +1910,9 @@ function focusedLatLng() {
   return m ? m.getLatLng() : null;
 }
 
-// Both Focus buttons move the map identically: glide to their own unit and
-// leave the zoom alone. The operator button used to zoom out to fit both
-// together, so toggling between the two changed the zoom level under you
-// every time — the pair feels much steadier kept symmetric.
+// Both buttons behave identically: glide to their own unit, leave the zoom
+// alone. Keeping them symmetric is what stops the zoom changing under you as
+// you toggle between drone and operator.
 function focusMap(latlng, animate) {
   if (!latlng) return;
   map.panTo(latlng, { animate: animate !== false, duration: 0.35 });
@@ -1966,18 +1939,11 @@ function selectOperator(key) { selectLiveTarget(key, 'operator'); }
 function renderLiveSidebar() {
   const sidebar = document.getElementById('sidebar');
   const scrollPos = sidebar.scrollTop;
-  // Ordered by when each drone was first discovered, oldest at the top.
-  //
-  // This used to sort by last_seen, newest first — which meant that with more
-  // than one drone in the air the list re-sorted every time any of them sent
-  // a burst, and they took turns shoving each other out of the top spot
-  // several times a second. first_seen never changes for the life of a track,
-  // so the order is fixed the moment a drone appears: a new detection is
-  // appended at the bottom and nothing above it moves. (A drone that drops
-  // off and is rediscovered is genuinely new, and joins at the bottom.)
-  //
-  // The key is the tie-break, so two drones first seen in the same burst
-  // still have one settled order rather than swapping on every render.
+  // By time of discovery, oldest first. first_seen never changes for the life
+  // of a track, so the order is fixed the moment a drone appears — a new one
+  // joins at the bottom and nothing above it moves. Sorting by last_seen
+  // instead would reshuffle the list on every burst. The key breaks ties so
+  // two drones found in the same burst still settle into one order.
   const entries = Array.from(droneMarkers.values()).sort((a, b) => {
     const byDiscovery = (a.data.first_seen || 0) - (b.data.first_seen || 0);
     return byDiscovery || String(a.data.key).localeCompare(String(b.data.key));
@@ -2035,16 +2001,10 @@ function renderLiveSidebar() {
 }
 
 // The fixed skeleton of a row. Everything that changes as the drone flies is
-// written into these [data-f] slots by updateLiveRow, so the elements
-// themselves survive from burst to burst.
-//
-// This whole arrangement replaced rebuilding the list's innerHTML on every
-// burst, which is what made rows finicky to click with several drones up: a
-// click only fires if the press and the release land on the same element, and
-// with three drones reporting about once a second each, the row you pressed
-// was being destroyed and replaced under your finger before you let go.
-// Clicking the map icon worked more often because markers were always updated
-// in place, never recreated. Now the rows behave the same way.
+// written into these [data-f] slots by updateLiveRow, so the elements survive
+// from burst to burst. That matters for more than speed: a click only fires if
+// the press and the release land on the same element, so rebuilding the markup
+// on every burst made rows unclickable with several drones reporting.
 function liveRowShell(d) {
   const key = escapeHtml(d.key);
   return `
@@ -2092,7 +2052,7 @@ function updateLiveRow(row, entry) {
   const color = entryColor(entry);
   const isLive = d.status === 'live';
   const hasOp = d.op_lat !== null && d.op_lat !== undefined && d.op_lon !== null && d.op_lon !== undefined;
-  const name = d.nickname || d.serial || d.mac;
+  const name = d.nickname || d.serial || d.mac || 'Unknown aircraft';
   const rawLabel = d.nickname ? null : rawIdCopyLabel(name, d);
 
   const chipColor = isLive ? color : STALE_COLOR;
@@ -2154,6 +2114,9 @@ let historyRequestId = 0; // guards against a slow/stale fetch finishing after a
 function historyPointData(idx) {
   const p = historyState.points[idx] || {};
   const f = historyState.flightMeta || {};
+  const hasOpFix = p.op_lat !== null && p.op_lat !== undefined
+    && p.op_lon !== null && p.op_lon !== undefined
+    && !(p.op_lat === 0 && p.op_lon === 0);
   return {
     mac: f.mac, serial: f.serial, ua_type: f.ua_type,
     protocol_version: p.protocol_version || f.protocol_version,
@@ -2170,7 +2133,11 @@ function historyPointData(idx) {
     baro_accuracy: p.baro_accuracy, speed_accuracy: p.speed_accuracy,
     loc_timestamp: p.loc_timestamp,
     op_location_type: p.op_location_type, op_classification_type: p.op_classification_type,
-    op_lat: p.op_lat, op_lon: p.op_lon,
+    // 0,0 is the null-island placeholder a receiver emits before the operator
+    // has a fix. The map already ignores it; without the same check here the
+    // panel showed Operator Latitude 0.0000000 and a distance of several
+    // thousand km — a plausible-looking number that is pure noise.
+    op_lat: hasOpFix ? p.op_lat : null, op_lon: hasOpFix ? p.op_lon : null,
   };
 }
 
@@ -2195,9 +2162,8 @@ function clearHistorySelection() {
   renderDetailPanel();   // closes it: the flight it was describing is gone
 }
 
-// The bar is built once and then only has its text updated. Rebuilding its
-// markup on every tick is what made the sidebar flicker, so nothing here
-// touches innerHTML after creation.
+// Built once, then only its text is updated — nothing here touches innerHTML
+// after creation, which is what keeps the sidebar from flickering.
 function buildBulkBar() {
   const bar = document.createElement('div');
   bar.className = 'bulk-bar';
@@ -2243,8 +2209,6 @@ function syncBulkBar() {
     // row above it.
     sidebar.appendChild(bar);
     requestAnimationFrame(() => bar.classList.add('show'));
-  } else if (bar !== sidebar.lastElementChild) {
-    sidebar.appendChild(bar);   // a re-render put rows after it
   }
   bar.querySelector('#bulk-count').textContent = `${pickedFlights.size} selected`;
   const msg = bar.querySelector('#bulk-msg');
@@ -2255,8 +2219,8 @@ function syncBulkBar() {
 
 function setFlightPicked(id, picked) {
   if (picked) pickedFlights.add(id); else pickedFlights.delete(id);
-  // Touch only the one row that changed. Re-rendering the whole list here
-  // (and re-fetching it) is what made every tick flash the sidebar.
+  // Only the row that changed: re-rendering the whole list here would flash
+  // the sidebar on every tick.
   const row = document.querySelector(`.track-row[data-flight="${id}"]`);
   if (row) row.classList.toggle('picked', picked);
   bulkMessage = null;
@@ -2365,10 +2329,8 @@ function historyRawIdLabel(f) {
 
 async function loadHistoryList() {
   const sidebar = document.getElementById('sidebar');
-  // Preserve scroll position across the re-render below — a plain innerHTML
-  // replacement resets scrollTop to 0 in most browsers, which is why
-  // clicking a flight partway down a long list used to jump you back to
-  // the top instead of staying where you were.
+  // Kept across the re-render below: a plain innerHTML replacement resets
+  // scrollTop, which would throw you back to the top of a long list.
   const scrollPos = sidebar.scrollTop;
   // Only blank the sidebar on the way INTO History. Showing "Loading
   // flights…" on every refresh meant each re-render flashed the list empty
@@ -2383,11 +2345,18 @@ async function loadHistoryList() {
     data = await res.json();
   } catch (e) {
     // Without this the promise rejected into nothing and the sidebar sat on
-    // "Loading flights…" forever with no clue why.
-    sidebar.innerHTML = '<div class="sidebar-empty">Could not reach the server. Retrying on the next update…</div>';
+    // "Loading flights…" forever with no clue why. Nothing retries on its own,
+    // so the message says what to do rather than promising it will.
+    if (mode !== 'history') return;
+    sidebar.innerHTML = '<div class="sidebar-empty">Could not reach the server. '
+      + 'Reopen this tab to try again.</div>';
     sidebar.dataset.view = 'history';
     return;
   }
+  // The tab can change while this is in the air — a slow flight list landing
+  // after a switch to Live would paint recorded flights over the live list and
+  // leave the header reading "N flights" under the LIVE tab.
+  if (mode !== 'history') return;
   const flights = data.flights || [];
   document.getElementById('track-count').textContent = flights.length;
   document.getElementById('count-label').textContent = 'flights';
@@ -2473,12 +2442,19 @@ async function selectHistoryFlight(flightId) {
     data = await res.json();
     if (!res.ok) throw new Error((data && data.error) || 'request failed');
   } catch (e) {
-    // A flight deleted from another tab, or the server gone away. Say so in
-    // the scrubber readout rather than throwing into nothing and leaving the
-    // row looking like it's still loading.
+    // A flight deleted from another tab, or the server gone away.
     if (myRequestId !== historyRequestId) return;
+    // The map was already cleared above, so the previous flight's state has to
+    // go with it. Left in place, the scrubber kept that flight's length and
+    // scrubbing it moved markers that were no longer on the map, the panel
+    // went on showing its data, and its row stayed highlighted as open.
+    historyState = emptyHistoryState();
+    historyPanelDismissed = true;
+    renderDetailPanel();
     document.getElementById('scrub-readout').textContent = 'Could not load this flight.';
+    document.getElementById('scrub-range').max = 0;
     document.getElementById('scrubber').classList.add('show');
+    loadHistoryList();   // drop the "open flight" highlight
     return;
   }
   if (myRequestId !== historyRequestId) return; // a newer selection happened while this was in flight — discard this stale one
@@ -2558,7 +2534,14 @@ async function selectHistoryFlight(flightId) {
   range.max = allPoints.length - 1;
   range.value = 0;
   scrubber.classList.add('show');
+  // scrubToIndex opens the detail panel, and the panel re-centres the map on
+  // the focused unit once its transition finishes. That would undo the framing
+  // just done above — on the first flight of a session only, since afterwards
+  // the panel is already open and doesn't re-centre. Held off until that
+  // timer has passed, so the whole route stays in view.
+  suppressPanelRecentre = true;
   scrubToIndex(0);
+  setTimeout(() => { suppressPanelRecentre = false; }, 260);
   loadHistoryList(); // refresh which row is highlighted as the open flight
 }
 
@@ -2588,10 +2571,8 @@ function updateHistoryTrailStyles() {
     historyState.line.setStyle({ weight: droneFocused ? 3 : 2, opacity: droneFocused ? 0.9 : 0.6 });
   }
   if (historyState.opLine) {
-    // Always a solid purple line: bold when you're tracking the operator,
-    // faded back when you aren't. It used to go dashed when unfocused,
-    // which read as another version of the drone-operator link line — the
-    // only dashed purple on the map should be that link.
+    // Solid purple either way, bold when tracked and faded when not. Never
+    // dashed: the only dashed purple on the map is the drone-operator link.
     const opFocused = historySelectedTarget === 'operator';
     historyState.opLine.setStyle({
       weight: opFocused ? 3 : 2,
@@ -2698,6 +2679,9 @@ function switchMode(next) {
     return;
   }
   mode = next;
+  // Retires any flight fetch still in the air, so it can't re-show the
+  // scrubber or draw onto a layer this switch has just taken off the map.
+  historyRequestId++;
   if (sidebarCollapsed) setSidebarCollapsed(false);
   document.getElementById('tab-live').classList.toggle('active', next === 'live');
   document.getElementById('tab-history').classList.toggle('active', next === 'history');
@@ -2766,8 +2750,8 @@ function connectWs() {
 
   ws.onmessage = (evt) => {
     let msg;
-    // A truncated or non-JSON frame used to throw out of the handler as an
-    // uncaught error. Skipping it leaves the socket healthy for the next one.
+    // A truncated or non-JSON frame is skipped rather than thrown, which
+    // leaves the socket healthy for the next one.
     try { msg = JSON.parse(evt.data); } catch (e) { return; }
     if (msg.type === 'snapshot') {
       // Authoritative: prune any marker for a drone that dropped while we
@@ -2793,6 +2777,10 @@ function connectWs() {
       }
     } else if (msg.type === 'dropped') {
       removeDrone(msg.key);
+      // A track dropping is what closes its flight, so this is the moment the
+      // History list goes stale — its row still says "in progress" with the
+      // point count it had. Nothing else refreshes it while you sit on the tab.
+      if (mode === 'history') loadHistoryList();
     } else if (msg.type === 'health') {
       applyHealth(msg.health);
     }
@@ -2810,36 +2798,25 @@ setInterval(() => {
   if (panelState.open) renderDetailPanel();
 }, 1000);
 
-// Health indicator tooltips: now position:fixed (see CSS) rather than
-// absolute + top:100%, since the top bar is a horizontal scroll container
-// and CSS can't let an element both clip on the X axis and overflow freely
-// on the Y axis at the same time — a purely-CSS :hover dropdown would get
-// silently clipped by the same overflow that makes the bar scrollable.
-// Positioned here instead, in viewport coordinates, so it always renders on
-// top regardless of scroll state.
-// Only devices that genuinely support hovering (a real mouse) get the
-// mouseenter/focus-based listeners below. On touch devices, a fresh tap
-// fires a synthetic "mouseenter" first (browsers do this to support
-// :hover-styled elements), immediately followed by the real "click" for
-// that same tap — our click handler would then see the tooltip already
-// open (from that synthetic mouseenter a moment earlier) and treat it as
-// "already open, close it", making it flash and vanish on the very first
-// tap. Skipping hover/focus entirely on touch devices removes that race:
-// only "click" ever fires per tap, so toggle logic stays unambiguous.
+// Health tooltips are position:fixed and placed in viewport coordinates here,
+// because the top bar is a horizontal scroll container: CSS can't clip on X
+// and overflow freely on Y at once, so a pure-CSS dropdown would be clipped by
+// the same overflow that makes the bar scrollable.
+//
+// Hover/focus listeners are only attached on devices with a real mouse. A tap
+// on a touch screen fires a synthetic mouseenter before the real click, so the
+// click handler would see the tooltip already open and close it again — the
+// tooltip would flash and vanish on first tap.
 const supportsRealHover = window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches;
 
 document.querySelectorAll('.health-item').forEach(item => {
   const tooltip = item.querySelector('.health-tooltip');
   if (!tooltip) return;
 
-  // Move the tooltip to be a direct child of <body> rather than staying
-  // nested inside .health-item/.topbar. It's already position:fixed with
-  // coordinates computed in viewport space below, so this doesn't change
-  // where it appears — but on mobile, a fixed element can still end up
-  // visually trapped behind other content (like the Leaflet map) due to
-  // stacking-context quirks from ancestor elements, even with a high
-  // z-index. Making it a top-level element with no ancestor to interfere
-  // sidesteps that entirely.
+  // Moved to be a direct child of <body>: it's position:fixed with viewport
+  // coordinates, so this doesn't change where it appears, but an ancestor's
+  // stacking context can otherwise trap it behind the map on mobile even at a
+  // high z-index.
   document.body.appendChild(tooltip);
 
   function show() {

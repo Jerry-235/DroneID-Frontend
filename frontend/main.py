@@ -73,6 +73,28 @@ import db
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("droneid-frontend")
 
+# asyncio only holds a weak reference to a running task, so a bare
+# create_task() can be collected mid-flight. Everything fire-and-forget goes
+# through here instead, which keeps a reference until it finishes and logs
+# anything that escaped rather than letting it vanish into a dead task.
+_background_tasks: set = set()
+
+
+def spawn(coro, label: str = ""):
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    task.add_done_callback(lambda t: _log_task_error(t, label))
+    return task
+
+
+def _log_task_error(task, label: str):
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error("Background task %s failed: %r", label or task.get_name(), exc)
+
 ZMQ_ADDR = os.environ.get("DRONEID_ZMQ_ADDR", "tcp://127.0.0.1:4224")
 # Raw per-sniffer ports, per bkerler/DroneID's own defaults — subscribed to
 # here only for health/liveness monitoring (is each sniffer process actually
@@ -94,6 +116,8 @@ DROP_AFTER_S = float(os.environ.get("DRONEID_DROP_AFTER_S", "105"))
 # with the defaults above, the real dead-air tolerance is 105s + 300s.
 FLIGHT_MERGE_WINDOW_S = float(os.environ.get("DRONEID_FLIGHT_MERGE_WINDOW_S", "300"))
 HEALTH_TIMEOUT_S = float(os.environ.get("DRONEID_HEALTH_TIMEOUT_S", "12"))
+# How long to wait on one client before giving up on it and closing it out.
+BROADCAST_TIMEOUT_S = float(os.environ.get("DRONEID_BROADCAST_TIMEOUT_S", "5"))
 
 # Two independent signals per channel:
 #  - connection_state: real TCP-level connect/disconnect, from ZMQ's socket
@@ -136,31 +160,39 @@ def compute_health(now: Optional[float] = None) -> dict:
 # Remote ID sentinel values that mean "no data", not a literal reading.
 UNKNOWN_STRINGS = {"unknown", "undefined", "invalid"}
 
+# Key prefix for a burst carrying neither MAC nor serial. Nothing downstream
+# can correlate it, so these are shown live and never persisted.
+ANON_KEY_PREFIX = "anon:"
 
-def clean_float(value) -> Optional[float]:
-    """Convert a Remote ID numeric-ish field to float, or None if it's a
-    known sentinel ('Unknown', 'Undefined', or heading 361)."""
+
+def clean_float(value, heading: bool = False) -> Optional[float]:
+    """Convert a Remote ID numeric-ish field to float, or None for a known
+    sentinel ('Unknown', 'Undefined').
+
+    361 is the F3411 "direction unknown" value, and only means that on a
+    heading — so it is only treated as a sentinel when heading=True. It used
+    to be stripped from every field, which quietly threw away a real altitude,
+    height or speed of exactly 361."""
     if value is None:
         return None
     if isinstance(value, (int, float)):
         v = float(value)
-        return None if v == 361 else v
-    s = str(value).strip()
-    low = s.lower()
-    if any(tok in low for tok in UNKNOWN_STRINGS):
-        return None
-    # strip trailing units like "0.0 m/s", "9.0 m"
-    num = ""
-    for ch in s:
-        if ch.isdigit() or ch in ".-":
-            num += ch
-        elif num:
-            break
-    try:
-        v = float(num)
-    except ValueError:
-        return None
-    return None if v == 361 else v
+    else:
+        s = str(value).strip()
+        if any(tok in s.lower() for tok in UNKNOWN_STRINGS):
+            return None
+        # strip trailing units like "0.0 m/s", "9.0 m"
+        num = ""
+        for ch in s:
+            if ch.isdigit() or ch in ".-":
+                num += ch
+            elif num:
+                break
+        try:
+            v = float(num)
+        except ValueError:
+            return None
+    return None if (heading and v == 361) else v
 
 
 def parse_latlon(value) -> Optional[float]:
@@ -246,6 +278,7 @@ class TrackStore:
     def __init__(self):
         self.tracks: dict[str, DroneTrack] = {}
         self.mac_to_key: dict[str, str] = {}
+        self._last_anon_warning = 0.0
         # Called as on_rekey(old_key, new_key) when a track that was being
         # followed under a bare MAC gets folded into a serial-keyed one (i.e.
         # its Basic ID finally decoded). Anything else keyed by track key —
@@ -263,11 +296,15 @@ class TrackStore:
             # no serial yet this burst — use whatever we already know for this
             # MAC, or fall back to the MAC itself for a brand-new track.
             return self.mac_to_key.get(mac, mac)
-        # neither MAC nor serial: nothing to correlate against across bursts.
-        # This shouldn't happen with compliant Remote ID traffic (Basic ID is
-        # mandatory), so surface it loudly rather than silently losing the plot.
-        log.warning("Burst with neither MAC nor serial — cannot correlate across packets")
-        return f"anon:{int(time.time()*1000)}"
+        # Neither MAC nor serial: nothing to correlate against across bursts.
+        # Shouldn't happen with compliant Remote ID (Basic ID is mandatory), so
+        # say so — but only once a minute, since the case that produces it is
+        # a stream of garbled packets, not a single one.
+        now = time.time()
+        if now - self._last_anon_warning > 60:
+            self._last_anon_warning = now
+            log.warning("Burst with neither MAC nor serial — cannot correlate across packets")
+        return f"{ANON_KEY_PREFIX}{int(now * 1000)}"
 
     @staticmethod
     def _pick_serial(messages: list[dict]) -> tuple[Optional[str], Optional[str]]:
@@ -413,7 +450,7 @@ class TrackStore:
                 if speed is not None:
                     track.speed = speed
 
-                heading = clean_float(loc.get("direction"))
+                heading = clean_float(loc.get("direction"), heading=True)
                 if heading is not None:
                     track.heading = heading
 
@@ -461,6 +498,13 @@ class TrackStore:
         track.touch()
         return track
 
+    def forget_mac_for(self, key: str):
+        """Drop the MAC->key entries pointing at a track that has gone. WiFi
+        Remote ID re-randomizes MACs, so without this the map grows one entry
+        per MAC ever seen and never gives any of them back."""
+        for mac in [m for m, k in self.mac_to_key.items() if k == key]:
+            self.mac_to_key.pop(mac, None)
+
     def snapshot(self) -> list[dict]:
         return [t.to_dict() for t in self.tracks.values()]
 
@@ -470,6 +514,8 @@ catalog_nicknames: dict[str, str] = {}   # catalog_key -> user-assigned nickname
 active_flights: dict[str, int] = {}      # catalog_key -> currently-open flight row id
 last_status_sent: dict[str, str] = {}    # catalog_key -> last status the sweeper announced,
                                          # so it only speaks up when one actually changes
+pending_refile: set[str] = set()         # keys whose open flight row still names their old
+                                         # key; corrected on the next persist_update
 
 
 class ConnectionManager:
@@ -486,13 +532,18 @@ class ConnectionManager:
     async def broadcast(self, message: dict):
         dead = []
         payload = json.dumps(message)
-        # Snapshot the set first: send_text awaits, and a browser connecting
-        # (or dropping) during one of those awaits mutates self.active mid-loop
-        # — "Set changed size during iteration", which would abort the whole
-        # broadcast and, from the zmq listener, get logged as an ingest error.
+        # list(), because send_text awaits and a browser connecting or dropping
+        # during one of those awaits would otherwise mutate the set mid-loop.
         for ws in list(self.active):
             try:
-                await ws.send_text(payload)
+                # A client that has stopped reading (a phone asleep with the
+                # page open, a suspended laptop) blocks this send until TCP
+                # gives up, which can be minutes. The zmq listener awaits this
+                # on every burst, so without a timeout one dozing tab stalls
+                # all ingest and the stale sweeper along with it. Dropping it
+                # costs nothing: the browser reconnects and gets a fresh
+                # snapshot.
+                await asyncio.wait_for(ws.send_text(payload), timeout=BROADCAST_TIMEOUT_S)
             except Exception:
                 dead.append(ws)
         for ws in dead:
@@ -509,14 +560,35 @@ def _on_track_rekey(old_key: str, new_key: str):
     ever will, since the sweeper only ages out keys still in store.tracks."""
     flight_id = active_flights.pop(old_key, None)
     if flight_id is not None:
-        active_flights.setdefault(new_key, flight_id)
+        existing = active_flights.get(new_key)
+        if existing is None:
+            active_flights[new_key] = flight_id
+            # The flight row still records the old key. It can't be corrected
+            # here — the new catalog row doesn't exist yet and the column is a
+            # foreign key — so persist_update does it after the upsert.
+            pending_refile.add(new_key)
+        elif existing != flight_id:
+            # Both keys had a flight open. The one being abandoned would sit
+            # with ended_at NULL forever, and find_resumable_flight would later
+            # adopt it as though it were recent.
+            log.info("Closing flight %s, superseded by %s on rekey to %s",
+                     flight_id, existing, new_key)
+            _close_orphan_flight(flight_id)
     last_status_sent.pop(old_key, None)
     log.info("Track %s is now keyed as %s (serial decoded)", old_key, new_key)
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return  # no loop (unit test / sync context) — nothing to notify
-    asyncio.create_task(manager.broadcast({"type": "dropped", "key": old_key}))
+    spawn(manager.broadcast({"type": "dropped", "key": old_key}))
+
+
+def _close_orphan_flight(flight_id: int):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    spawn(db.end_flight(flight_id))
 
 
 store.on_rekey = _on_track_rekey
@@ -562,41 +634,60 @@ def _burst_from_message_list(messages: list[dict]) -> tuple[Optional[str], list[
 def extract_bursts(data) -> list[tuple[Optional[str], list[dict]]]:
     """Normalize decoder output into a list of (mac_or_none, [messages])
     bursts. Handles the shapes seen so far:
-      - a flat list of messages, each individually tagged with "MAC"
-      - a list of per-aircraft bursts (a list of lists), where MAC appears as
-        its own element, on individual messages, or not at all
+      - a list of per-aircraft bursts (a list of lists)
+      - a flat list for one aircraft, led by a standalone {"MAC": ...}
+      - a flat list of messages each individually tagged with "MAC"
       - dict-wrapped forms, e.g. {"DroneID": {"<mac>": [...]}}"""
     if isinstance(data, list) and data and all(isinstance(el, list) for el in data):
         return [_burst_from_message_list(el) for el in data]
 
     if isinstance(data, list):
+        msgs = [m for m in data if isinstance(m, dict)]
+        if not msgs:
+            return []
+        # A standalone {"MAC": ...} element means the whole list is one
+        # aircraft's burst, that element being its header. Grouping by MAC here
+        # would put that header in a group of its own and drop every real
+        # message with it — the aircraft would appear with no serial and no
+        # position, and stay that way, since every later burst is shaped the
+        # same.
+        if any(set(m.keys()) == {"MAC"} for m in msgs):
+            return [_burst_from_message_list(msgs)]
+
         by_mac: dict[str, list[dict]] = {}
         untagged: list[dict] = []
-        for msg in data:
-            if not isinstance(msg, dict):
-                continue
+        for msg in msgs:
             mac = msg.get("MAC")
-            if mac:
-                by_mac.setdefault(mac, []).append(msg)
-            else:
-                untagged.append(msg)
+            (by_mac.setdefault(mac, []) if mac else untagged).append(msg)
         if by_mac:
+            # Messages carrying no MAC of their own still belong to this
+            # transmission; with exactly one aircraft in it they are that
+            # aircraft's, and with several there is nothing to attribute them
+            # to, so they are dropped rather than guessed at.
+            if untagged and len(by_mac) == 1:
+                next(iter(by_mac.values())).extend(untagged)
+            elif untagged:
+                log.debug("Dropped %d message(s) with no MAC in a multi-aircraft burst", len(untagged))
             return list(by_mac.items())
-        # nothing carried a MAC — treat the whole list as one aircraft's burst
-        if untagged:
-            mac, cleaned = _burst_from_message_list(untagged)
-            return [(mac, cleaned)]
-        return []
+        return [_burst_from_message_list(untagged)]
 
     if isinstance(data, dict):
         # wrapped form, e.g. {"DroneID": {"<mac>": {...}}} or {"<mac>": [...]}
         inner = data.get("DroneID", data)
+        if isinstance(inner, list):
+            return extract_bursts(inner)   # {"DroneID": [...]} — unwrap and retry
+        if not isinstance(inner, dict):
+            return []
         bursts = []
         for mac, val in inner.items():
             if isinstance(val, list):
                 bursts.append((mac, val))
             elif isinstance(val, dict) and "AdvData" in val:
                 continue  # raw undecoded advert — nothing to correlate yet
+        # A single message dict ({"MAC": ..., "Basic ID": {...}}) has no list
+        # values at all and would otherwise vanish without trace.
+        if not bursts and any(isinstance(v, dict) for v in inner.values()):
+            return [_burst_from_message_list([inner])]
         return bursts
 
     return []
@@ -619,6 +710,13 @@ async def persist_update(track: DroneTrack):
     "new drone detected" alert doesn't re-fire for an aircraft that was
     already announced minutes earlier and merely blinked out of range."""
     key = track.key
+    # A burst with no MAC and no serial gets a throwaway key that no later
+    # burst can ever match, so it shows on the map for its 105 seconds and
+    # then goes. Persisting it would write a catalog row, a flight row and a
+    # "new drone detected" alert for every such burst — unbounded table growth
+    # and alert spam out of traffic that, by definition, can't be identified.
+    if key.startswith(ANON_KEY_PREFIX):
+        return
     # ensure the catalog row exists before a flight can reference it (FK)
     await db.upsert_catalog(
         key, track.mac, track.serial, track.registration_id,
@@ -650,14 +748,37 @@ async def persist_update(track: DroneTrack):
         else:
             active_flights[key] = await db.start_flight(key, track.mac, track.serial, track.last_seen)
             track.segment = 0
+    # This track was re-keyed from its MAC to its newly-decoded serial. Its
+    # flight row still names the MAC, so History would show it under the wrong
+    # catalog row and a rename (which the UI makes against the serial) wouldn't
+    # relabel it. Done here rather than at the rekey itself because the serial's
+    # catalog row has to exist first — flights.catalog_key is a foreign key.
+    if key in pending_refile:
+        pending_refile.discard(key)
+        await db.refile_flight(active_flights[key], key, track.mac, track.serial)
+        log.info("Flight %s re-filed under %s", active_flights[key], key)
+
     track.flight_id = active_flights[key]
     point_fields = {c: getattr(track, c, None) for c in db.POINT_COLUMNS}
-    await db.add_point(track.flight_id, track.last_seen, point_fields)
+    try:
+        await db.add_point(track.flight_id, track.last_seen, point_fields)
+    except Exception:
+        # The flight row has gone from under us — merged or deleted from
+        # History between this track opening it and this point being written.
+        # Forgetting it means the next burst opens a fresh flight; without
+        # this, every later point for this aircraft fails the same way and the
+        # listener's error handler throttles ingest for everything until the
+        # track finally drops.
+        active_flights.pop(key, None)
+        track.flight_id = None
+        log.exception("Could not record a point for %s — starting a new flight next burst", key)
+        return
+
     track.nickname = nickname
 
     if is_new and not resumed and key != TEST_DRONE_SERIAL:
         # Fire-and-forget: never let a slow/unreachable webhook stall ingest.
-        asyncio.create_task(send_new_drone_alert(track))
+        spawn(send_new_drone_alert(track), "discord-alert")
 
 
 def zmq_ctx():
@@ -701,7 +822,7 @@ def attach_connection_monitor(sock, channel: str):
     except Exception:
         log.exception("Could not attach connection monitor for %s — its health dot will stay red", channel)
         return
-    asyncio.create_task(watch_connection_state(monitor, channel))
+    spawn(watch_connection_state(monitor, channel), f"monitor-{channel}")
 
 
 async def zmq_listener():
@@ -925,6 +1046,9 @@ TEST_DRONE_SERIAL = "TEST1DRONE0000001"
 TEST_DEFAULT_ORIGIN = (37.7749, -122.4194)  # used only if no station is configured
 
 test_drone_running = False
+# Bumped on every start/stop so a simulator task can tell whether it is still
+# the current one.
+test_drone_run_id = 0
 
 
 def _test_drone_burst(t: float, origin_lat: float, origin_lon: float) -> list[dict]:
@@ -975,7 +1099,11 @@ def _test_drone_burst(t: float, origin_lat: float, origin_lon: float) -> list[di
     ]
 
 
-async def test_drone_simulator():
+async def test_drone_simulator(run_id: int):
+    """Feeds synthetic bursts through the real ingest path until its run_id is
+    superseded. The id is what stops a stop-then-start inside one 1.5s tick
+    leaving two simulators running: the older one wakes, sees a newer id, and
+    exits instead of racing the new one for the same track."""
     global test_drone_running
     origin_lat, origin_lon = TEST_DEFAULT_ORIGIN
     station = parse_station(await db.get_setting("station"))
@@ -984,35 +1112,36 @@ async def test_drone_simulator():
     log.info("Test drone simulator started, orbiting (%s, %s)", origin_lat, origin_lon)
     t0 = time.time()
     try:
-        while test_drone_running:
+        while test_drone_running and run_id == test_drone_run_id:
             messages = _test_drone_burst(time.time() - t0, origin_lat, origin_lon)
             mac, cleaned = _burst_from_message_list(messages)
             track = store.apply_burst(mac, cleaned)
             await persist_update(track)
             await manager.broadcast({"type": "update", "drone": track.to_dict()})
             await asyncio.sleep(1.5)
+    except Exception:
+        # Without this the task dies silently while the flag still says it's
+        # running, so Settings reports "Running" and Start refuses to do
+        # anything until someone thinks to press Stop first.
+        log.exception("Test drone simulator stopped by an error")
     finally:
+        if run_id == test_drone_run_id:
+            test_drone_running = False
         log.info("Test drone simulator stopped")
 
 
 async def stale_sweeper():
     """Broadcast status transitions (live -> stale -> dropped) so the UI can
-    fade/remove icons even without new packets arriving, and close out the DB
+    fade and remove icons without new packets arriving, and close out the DB
     flight record once a track is dropped.
 
-    Only actual transitions go out. It used to re-send every track's status on
-    every tick, so a quiet map still pushed a message per track every 5s, and
-    each one made the browser rebuild its whole sidebar — for news it already
-    had.
+    Only transitions are sent: re-sending every track's status each tick made
+    every browser rebuild its sidebar for news it already had.
 
-    The whole loop body is wrapped in try/except: without it, a single
-    unexpected error here (e.g. a transient DB hiccup in db.end_flight)
-    would silently kill this task for the rest of the process's life —
-    meaning nothing would ever go stale or get dropped again until the
-    server is restarted. Every other long-running loop in this file already
-    follows this pattern; this one was missing it, which is the most likely
-    explanation for drones outliving DROP_AFTER_S indefinitely rather than
-    just late."""
+    The loop body is wrapped in try/except because one unexpected error here
+    (a transient DB hiccup in end_flight, say) would otherwise kill the task
+    for the life of the process, and nothing would ever go stale or be dropped
+    again until a restart."""
     while True:
         try:
             await asyncio.sleep(5)
@@ -1028,8 +1157,18 @@ async def stale_sweeper():
                     last_status_sent[key] = status
                     await manager.broadcast({"type": "status", "key": key, "status": status})
             for key in drop_keys:
+                track = store.tracks.get(key)
+                # Re-checked against the clock now, not the `now` captured
+                # before the broadcasts above: a burst arriving for this
+                # aircraft during one of those awaits means it is alive again,
+                # and dropping it here would pull a live marker off the map and
+                # close out a flight that is still being written to.
+                if track is not None and (time.time() - track.last_seen) <= DROP_AFTER_S:
+                    continue
                 store.tracks.pop(key, None)
                 last_status_sent.pop(key, None)
+                store.forget_mac_for(key)
+                pending_refile.discard(key)
                 flight_id = active_flights.pop(key, None)
                 if flight_id is not None:
                     try:
@@ -1050,26 +1189,19 @@ async def stale_sweeper():
 
 # ---- admin access, decided by which network the request arrived on ----
 #
-# Two routes reach this box: OpenVPN (10.10.102.0/24) and Tailscale
-# (100.64.0.0/10, Tailscale's CGNAT range). Anything arriving from a network
-# listed here gets the admin controls — Station, Discord, Debug, and the
-# destructive merge/delete on History. Everything else gets the read-only
-# view, and the admin endpoints refuse it outright rather than merely hiding
+# A request from one of these networks gets the admin controls (Station,
+# Discord, Debug, and merge/delete on History); everything else gets the
+# read-only view, and the admin endpoints refuse it rather than just hiding
 # the buttons.
 #
-# Be clear about what this is: network-topology trust, not authentication. It
-# says "you came in over the trusted tunnel", which means every device and
-# every person on that tunnel is an admin, and it's only as good as the
-# tunnel's own access control. For this box, on a private tailnet, that is
-# exactly the intended trade. If you later want per-user rather than
-# per-network, Tailscale can identify the actual user behind a connection
-# (`tailscale whois <ip>:<port>`, or the Tailscale-User-Login header when
-# served through `tailscale serve`) — that would slot in at is_admin_request()
-# without anything else changing.
+# This is network-topology trust, not authentication: everyone on the trusted
+# tunnel is an admin, and it is only as strong as that tunnel's own access
+# control. For per-user instead, Tailscale can name the user behind a
+# connection (`tailscale whois <ip>:<port>`, or the Tailscale-User-Login
+# header via `tailscale serve`); that slots into is_admin_request().
 #
-# Loopback is always admin so you can never lock yourself out of your own
-# box: a browser on the NUC, or curl over SSH, still works even if the
-# ranges below are misconfigured.
+# Loopback is always admin, so a misconfigured range can't lock you out of
+# your own box.
 ADMIN_NETS_DEFAULT = ",".join([
     "100.64.0.0/10",        # Tailscale IPv4 (CGNAT range — all tailnet addresses live here)
     "fd7a:115c:a1e0::/48",  # Tailscale IPv6, in case the browser prefers it (MagicDNS names often resolve to both)
@@ -1136,6 +1268,8 @@ def is_admin_request(conn) -> bool:
     # Once per address, not per request — enough to answer "why am I not
     # getting the admin controls" from the log without flooding it.
     if ip and ip not in _access_logged:
+        if len(_access_logged) > 1000:
+            _access_logged.clear()   # a log-noise guard, not a cache: fine to reset
         _access_logged.add(ip)
         log.info("New client %s — admin access %s", ip, "GRANTED" if allowed else "NOT granted")
     return allowed
@@ -1180,16 +1314,11 @@ async def lifespan(_app: "FastAPI"):
     db.init(os.environ.get("DRONEID_DB_PATH", os.path.join(os.path.dirname(__file__), "droneid.db")))
     catalog_nicknames.update(await db.get_catalog())
     station_cache = parse_station(await db.get_setting("station"))
-    tasks = [
-        asyncio.create_task(zmq_listener()),
-        asyncio.create_task(sniffer_health_listener(BT_ZMQ_ADDR, "bluetooth")),
-        asyncio.create_task(sniffer_health_listener(WIFI_ZMQ_ADDR, "wifi")),
-        asyncio.create_task(health_broadcaster()),
-        asyncio.create_task(stale_sweeper()),
-    ]
-    # Held only so they aren't garbage-collected mid-flight: asyncio keeps
-    # nothing but a weak reference to a bare create_task().
-    _app.state.background_tasks = tasks
+    spawn(zmq_listener(), "zmq-listener")
+    spawn(sniffer_health_listener(BT_ZMQ_ADDR, "bluetooth"), "bt-health")
+    spawn(sniffer_health_listener(WIFI_ZMQ_ADDR, "wifi"), "wifi-health")
+    spawn(health_broadcaster(), "health-broadcast")
+    spawn(stale_sweeper(), "stale-sweeper")
     yield
 
 
@@ -1296,8 +1425,10 @@ async def get_drones():
 
 @app.get("/api/health")
 async def get_health():
-    """Liveness of the ZMQ decoder feed and the two raw sniffers, each based
-    on whether a message has arrived within the last HEALTH_TIMEOUT_S."""
+    """Liveness of the ZMQ decoder feed and the two raw sniffers. The sniffers
+    also report yellow for connected-but-idle (nothing within
+    HEALTH_TIMEOUT_S); ZMQ is only ever green or red, since a decoder with
+    nothing to say is the normal state when no drone is in range."""
     return {"health": compute_health()}
 
 
@@ -1306,11 +1437,12 @@ async def start_test_drone():
     """Starts a synthetic orbiting test drone (with an operator position)
     fed through the exact same apply_burst/persist_update/broadcast pipeline
     as real ZMQ data — for exercising the live map without RF hardware."""
-    global test_drone_running
+    global test_drone_running, test_drone_run_id
     if test_drone_running:
         return {"ok": True, "already_running": True}
     test_drone_running = True
-    asyncio.create_task(test_drone_simulator())
+    test_drone_run_id += 1
+    spawn(test_drone_simulator(test_drone_run_id), "test-drone")
     return {"ok": True}
 
 
@@ -1319,8 +1451,9 @@ async def stop_test_drone():
     """Stops feeding new bursts. Left to decay naturally through the normal
     stale/drop timeouts rather than force-removed, so that lifecycle gets
     exercised too instead of skipped."""
-    global test_drone_running
+    global test_drone_running, test_drone_run_id
     test_drone_running = False
+    test_drone_run_id += 1   # retires any simulator still inside its sleep
     return {"ok": True}
 
 
@@ -1448,6 +1581,15 @@ async def api_merge_flights(body: FlightIdsBody):
     if not flights_are_same_aircraft(flights):
         return JSONResponse({"error": MISMATCH_MESSAGE}, status_code=409)
 
+    # Re-checked immediately before the write: the validation above awaits, and
+    # ingest can adopt one of these rows in the meantime (a drone reappearing
+    # inside its merge window). Merging it away then would leave that track
+    # writing points at a row that no longer exists.
+    if _live_flight_ids().intersection(ids):
+        return JSONResponse(
+            {"error": "That flight just went live again — wait for it to close out."},
+            status_code=409,
+        )
     target_id = await db.merge_flights(ids)
     log.info("Merged flights %s into %s", ids, target_id)
     return {"ok": True, "flight_id": target_id, "merged": len(ids)}
