@@ -164,6 +164,18 @@ UNKNOWN_STRINGS = {"unknown", "undefined", "invalid"}
 # can correlate it, so these are shown live and never persisted.
 ANON_KEY_PREFIX = "anon:"
 
+# Every Remote ID message type this app understands, under each of the names
+# the upstream decoders give them. A burst has to contain at least one of
+# these, with something in it, before it counts as a detection at all.
+RID_MESSAGE_KEYS = frozenset({
+    "Basic ID",
+    "Location/Vector Message", "Location Vector",
+    "System Message", "System",
+    "Operator ID",
+    "Self ID", "Self-ID Message", "Self-ID", "SelfID",
+    "Auth Message", "Authentication",
+})
+
 
 def clean_float(value, heading: bool = False) -> Optional[float]:
     """Convert a Remote ID numeric-ish field to float, or None for a known
@@ -279,6 +291,8 @@ class TrackStore:
         self.tracks: dict[str, DroneTrack] = {}
         self.mac_to_key: dict[str, str] = {}
         self._last_anon_warning = 0.0
+        self.ignored_bursts = 0          # content-free bursts turned away
+        self._last_ignored_log = 0.0
         # Called as on_rekey(old_key, new_key) when a track that was being
         # followed under a bare MAC gets folded into a serial-keyed one (i.e.
         # its Basic ID finally decoded). Anything else keyed by track key —
@@ -358,6 +372,33 @@ class TrackStore:
         return None
 
     @staticmethod
+    def burst_has_rid_content(messages: list) -> bool:
+        """True if this burst actually carried a decoded Remote ID message.
+
+        A MAC on its own is not a detection. The sniffers forward the address
+        of anything they hear, and a Bluetooth LE advertisement from a phone,
+        a watch or a pair of earbuds arrives here as a MAC with nothing
+        attached. Without this check each one became a track, a catalog row, a
+        flight full of empty points and a "new drone detected" alert.
+
+        Deliberately generous about what counts: any recognised message type
+        carrying any non-empty value. An aircraft that has broadcast only its
+        Basic ID, with no GPS fix yet, is a real detection and must still get
+        through."""
+        for msg in messages or []:
+            if not isinstance(msg, dict):
+                continue
+            for key, block in msg.items():
+                if key == "MAC" or key not in RID_MESSAGE_KEYS:
+                    continue
+                if isinstance(block, dict):
+                    if any(v not in (None, "", {}, []) for v in block.values()):
+                        return True
+                elif block not in (None, "", {}, []):
+                    return True
+        return False
+
+    @staticmethod
     def _get_self_id(msg: dict) -> Optional[str]:
         """The free-text description a drone broadcasts about itself, under
         whichever key the upstream decoder used. zmq_decoder.py emits
@@ -375,11 +416,21 @@ class TrackStore:
                 return block
         return None
 
-    def apply_burst(self, mac: Optional[str], messages: list[dict]) -> DroneTrack:
+    def apply_burst(self, mac: Optional[str], messages: list[dict]) -> Optional[DroneTrack]:
+        """Fold one aircraft's burst into its track, returning it — or None if
+        the burst carried nothing to justify starting a track."""
         serial, registration = self._pick_serial(messages)
         key = self._resolve_key(mac, serial)
 
         track = self.tracks.get(key)
+        if track is None and not self.burst_has_rid_content(messages):
+            # Not a Remote ID transmission at all — an address the sniffer
+            # heard and nothing more. An existing track is exempt: once an
+            # aircraft has identified itself, a lull in decodable content is
+            # just a lull, and shouldn't tear its track down.
+            self._note_ignored(mac)
+            return None
+
         if track is None:
             # if we just learned the serial for a MAC previously tracked
             # anonymously under its own MAC key, fold that track in.
@@ -497,6 +548,21 @@ class TrackStore:
 
         track.touch()
         return track
+
+    def _note_ignored(self, mac: Optional[str]):
+        """Counts content-free bursts and mentions them occasionally. Worth
+        knowing they're arriving — a sudden flood means the decoder has
+        changed shape and real detections may be going with them — but one
+        line per advert would bury everything else."""
+        self.ignored_bursts += 1
+        now = time.time()
+        if now - self._last_ignored_log > 300:
+            self._last_ignored_log = now
+            log.info(
+                "Ignored %d burst(s) carrying a MAC but no Remote ID content "
+                "(most recently %s) — not drone transmissions",
+                self.ignored_bursts, mac or "no MAC",
+            )
 
     def forget_mac_for(self, key: str):
         """Drop the MAC->key entries pointing at a track that has gone. WiFi
@@ -840,6 +906,8 @@ async def zmq_listener():
                 continue
             for mac, messages in extract_bursts(data):
                 track = store.apply_burst(mac, messages)
+                if track is None:
+                    continue   # a MAC with no Remote ID content — not a detection
                 await persist_update(track)
                 await manager.broadcast({"type": "update", "drone": track.to_dict()})
         except Exception:
@@ -1116,6 +1184,9 @@ async def test_drone_simulator(run_id: int):
             messages = _test_drone_burst(time.time() - t0, origin_lat, origin_lon)
             mac, cleaned = _burst_from_message_list(messages)
             track = store.apply_burst(mac, cleaned)
+            if track is None:
+                log.error("Synthetic burst was rejected as content-free — this is a bug")
+                break
             await persist_update(track)
             await manager.broadcast({"type": "update", "drone": track.to_dict()})
             await asyncio.sleep(1.5)
