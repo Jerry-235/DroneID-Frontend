@@ -1017,6 +1017,25 @@ def mps_to_mph(mps: float) -> float:
     return mps * 2.23694
 
 
+def _alert_altitude(track: "DroneTrack") -> Optional[tuple[float, str]]:
+    """(feet, text) for the alert line, or None if the aircraft isn't
+    broadcasting a height. The caller gets the number as well as the text so
+    it can decide whether the height is worth saying at all.
+
+    Height AGL is what you want when something is overhead, so it wins. Not
+    every aircraft sends it, and geodetic altitude is the fallback — but that
+    is height above sea level, which at a site any distance above sea level is
+    a much larger number for the same aircraft. It's labelled MSL so a glance
+    at the alert can't read it as height overhead."""
+    if track.height_agl is not None:
+        feet = meters_to_feet(track.height_agl)
+        return feet, f"{feet:,.0f}ft"
+    if track.alt is not None:
+        feet = meters_to_feet(track.alt)
+        return feet, f"{feet:,.0f}ft MSL"
+    return None
+
+
 def build_new_drone_message(track: "DroneTrack") -> str:
     """Builds the alert text for a brand-new (non-test) detection. Uses
     imperial units throughout (feet/mph). Formatted as a Discord ## heading
@@ -1043,10 +1062,28 @@ def build_new_drone_message(track: "DroneTrack") -> str:
     # airborne than not.
     is_landed = (track.op_status or "").strip().lower() == "ground"
     status_clause = "Currently landed" if is_landed else "Currently flying"
+
+    # Speed and altitude read as a list after "at"; heading is joined on the
+    # end. Each is only included when the aircraft actually broadcast it, so
+    # the sentence stays correct however little it reports.
+    readings = []
     if not is_landed and track.speed is not None:
-        status_clause += f" at {mps_to_mph(track.speed):.0f}mph"
+        readings.append(f"{mps_to_mph(track.speed):.0f}mph")
+    altitude = _alert_altitude(track)
+    if altitude is not None:
+        feet, rendered = altitude
+        # "Currently landed at 0ft" says nothing the word "landed" didn't. But
+        # a landed aircraft reporting a real height is the two contradicting
+        # each other, which is exactly when you want to see the number.
+        if not (is_landed and round(feet) == 0):
+            readings.append(rendered)
+    if readings:
+        status_clause += " at " + ", ".join(readings)
     if track.heading is not None:
-        status_clause += f" and Heading {track.heading:.0f}\u00b0"
+        # Oxford comma once there's a list in front of it:
+        #   "at 14mph, 420ft, and Heading 122\u00b0"  vs  "at 14mph and Heading 122\u00b0"
+        joiner = ", and " if len(readings) > 1 else " and "
+        status_clause += f"{joiner}Heading {track.heading:.0f}\u00b0"
     parts.append(status_clause)
 
     has_op = track.op_lat is not None and track.op_lon is not None
