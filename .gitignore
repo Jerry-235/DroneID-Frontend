@@ -18,6 +18,9 @@ dist
 # Secrets — never commit the real .env, only .env.example
 .env
 
+# optional local landmarks
+landmarks.csv
+
 # Local runtime data
 droneid.db
 droneid.db-wal

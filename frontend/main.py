@@ -69,6 +69,7 @@ except ImportError:
     pass  # python-dotenv not installed — fine, .env is an optional convenience
 
 import db
+import places
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("droneid-frontend")
@@ -844,7 +845,9 @@ async def persist_update(track: DroneTrack):
 
     if is_new and not resumed and key != TEST_DRONE_SERIAL:
         # Fire-and-forget: never let a slow/unreachable webhook stall ingest.
-        spawn(send_new_drone_alert(track), "discord-alert")
+        # The position is passed in now, not read later, so the place name
+        # is for where the drone was first seen, not where it has flown to.
+        spawn(send_new_drone_alert(track, track.lat, track.lon), "discord-alert")
 
 
 def zmq_ctx():
@@ -1036,14 +1039,15 @@ def _alert_altitude(track: "DroneTrack") -> Optional[tuple[float, str]]:
     return None
 
 
-def build_new_drone_message(track: "DroneTrack") -> str:
+def build_new_drone_message(track: "DroneTrack", place: "Optional[places.Place]" = None) -> str:
     """Builds the alert text for a brand-new (non-test) detection. Uses
     imperial units throughout (feet/mph). Formatted as a Discord ## heading
     (bold, slightly larger) with the role ping (if configured) on that same
     line, followed by the details in a fenced code block on their own line."""
     name = track.nickname or "New Drone"
     role_ping = f" <@&{DISCORD_ROLE_ID}>" if DISCORD_ROLE_ID else ""
-    header = f"## {name} Detected{role_ping}"
+    at = f" at {place.name}" if place else ""
+    header = f"## {name} Detected{at}{role_ping}"
 
     has_pos = track.lat is not None and track.lon is not None
     if not has_pos:
@@ -1090,7 +1094,10 @@ def build_new_drone_message(track: "DroneTrack") -> str:
     parts.append("Controller Located" if has_op else "Controller Not Located")
 
     body = " - ".join(parts)
-    return f"{header}\n```{body}```"
+    # OpenStreetMap data has to be credited wherever it's shown. A landmark
+    # name is our own text, so it needs no credit.
+    credit = f"\n-# {places.OSM_ATTRIBUTION}" if place and place.source == "osm" else ""
+    return f"{header}\n```{body}```{credit}"
 
 
 def _post_discord_webhook_sync(url: str, content: str) -> tuple[bool, str]:
@@ -1137,10 +1144,13 @@ def _post_discord_webhook_sync(url: str, content: str) -> tuple[bool, str]:
         return False, str(e)
 
 
-async def send_new_drone_alert(track: "DroneTrack"):
+async def send_new_drone_alert(track: "DroneTrack", lat: Optional[float] = None, lon: Optional[float] = None):
     if not discord_webhook_url:
         return
-    message = build_new_drone_message(track)
+    # resolve() never raises and is bounded by its own timeout, so a slow or
+    # unreachable geocoder costs the alert its place name, nothing more.
+    place = await places.resolve(lat, lon)
+    message = build_new_drone_message(track, place)
     await asyncio.to_thread(_post_discord_webhook_sync, discord_webhook_url, message)
 
 
