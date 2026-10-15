@@ -51,6 +51,8 @@ All via environment variables, or a `.env` file next to `main.py` (copy
 | `DRONEID_FLIGHT_MERGE_WINDOW_S` | `300` | Reappearance window for continuing a flight |
 | `DRONEID_DISCORD_WEBHOOK` | — | Enables alerts (see below) |
 | `DRONEID_DISCORD_ROLE_ID` | — | Numeric role ID to ping on each alert |
+| `DRONEID_ADMIN_NETS` | Tailscale + loopback | Networks that get the admin controls (see below) |
+| `DRONEID_TRUST_FORWARDED_FOR` | off | Only behind a reverse proxy you control |
 | `DRONEID_DB_PATH` | `droneid.db` beside `main.py` | SQLite file |
 | `HOST` / `PORT` | `0.0.0.0` / `8000` | Where to listen |
 
@@ -149,17 +151,54 @@ server-side, so it's the same on every device. Debug starts a synthetic
 orbiting test drone through the real ingest pipeline; stopping it lets it
 decay through the normal stale/drop timeouts rather than vanishing.
 
-### Admin view
+### Admin access, by network
 
-Settings > Station, Discord Alerts and Debug are hidden by default. Visit
-once with `?jerry=1` (e.g. `http://<host>:8000/?jerry=1`) to unlock them for
-that browser; the flag goes into `localStorage` and the parameter is stripped
-from the URL so it isn't shared by a bookmark. Other browsers see only the
-field toggles and Units.
+Admin controls — Station, Discord Alerts, Debug, and merge/delete on History —
+are granted on the **network the request arrives from**. Out of the box that
+means Tailscale gets admin and everything else, including OpenVPN, gets the
+read-only view:
 
-This is decluttering, **not security** — anyone with dev tools can set the
-same flag, and none of the endpoints behind those sections have server-side
-auth.
+| `DRONEID_ADMIN_NETS` default | |
+| --- | --- |
+| `100.64.0.0/10` | Tailscale IPv4 — every tailnet address is in this range |
+| `fd7a:115c:a1e0::/48` | Tailscale IPv6, in case the browser prefers it |
+| `127.0.0.0/8`, `::1/128` | Loopback, so you can't lock yourself out of your own box |
+
+Set the variable to a comma-separated list to change it
+(`DRONEID_ADMIN_NETS=100.64.0.0/10,192.168.1.0/24`); a bare address is treated
+as a single host. Unparseable entries are logged and skipped.
+
+So with two routes to the same box — say `10.10.102.90` over OpenVPN and
+`100.100.10.90` over Tailscale — the address you type decides what you get,
+on the same device, with no flags or logins. `GET /api/access` returns
+`{"admin": bool, "client": "<the address the server sees>"}`; the UI asks on
+load, and Settings shows that address in admin view so it's obvious which
+route a tab came in on. The first request from each new address is logged
+with its verdict.
+
+This is enforced, not just drawn: the admin-only endpoints return **403** to
+anyone outside those ranges, so the hidden controls can't be reached by
+calling the API directly. Be clear about what it is, though — it's
+network-topology trust, not authentication. Everyone and every device on the
+tailnet is an admin, and it's only as strong as the tunnel's own access
+control. For per-user instead of per-network, Tailscale can name the actual
+user behind a connection (`tailscale whois <ip>:<port>`, or the
+`Tailscale-User-Login` header when served through `tailscale serve`); that
+slots into `is_admin_request()` without anything else changing.
+
+Two deployment notes:
+
+- **`X-Forwarded-For` is ignored** unless you set
+  `DRONEID_TRUST_FORWARDED_FOR=1`. It's just a request header, so any client
+  can claim to be on the tailnet — only turn it on behind a reverse proxy you
+  control, and make sure that proxy overwrites the header rather than
+  appending to it.
+- For IPv6 or MagicDNS names, bind with `HOST=::` — otherwise the connection
+  fails outright rather than quietly losing admin. IPv4 clients arriving on a
+  dual-stack socket (`::ffff:100.100.10.90`) are matched as IPv4.
+
+Renaming a drone is deliberately left open to everyone, as it always was. To
+lock it down, add it to `ADMIN_ONLY_PREFIXES` in `main.py`.
 
 ### Merging and deleting flights (admin view)
 
@@ -196,7 +235,7 @@ position was found:
 
 ```
 ## Jerry Mini 5 Detected @drone-alerts
-26,614ft From Station - Currently flying at 32mph and Heading 122° - Controller Located
+43,372ft From Station - Currently flying at 14mph, 420ft, and Heading 122° - Controller Located
 ```
 
 The second line renders as a code block in Discord. Setup:
@@ -224,6 +263,7 @@ Responses over 1 KB are gzipped (a long flight's point list shrinks about
 
 | Endpoint | Purpose |
 | --- | --- |
+| `GET /api/access` | `{"admin": bool, "client": "<your address>"}` |
 | `GET /api/drones` | Snapshot of all current tracks |
 | `WS /ws` | Snapshot on connect, then live `update` / `status` / `dropped` / `health` pushes |
 | `GET /api/health` | `{"zmq": "green\|red", "bluetooth": "green\|yellow\|red", "wifi": ...}` |
@@ -240,10 +280,11 @@ Responses over 1 KB are gzipped (a long flight's point list shrinks about
 
 ## Limitations
 
-- **No auth on any endpoint.** The admin flag is UI-only. `POST
-  /api/flights/merge` and `/delete` are destructive and irreversible and can
-  be called by anyone who can reach the server. Fine on a private LAN; put a
-  reverse proxy with basic auth in front of it before exposing it further.
+- **Access is by network, not by user.** The admin endpoints are enforced
+  server-side (403 outside `DRONEID_ADMIN_NETS`), but anyone on the trusted
+  tunnel is an admin, and the read-only endpoints have no auth at all. Fine on
+  a private tailnet; put a reverse proxy with real auth in front of it before
+  exposing it further.
 - **No undo, no un-merge, no split.** Copy `droneid.db` before a big tidy-up.
   If the merge window is too generous for your airspace, lower
   `DRONEID_FLIGHT_MERGE_WINDOW_S` rather than fixing it afterwards.
