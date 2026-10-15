@@ -66,9 +66,6 @@ POINT_COLUMNS = [
     "op_status", "height_type", "loc_timestamp", "protocol_version",
     "op_location_type", "op_classification_type",
     "segment",
-    # Which station reported this point. Points recorded before multi-node
-    # support all came from the master, which is backfilled below.
-    "station_id",
 ]
 
 _REAL_POINT_COLUMNS = {
@@ -181,10 +178,6 @@ def _connect(path: str = DB_PATH) -> sqlite3.Connection:
                 # Points recorded before segments existed all belong to the
                 # first (only) segment of their flight.
                 conn.execute("UPDATE track_points SET segment = 0 WHERE segment IS NULL")
-            if c == "station_id":
-                # Everything recorded before multi-node support came from the
-                # one decoder this server had, which is the master.
-                conn.execute("UPDATE track_points SET station_id = 'master' WHERE station_id IS NULL")
     conn.commit()
 
     return conn

@@ -69,7 +69,7 @@ except ImportError:
     pass  # python-dotenv not installed — fine, .env is an optional convenience
 
 import db
-import nodes as node_cfg
+import places
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("droneid-frontend")
@@ -103,12 +103,6 @@ ZMQ_ADDR = os.environ.get("DRONEID_ZMQ_ADDR", "tcp://127.0.0.1:4224")
 # the only source used for actual drone data.
 BT_ZMQ_ADDR = os.environ.get("DRONEID_BT_ZMQ_ADDR", "tcp://127.0.0.1:4222")
 WIFI_ZMQ_ADDR = os.environ.get("DRONEID_WIFI_ZMQ_ADDR", "tcp://127.0.0.1:4223")
-# Every station this server ingests from. Missing file = just this master,
-# exactly as before multi-node support. See MULTI-NODE.md.
-NODES_PATH = os.environ.get("DRONEID_NODES_PATH") or os.path.join(
-    os.path.dirname(os.path.realpath(__file__)), "nodes.json")
-# Replaced at startup from NODES_PATH; this default covers imports and tests.
-fleet = node_cfg.NodeRegistry(node_cfg.parse_nodes({"nodes": []}, ZMQ_ADDR))
 # Marker lifecycle, in seconds of silence since the last received packet:
 #   0-45s    "live"    — normal identity color
 #   45-105s  "stale"   — icon goes gray, marker stays put at its last known
@@ -273,12 +267,6 @@ class DroneTrack:
     first_seen: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
 
-    station_id: Optional[str] = None  # station that delivered the latest update
-    seen_by: list = field(default_factory=list)  # every station that has heard this aircraft
-    # Recent points, so a second station's copy of a broadcast can be spotted.
-    # Internal only — never sent to clients.
-    recent_points: list = field(default_factory=list, repr=False)
-
     def touch(self):
         self.last_seen = time.time()
 
@@ -292,7 +280,6 @@ class DroneTrack:
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        d.pop("recent_points", None)
         d["status"] = self.status()
         return d
 
@@ -430,11 +417,9 @@ class TrackStore:
                 return block
         return None
 
-    def apply_burst(self, mac: Optional[str], messages: list[dict],
-                    station_id: Optional[str] = None) -> Optional[DroneTrack]:
+    def apply_burst(self, mac: Optional[str], messages: list[dict]) -> Optional[DroneTrack]:
         """Fold one aircraft's burst into its track, returning it — or None if
-        the burst carried nothing to justify starting a track. station_id is
-        the station whose feed the burst came from, if known."""
+        the burst carried nothing to justify starting a track."""
         serial, registration = self._pick_serial(messages)
         key = self._resolve_key(mac, serial)
 
@@ -473,10 +458,6 @@ class TrackStore:
             track.serial = serial
         if registration:
             track.registration_id = registration
-        if station_id:
-            track.station_id = station_id
-            if station_id not in track.seen_by:
-                track.seen_by.append(station_id)
 
         for msg in messages:
             if "Basic ID" in msg:
@@ -808,14 +789,6 @@ async def persist_update(track: DroneTrack):
         key, track.mac, track.serial, track.registration_id,
         track.ua_type, track.protocol_version, track.last_seen,
     )
-    # Another station already recorded this exact broadcast for this flight:
-    # nothing new to store, and the track is already up to date in memory.
-    if (track.station_id and key in active_flights and track.lat is not None
-            and track.lon is not None
-            and node_cfg.is_cross_station_duplicate(
-                track.recent_points, track.station_id, track.lat, track.lon,
-                track.loc_timestamp, track.last_seen)):
-        return
     nickname = catalog_nicknames.get(key)
     is_new = key not in active_flights
     resumed = False
@@ -856,9 +829,6 @@ async def persist_update(track: DroneTrack):
     point_fields = {c: getattr(track, c, None) for c in db.POINT_COLUMNS}
     try:
         await db.add_point(track.flight_id, track.last_seen, point_fields)
-        if track.lat is not None and track.lon is not None:
-            node_cfg.remember_point(track.recent_points, track.station_id or node_cfg.MASTER_ID,
-                                    track.lat, track.lon, track.loc_timestamp, track.last_seen)
     except Exception:
         # The flight row has gone from under us — merged or deleted from
         # History between this track opening it and this point being written.
@@ -875,7 +845,9 @@ async def persist_update(track: DroneTrack):
 
     if is_new and not resumed and key != TEST_DRONE_SERIAL:
         # Fire-and-forget: never let a slow/unreachable webhook stall ingest.
-        spawn(send_new_drone_alert(track), "discord-alert")
+        # The position is passed in now, not read later, so the place name
+        # is for where the drone was first seen, not where it has flown to.
+        spawn(send_new_drone_alert(track, track.lat, track.lon), "discord-alert")
 
 
 def zmq_ctx():
@@ -922,101 +894,28 @@ def attach_connection_monitor(sock, channel: str):
     spawn(watch_connection_state(monitor, channel), f"monitor-{channel}")
 
 
-def health_channel(node) -> str:
-    """The key a station's feed-liveness is tracked under. The master keeps
-    the "zmq" name the health dot has always used."""
-    return "zmq" if node.kind == "master" else f"node:{node.id}"
-
-
-async def burst_listener(node):
-    """Subscribes to one station's decoder output and folds its bursts into
-    the shared track store. Every station goes through here, so a drone seen
-    by two of them merges into one track by its serial, as it always has for
-    one."""
-    channel = health_channel(node)
-    connection_state.setdefault(channel, DISCONNECTED)
+async def zmq_listener():
     sock = zmq_ctx().socket(zmq.SUB)
-    attach_connection_monitor(sock, channel)
-    sock.connect(node.bursts)
+    attach_connection_monitor(sock, "zmq")
+    sock.connect(ZMQ_ADDR)
     sock.setsockopt(zmq.SUBSCRIBE, b"")
-    log.info("Subscribed to %s decoder output at %s", node.id, node.bursts)
+    log.info("Subscribed to DroneID decoder at %s", ZMQ_ADDR)
     while True:
         try:
             raw = await sock.recv()
-            now = time.time()
-            last_message_at[channel] = now
-            fleet.note_burst(node.id, now)
+            last_message_at["zmq"] = time.time()
             data = parse_message_payload(raw)
             if data is None:
                 continue
             for mac, messages in extract_bursts(data):
-                track = store.apply_burst(mac, messages, station_id=node.id)
+                track = store.apply_burst(mac, messages)
                 if track is None:
                     continue   # a MAC with no Remote ID content — not a detection
                 await persist_update(track)
                 await manager.broadcast({"type": "update", "drone": track.to_dict()})
         except Exception:
-            log.exception("Error in %s burst listener", node.id)
+            log.exception("Error in zmq listener loop")
             await asyncio.sleep(1)
-
-
-async def status_listener(node):
-    """Position reports from a roaming station's node_agent. A malformed or
-    unrecognised message is ignored, so it can't move a station on the map."""
-    sock = zmq_ctx().socket(zmq.SUB)
-    sock.connect(node.status)
-    sock.setsockopt(zmq.SUBSCRIBE, b"")
-    log.info("Listening for %s position reports at %s", node.id, node.status)
-    while True:
-        try:
-            raw = await sock.recv()
-            status = node_cfg.parse_status(parse_message_payload(raw))
-            if status is not None:
-                fleet.note_status(status, time.time())
-        except Exception:
-            log.exception("Error in %s status listener", node.id)
-            await asyncio.sleep(1)
-
-
-def _node_link(node_id: str, now: float) -> str:
-    """Same green/yellow/red meaning as the local feeds: red if the socket
-    isn't connected, yellow if it is but nothing has arrived recently, green
-    if traffic is flowing."""
-    channel = f"node:{node_id}"
-    if connection_state.get(channel) != CONNECTED:
-        return "red"
-    ts = last_message_at.get(channel)
-    if ts is not None and (now - ts) < HEALTH_TIMEOUT_S:
-        return "green"
-    return "yellow"
-
-
-def stations_snapshot(now: Optional[float] = None) -> list[dict]:
-    """Every configured station with its position and link state, for the map.
-    The master's position is the home point, so it isn't duplicated here."""
-    now = now if now is not None else time.time()
-    local = compute_health(now)
-    master_pos = None
-    if station_cache and station_cache.get("lat") is not None and station_cache.get("lon") is not None:
-        master_pos = (station_cache["lat"], station_cache["lon"])
-    out = []
-    for node_id in fleet.ids():
-        if fleet.config[node_id].kind == "master":
-            out.append(fleet.describe(node_id, now, local["zmq"], master_pos))
-        else:
-            out.append(fleet.describe(node_id, now, _node_link(node_id, now)))
-    return out
-
-
-async def station_broadcaster():
-    """Pushes every station's position and link state to clients every few
-    seconds, so roaming stations visibly move."""
-    while True:
-        try:
-            await asyncio.sleep(5)
-            await manager.broadcast({"type": "stations", "stations": stations_snapshot()})
-        except Exception:
-            log.exception("Error in station broadcaster loop")
 
 
 async def sniffer_health_listener(addr: str, channel: str):
@@ -1140,14 +1039,15 @@ def _alert_altitude(track: "DroneTrack") -> Optional[tuple[float, str]]:
     return None
 
 
-def build_new_drone_message(track: "DroneTrack") -> str:
+def build_new_drone_message(track: "DroneTrack", place: "Optional[places.Place]" = None) -> str:
     """Builds the alert text for a brand-new (non-test) detection. Uses
     imperial units throughout (feet/mph). Formatted as a Discord ## heading
     (bold, slightly larger) with the role ping (if configured) on that same
     line, followed by the details in a fenced code block on their own line."""
     name = track.nickname or "New Drone"
     role_ping = f" <@&{DISCORD_ROLE_ID}>" if DISCORD_ROLE_ID else ""
-    header = f"## {name} Detected{role_ping}"
+    at = f" at {place.name}" if place else ""
+    header = f"## {name} Detected{at}{role_ping}"
 
     has_pos = track.lat is not None and track.lon is not None
     if not has_pos:
@@ -1192,9 +1092,6 @@ def build_new_drone_message(track: "DroneTrack") -> str:
 
     has_op = track.op_lat is not None and track.op_lon is not None
     parts.append("Controller Located" if has_op else "Controller Not Located")
-
-    body = " - ".join(parts)
-    return f"{header}\n```{body}```"
 
 
 def _post_discord_webhook_sync(url: str, content: str) -> tuple[bool, str]:
@@ -1241,10 +1138,13 @@ def _post_discord_webhook_sync(url: str, content: str) -> tuple[bool, str]:
         return False, str(e)
 
 
-async def send_new_drone_alert(track: "DroneTrack"):
+async def send_new_drone_alert(track: "DroneTrack", lat: Optional[float] = None, lon: Optional[float] = None):
     if not discord_webhook_url:
         return
-    message = build_new_drone_message(track)
+    # resolve() never raises and is bounded by its own timeout, so a slow or
+    # unreachable geocoder costs the alert its place name, nothing more.
+    place = await places.resolve(lat, lon)
+    message = build_new_drone_message(track, place)
     await asyncio.to_thread(_post_discord_webhook_sync, discord_webhook_url, message)
 
 
@@ -1522,21 +1422,14 @@ async def lifespan(_app: "FastAPI"):
     has deprecated. Nothing is torn down on the way out: the process exits
     immediately afterwards, the listener tasks die with the loop, and SQLite in
     WAL mode needs no explicit close to stay consistent."""
-    global station_cache, fleet
+    global station_cache
     db.init(os.environ.get("DRONEID_DB_PATH", os.path.join(os.path.dirname(__file__), "droneid.db")))
     catalog_nicknames.update(await db.get_catalog())
     station_cache = parse_station(await db.get_setting("station"))
-    # A malformed nodes.json stops startup on purpose: the error names the
-    # station and field, and running quietly without a station would be worse.
-    fleet = node_cfg.NodeRegistry(node_cfg.load_nodes(NODES_PATH, ZMQ_ADDR))
-    for node in fleet.config.values():
-        spawn(burst_listener(node), f"bursts-{node.id}")
-        if node.status:
-            spawn(status_listener(node), f"status-{node.id}")
+    spawn(zmq_listener(), "zmq-listener")
     spawn(sniffer_health_listener(BT_ZMQ_ADDR, "bluetooth"), "bt-health")
     spawn(sniffer_health_listener(WIFI_ZMQ_ADDR, "wifi"), "wifi-health")
     spawn(health_broadcaster(), "health-broadcast")
-    spawn(station_broadcaster(), "station-broadcast")
     spawn(stale_sweeper(), "stale-sweeper")
     yield
 
@@ -1640,13 +1533,6 @@ async def api_test_discord_webhook():
 @app.get("/api/drones")
 async def get_drones():
     return {"drones": store.snapshot()}
-
-
-@app.get("/api/stations")
-async def get_stations():
-    """Every configured station: position, link state and, for roaming
-    stations, the latest fix details."""
-    return {"stations": stations_snapshot()}
 
 
 @app.get("/api/health")
@@ -1844,7 +1730,6 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         await websocket.send_text(json.dumps({
             "type": "snapshot", "drones": store.snapshot(), "health": compute_health(),
-            "stations": stations_snapshot(),
         }))
         while True:
             await websocket.receive_text()  # client doesn't send anything meaningful; just keep alive
