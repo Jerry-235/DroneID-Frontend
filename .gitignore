@@ -21,6 +21,9 @@ dist
 # optional local landmarks
 landmarks.csv
 
+# example node file
+nodes.example.json
+
 # Local runtime data
 droneid.db
 droneid.db-wal
