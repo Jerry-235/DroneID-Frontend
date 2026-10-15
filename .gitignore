@@ -22,6 +22,7 @@ dist
 landmarks.csv
 
 # example node file
+nodes.json
 nodes.example.json
 
 # Local runtime data
