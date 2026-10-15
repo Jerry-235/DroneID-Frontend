@@ -1,6 +1,6 @@
 scapy
 pytz
-zmq
+pyzmq
 pyserial
 pwinput
 
