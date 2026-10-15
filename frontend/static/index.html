@@ -83,6 +83,15 @@
     font-size:11px; font-family:'IBM Plex Mono',monospace; color:var(--text-muted);
   }
   .health-item{ display:flex; align-items:center; gap:6px; position:relative; cursor:default; }
+  /* Other stations on the map (multi-node). Dashed = roaming, faded = no recent position. */
+  .node-badge{
+    display:inline-block; white-space:nowrap; transform:translate(-50%,-50%);
+    padding:3px 7px; border-radius:6px; border:1.5px solid #60A5FA;
+    background:#1C2A38; color:#E6EDF3; box-shadow:0 2px 6px rgba(0,0,0,0.4);
+    font:600 11px/1.2 'IBM Plex Mono',monospace;
+  }
+  .node-badge.roaming{ border-style:dashed; }
+  .node-badge.stale{ opacity:0.5; }
   .health-tooltip{
     display:none;
     position:fixed; z-index:99999;
@@ -468,6 +477,7 @@
         <div class="tt-row"><span class="tt-dot" style="background:#E0645A;"></span>Red — wifi_receiver.py unreachable</div>
       </div>
     </span>
+    <span id="nodes-health" style="display:contents"></span>
   </div>
   <div class="count"><b id="track-count">0</b>&nbsp;<span id="count-label">tracked</span></div>
 </div>
@@ -2736,6 +2746,66 @@ function applyHealth(health) {
   });
 }
 
+// ---- other stations (multi-node) ----
+// The master's own station is the home marker above, so it isn't drawn again
+// here. Every other station gets a labelled marker on the map and a chip in
+// the top bar showing its link state.
+const nodeMarkers = new Map();   // station id -> Leaflet marker
+
+function nodeBadgeHtml(s) {
+  const cls = ['node-badge', s.kind, s.stale ? 'stale' : ''].filter(Boolean).join(' ');
+  return `<div class="${cls}">${escapeHtml(s.name)}</div>`;
+}
+
+function nodeTooltipText(s) {
+  const age = s.status_age === null || s.status_age === undefined
+    ? 'no position report yet'
+    : `position ${Math.round(s.status_age)}s ago`;
+  return s.kind === 'roaming' ? `${s.name} · link ${s.link} · ${age}` : `${s.name} · link ${s.link}`;
+}
+
+function applyStations(list) {
+  if (!Array.isArray(list)) return;
+  const live = new Set();
+  list.forEach(s => {
+    if (s.kind === 'master') return;
+    live.add(s.id);
+    const hasPos = s.lat !== null && s.lat !== undefined && s.lon !== null && s.lon !== undefined;
+    let marker = nodeMarkers.get(s.id);
+    if (!hasPos) {
+      if (marker) { stationLayer.removeLayer(marker); nodeMarkers.delete(s.id); }
+      return;
+    }
+    if (!marker) {
+      marker = L.marker([s.lat, s.lon], { icon: L.divIcon({ className: 'node-marker', html: '', iconSize: null }) });
+      marker.bindTooltip('', { direction: 'top' });
+      stationLayer.addLayer(marker);
+      nodeMarkers.set(s.id, marker);
+    }
+    marker.setLatLng([s.lat, s.lon]);
+    const html = nodeBadgeHtml(s);
+    if (marker._nodeHtml !== html) {   // only rebuild the badge when something visible changed
+      marker.setIcon(L.divIcon({ className: 'node-marker', html, iconSize: null }));
+      marker._nodeHtml = html;
+    }
+    marker.setTooltipContent(nodeTooltipText(s));
+  });
+  Array.from(nodeMarkers.keys()).forEach(id => {
+    if (!live.has(id)) { stationLayer.removeLayer(nodeMarkers.get(id)); nodeMarkers.delete(id); }
+  });
+  renderNodeChips(list);
+}
+
+function renderNodeChips(list) {
+  const box = document.getElementById('nodes-health');
+  if (!box) return;
+  box.innerHTML = list.filter(s => s.kind !== 'master').map(s => {
+    const cls = s.link === 'green' ? 'health-ok' : (s.link === 'yellow' ? 'health-yellow' : '');
+    return `<span class="health-item" title="${escapeHtml(nodeTooltipText(s))}">` +
+      `<span class="dot ${cls}"></span>${escapeHtml(s.name)}</span>`;
+  }).join('');
+}
+
 function connectWs() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
@@ -2763,6 +2833,7 @@ function connectWs() {
       });
       msg.drones.forEach(upsertDrone);
       applyHealth(msg.health);
+      applyStations(msg.stations);
     } else if (msg.type === 'update') {
       upsertDrone(msg.drone);
     } else if (msg.type === 'status') {
@@ -2783,6 +2854,8 @@ function connectWs() {
       if (mode === 'history') loadHistoryList();
     } else if (msg.type === 'health') {
       applyHealth(msg.health);
+    } else if (msg.type === 'stations') {
+      applyStations(msg.stations);
     }
   };
 }
