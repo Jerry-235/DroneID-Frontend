@@ -1093,6 +1093,12 @@ def build_new_drone_message(track: "DroneTrack", place: "Optional[places.Place]"
     has_op = track.op_lat is not None and track.op_lon is not None
     parts.append("Controller Located" if has_op else "Controller Not Located")
 
+    body = " - ".join(parts)
+    # OpenStreetMap data has to be credited wherever it's shown. A landmark
+    # name is our own text, so it needs no credit.
+    credit = f"\n-# {places.OSM_ATTRIBUTION}" if place and place.source == "osm" else ""
+    return f"{header}\n```{body}```{credit}"
+
 
 def _post_discord_webhook_sync(url: str, content: str) -> tuple[bool, str]:
     """Returns (success, detail). Never raises — callers decide whether the
