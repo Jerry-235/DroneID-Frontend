@@ -211,13 +211,15 @@
   .bulk-msg{ flex:1 1 100%; font-size:11px; line-height:1.4; color:var(--red); }
   .bulk-msg.ok{ color:var(--text-muted); }
   .unit-toggle-row{ padding:0 14px 14px; display:flex; gap:8px; }
-  .unit-btn{
+  /* Unit buttons and station GPS/Manual buttons are separate selector groups
+     with identical styling. Each group only ever touches its own buttons. */
+  .unit-btn, .mode-btn{
     flex:1 1 auto; background:var(--bg); border:1px solid var(--hairline); color:var(--text-muted);
     font-family:'Inter',sans-serif; font-size:12px; font-weight:600;
     padding:7px 10px; border-radius:var(--radius); cursor:pointer;
   }
-  .unit-btn:hover{ color:var(--text); border-color:var(--text-muted); }
-  .unit-btn.active{
+  .unit-btn:hover, .mode-btn:hover{ color:var(--text); border-color:var(--text-muted); }
+  .unit-btn.active, .mode-btn.active{
     background:rgba(232,163,61,0.12); color:var(--amber); border-color:rgba(232,163,61,0.4);
   }
   .track-op-row{
@@ -1457,8 +1459,8 @@ function stationCardHtml(s) {
       </div>
       <div class="station-type">${esc(s.device)}</div>
       <div class="station-mode-row">
-        <button class="unit-btn station-mode-btn${s.location_mode === 'gps' ? ' active' : ''}" type="button" data-mode="gps">GPS</button>
-        <button class="unit-btn station-mode-btn${s.location_mode === 'manual' ? ' active' : ''}" type="button" data-mode="manual">Manual</button>
+        <button class="mode-btn station-mode-btn${s.location_mode === 'gps' ? ' active' : ''}" type="button" data-mode="gps">GPS</button>
+        <button class="mode-btn station-mode-btn${s.location_mode === 'manual' ? ' active' : ''}" type="button" data-mode="manual">Manual</button>
       </div>
       ${body}
     </div>`;
@@ -1603,12 +1605,12 @@ function renderSettingsPanel() {
     });
   });
 
-  sidebar.querySelectorAll('.unit-btn').forEach(btn => {
+  sidebar.querySelectorAll('.unit-btn[data-unit]').forEach(btn => {
     btn.addEventListener('click', () => {
       if (btn.dataset.unit === unitSystem) return;
       unitSystem = btn.dataset.unit;
       saveUnitSystem();
-      sidebar.querySelectorAll('.unit-btn').forEach(b => b.classList.toggle('active', b.dataset.unit === unitSystem));
+      sidebar.querySelectorAll('.unit-btn[data-unit]').forEach(b => b.classList.toggle('active', b.dataset.unit === unitSystem));
       renderDetailPanel();
     });
   });
@@ -1645,6 +1647,9 @@ function renderSettingsPanel() {
     card.querySelectorAll('.station-mode-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         if (btn.dataset.mode === current().location_mode) return;
+        // Highlight the clicked mode right away; only this card's mode buttons change.
+        card.querySelectorAll('.station-mode-btn').forEach(b =>
+          b.classList.toggle('active', b.dataset.mode === btn.dataset.mode));
         saveStationConfig(sid, { location: btn.dataset.mode }, card);
       });
     });
