@@ -696,6 +696,14 @@ function fmtDistance(meters) {
   return `${(meters / 1000).toLocaleString(undefined, { maximumFractionDigits: 2 })} km`;
 }
 
+// The black-and-white station dot is the master. Its hover label uses the name
+// set in the Station settings (default "Master"), falling back to "Station"
+// until the stations feed has loaded.
+function masterStationName() {
+  const master = stationList.find(s => s.kind === 'master' || s.id === 'master');
+  return (master && master.name) || 'Station';
+}
+
 function placeStationMarker() {
   if (!stationCoord) {
     if (stationMarker) { stationLayer.removeLayer(stationMarker); stationMarker = null; }
@@ -704,7 +712,7 @@ function placeStationMarker() {
   const latlng = [stationCoord.lat, stationCoord.lon];
   if (!stationMarker) {
     stationMarker = L.marker(latlng, { icon: stationIconSvg() });
-    stationMarker.bindTooltip('Station', { direction: 'top' });
+    stationMarker.bindTooltip(masterStationName(), { direction: 'top' });
     stationLayer.addLayer(stationMarker);
   } else {
     stationMarker.setLatLng(latlng);
@@ -2895,6 +2903,7 @@ function nodeTooltipText(s) {
 function applyStations(list) {
   if (!Array.isArray(list)) return;
   stationList = list;
+  if (stationMarker) stationMarker.setTooltipContent(masterStationName());
   const live = new Set();
   list.forEach(s => {
     if (s.kind === 'master') return;
