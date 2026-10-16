@@ -83,6 +83,15 @@
     font-size:11px; font-family:'IBM Plex Mono',monospace; color:var(--text-muted);
   }
   .health-item{ display:flex; align-items:center; gap:6px; position:relative; cursor:default; }
+  /* Other stations on the map (multi-node). Dashed = roaming, faded = no recent position. */
+  .node-badge{
+    display:inline-block; white-space:nowrap; transform:translate(-50%,-50%);
+    padding:3px 7px; border-radius:6px; border:1.5px solid #60A5FA;
+    background:#1C2A38; color:#E6EDF3; box-shadow:0 2px 6px rgba(0,0,0,0.4);
+    font:600 11px/1.2 'IBM Plex Mono',monospace;
+  }
+  .node-badge.roaming{ border-style:dashed; }
+  .node-badge.stale{ opacity:0.5; }
   .health-tooltip{
     display:none;
     position:fixed; z-index:99999;
@@ -397,6 +406,19 @@
     color:var(--text-muted);
   }
   .dp-row b{ color:var(--text); font-weight:500; text-align:right; overflow-wrap:anywhere; }
+  .dp-stations-toggle{
+    all:unset; cursor:pointer; display:flex; gap:6px; align-items:baseline; box-sizing:border-box;
+    width:100%; padding:3px 14px; font-family:'IBM Plex Mono',monospace; font-size:12px; color:var(--text-muted);
+  }
+  .dp-stations-toggle:hover{ color:var(--text); }
+  .dp-stations-body .dp-row{ padding-left:26px; }
+  .station-list{ display:flex; flex-direction:column; gap:10px; padding:0 14px; }
+  .station-card{ border:1px solid var(--border, #2a2f36); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:6px; }
+  .station-card-head{ display:flex; gap:6px; align-items:center; }
+  .station-name{ flex:1 1 auto; min-width:0; }
+  .station-type{ font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace; }
+  .station-mode-row{ display:flex; gap:6px; }
+  .station-error{ color:var(--amber); }
   .dp-note{ padding:10px 14px; font-size:11px; color:var(--text-muted); line-height:1.5; }
   .dp-section-head .popup-badge-row{ margin:0; }
 
@@ -468,6 +490,7 @@
         <div class="tt-row"><span class="tt-dot" style="background:#E0645A;"></span>Red — wifi_receiver.py unreachable</div>
       </div>
     </span>
+    <span id="nodes-health" style="display:contents"></span>
   </div>
   <div class="count"><b id="track-count">0</b>&nbsp;<span id="count-label">tracked</span></div>
 </div>
@@ -538,6 +561,7 @@ const droneMarkers = new Map();  // key -> {marker, opMarker, link, pathLine, pa
 let selectedKey = null;
 let selectedTarget = null; // 'drone' | 'operator' — which marker of the pair is focused
 let stationCoord = null;         // { lat, lon } — server-side "home point", null until set in Settings
+let stationList = [];            // every station from the stations feed, master included
 let stationMarker = null;
 
 // Each tracked drone gets a persistent colour, shared by its operator marker,
@@ -761,6 +785,7 @@ const FIELD_DEFS = {
     { key: 'status',           label: 'Status' },
     { key: 'tracked_time',     label: 'Tracked Time', formatter: fmtTrackedTime },
     { key: 'last_seen_elapsed', label: 'Last Seen',   formatter: fmtLastSeen },
+    { key: 'tracked_by_count', label: 'Tracked By' },
   ],
   'Drone': [
     { key: 'op_status',           label: 'Op Status' },
@@ -779,7 +804,8 @@ const FIELD_DEFS = {
     { key: 'speed_accuracy',      label: 'Speed Accuracy',      formatter: fmtAccuracy },
     { key: 'loc_timestamp',       label: 'Timestamp',           formatter: fmtRemoteIdTimestamp },
     { key: 'drone_op_distance',   label: 'Distance to Operator', formatter: fmtDistance },
-    { key: 'station_distance',    label: 'Distance to Station', formatter: fmtDistance },
+    { key: 'station_distance',    label: 'Distance from Station', formatter: fmtDistance },
+    { key: 'station_distances',   label: 'All Stations', expandable: true },
   ],
   'Operator': [
     { key: 'op_location_type',       label: 'Op Location Type' },
@@ -794,12 +820,12 @@ const FIELD_DEFS = {
 // Requested defaults: everything else in Basic/Drone starts OFF. Operator
 // (System Message) defaults ON.
 const FIELD_DEFAULTS = {
-  'Basic': { protocol_version: false, serial: true, ua_type: false, id: false, mac: true, status: true, tracked_time: true, last_seen_elapsed: true },
+  'Basic': { protocol_version: false, serial: true, ua_type: false, id: false, mac: true, status: true, tracked_time: true, last_seen_elapsed: true, tracked_by_count: true },
   'Drone': {
     op_status: true, height_type: true, heading: true, speed: true, vert_speed: true,
     lat: true, lon: true, pressure_altitude: false, alt: true, height_agl: true,
     vertical_accuracy: false, horizontal_accuracy: false, baro_accuracy: false,
-    speed_accuracy: false, loc_timestamp: false, station_distance: true, drone_op_distance: true,
+    speed_accuracy: false, loc_timestamp: false, station_distance: true, station_distances: true, drone_op_distance: true,
   },
   'Operator': { op_location_type: true, op_classification_type: false, op_lat: true, op_lon: true, op_station_distance: true, op_drone_distance: true },
 };
@@ -906,6 +932,24 @@ async function loadAccess() {
 function metersToFeet(m) { return m * 3.28084; }
 function mpsToMph(mps) { return mps * 2.23694; }
 
+// Distance from a drone to every station that currently has it, nearest first.
+// Live data carries tracked_by (the stations hearing it right now). History
+// points don't, so there the only station is the home point.
+function stationDistances(d) {
+  if (!d || d.lat === null || d.lat === undefined || d.lon === null || d.lon === undefined) return [];
+  if (!Array.isArray(d.tracked_by)) {
+    if (!stationCoord) return [];
+    return [{ id: 'home', name: 'Station',
+      meters: slantRangeMeters(stationCoord.lat, stationCoord.lon, d.lat, d.lon, d.height_agl) }];
+  }
+  const heard = new Set(d.tracked_by);
+  return stationList
+    .filter(s => heard.has(s.id) && s.lat !== null && s.lat !== undefined && s.lon !== null && s.lon !== undefined)
+    .map(s => ({ id: s.id, name: s.name,
+      meters: slantRangeMeters(s.lat, s.lon, d.lat, d.lon, d.height_agl) }))
+    .sort((a, b) => a.meters - b.meters);
+}
+
 function fieldValue(d, key) {
   if (key === 'id') return (d.serial !== null && d.serial !== undefined) ? d.serial : d.mac;
   if (key === 'tracked_time') {
@@ -929,10 +973,9 @@ function fieldValue(d, key) {
     return Math.max(0, (Date.now() / 1000) - d.last_seen);
   }
   if (key === 'station_distance') {
-    // Drone <-> station: station assumed 0ft AGL, so the drone's own
-    // height_agl is the vertical leg between them.
-    if (!stationCoord || d.lat === null || d.lat === undefined || d.lon === null || d.lon === undefined) return null;
-    return slantRangeMeters(stationCoord.lat, stationCoord.lon, d.lat, d.lon, d.height_agl);
+    // Distance to the closest station that currently hears this drone.
+    const near = stationDistances(d)[0];
+    return near ? near.meters : null;
   }
   if (key === 'op_station_distance') {
     // Operator <-> station: both assumed 0ft AGL, so there's no vertical
@@ -1248,7 +1291,9 @@ function renderDetailPanel() {
         ${empty ? '<div class="dp-note">Every field in this section is hidden. Turn them on in Settings.</div>' : ''}
         ${sec.groups.map(g => `
           ${sec.groups.length > 1 ? `<div class="dp-group-title">${escapeHtml(g.name)}</div>` : ''}
-          ${g.defs.map(f => `<div class="dp-row"><span>${escapeHtml(f.label)}</span><b data-g="${escapeHtml(g.name)}" data-k="${escapeHtml(f.key)}"></b></div>`).join('')}
+          ${g.defs.map(f => f.expandable
+            ? `<div class="dp-stations"><button type="button" class="dp-stations-toggle" aria-expanded="false"><span class="dp-stations-arrow">▸</span><span>${escapeHtml(f.label)}</span><span data-stations-count></span></button><div class="dp-stations-body" data-stations-body hidden></div></div>`
+            : `<div class="dp-row"><span data-label="${escapeHtml(f.key)}">${escapeHtml(f.label)}</span><b data-g="${escapeHtml(g.name)}" data-k="${escapeHtml(f.key)}"></b></div>`).join('')}
         `).join('')}
         ${sec.extras.map((x, i) => `<div class="dp-row"><span>${escapeHtml(x[0])}</span><b data-x="${escapeHtml(sec.label)}.${i}"></b></div>`).join('')}
       </section>`;
@@ -1264,6 +1309,35 @@ function renderDetailPanel() {
     const html = fieldDisplay(fdef, fieldValue(view.data, fdef.key));
     if (b._v !== html) { b.innerHTML = html; b._v = html; }   // fieldDisplay escapes
   });
+  // The closest-station label names the station it measures from.
+  const near = stationDistances(view.data)[0];
+  const nearLabel = `Distance from Station [${near ? near.name : '—'}]`;
+  body.querySelectorAll('[data-label="station_distance"]').forEach(s => {
+    if (s._v !== nearLabel) { s.textContent = nearLabel; s._v = nearLabel; }
+  });
+  body.querySelectorAll('.dp-stations').forEach(box => {
+    const all = stationDistances(view.data);
+    const count = box.querySelector('[data-stations-count]');
+    const countText = `(${all.length})`;
+    if (count._v !== countText) { count.textContent = countText; count._v = countText; }
+    const inner = all.length
+      ? all.map(s => `<div class="dp-row"><span>${escapeHtml(s.name)}</span><b>${escapeHtml(fmtDistance(s.meters))}</b></div>`).join('')
+      : '<div class="dp-note">No station has a fix on this drone right now.</div>';
+    const bodyEl = box.querySelector('[data-stations-body]');
+    if (bodyEl._v !== inner) { bodyEl.innerHTML = inner; bodyEl._v = inner; }
+  });
+  if (!body._stationsWired) {
+    body._stationsWired = true;
+    body.addEventListener('click', e => {
+      const btn = e.target.closest('.dp-stations-toggle');
+      if (!btn) return;
+      const bodyEl = btn.closest('.dp-stations').querySelector('[data-stations-body]');
+      const open = bodyEl.hidden;
+      bodyEl.hidden = !open;
+      btn.setAttribute('aria-expanded', String(open));
+      btn.querySelector('.dp-stations-arrow').textContent = open ? '▾' : '▸';
+    });
+  }
   body.querySelectorAll('b[data-x]').forEach(b => {
     const [secLabel, i] = b.dataset.x.split('.');
     const x = ((view.extras && view.extras[secLabel]) || [])[Number(i)];
@@ -1342,6 +1416,95 @@ if (PANEL_MQ) {
   else if (PANEL_MQ.addListener) PANEL_MQ.addListener(onChange);
 }
 
+// ---- admin: station list in the Settings sidebar ----
+// Each station gets a card: an editable name, a device-type subtext, a GPS /
+// Manual toggle, and either a GPS status line or manual latitude/longitude.
+function stationsSectionHtml() {
+  const note = `<div class="settings-note">Name each station and choose where it is located.</div>`;
+  if (!stationList.length) {
+    return `<div class="settings-group-title">Station</div>${note}
+      <div class="settings-note">No stations reported yet.</div>`;
+  }
+  return `<div class="settings-group-title">Station</div>${note}
+    <div class="station-list">${stationList.map(stationCardHtml).join('')}</div>`;
+}
+
+function stationCardHtml(s) {
+  const esc = escapeHtml;
+  const gpsLine = s.gps_feed
+    ? (s.fix ? `GPS fix · ${s.lat.toFixed(6)}, ${s.lon.toFixed(6)}` : 'No GPS fix yet')
+    : 'No GPS feed yet';
+  const manual = s.manual;
+  const body = s.location_mode === 'gps'
+    ? `<div class="settings-note">${esc(gpsLine)}</div>`
+    : `<div class="station-form">
+         <input class="station-lat" type="number" step="any" placeholder="Latitude"
+                value="${manual ? manual.lat : ''}">
+         <input class="station-lon" type="number" step="any" placeholder="Longitude"
+                value="${manual ? manual.lon : ''}">
+         <div class="station-form-buttons">
+           <button class="settings-btn station-manual-save" type="button">Save location</button>
+         </div>
+         <div class="settings-note">${manual
+           ? `Set: ${manual.lat.toFixed(6)}, ${manual.lon.toFixed(6)}`
+           : 'Not set yet.'}</div>
+       </div>`;
+  return `
+    <div class="station-card" data-sid="${esc(s.id)}">
+      <div class="station-card-head">
+        <input class="station-name" maxlength="40" value="${esc(s.name)}" aria-label="Station name">
+        <button class="settings-btn settings-btn-ghost station-rename" type="button">Rename</button>
+      </div>
+      <div class="station-type">${esc(s.device)}</div>
+      <div class="station-mode-row">
+        <button class="unit-btn station-mode-btn${s.location_mode === 'gps' ? ' active' : ''}" type="button" data-mode="gps">GPS</button>
+        <button class="unit-btn station-mode-btn${s.location_mode === 'manual' ? ' active' : ''}" type="button" data-mode="manual">Manual</button>
+      </div>
+      ${body}
+    </div>`;
+}
+
+function showStationError(card, text) {
+  let el = card.querySelector('.station-error');
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'settings-note station-error';
+    card.appendChild(el);
+  }
+  el.textContent = text;
+}
+
+async function saveStationConfig(sid, body, card) {
+  try {
+    const res = await fetch(`/api/station-config/${encodeURIComponent(sid)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showStationError(card, data.error || 'Could not save.');
+      return;
+    }
+    if (sid === 'master' && body.lat !== undefined) {
+      stationCoord = { lat: body.lat, lon: body.lon };
+      placeStationMarker();
+    }
+    await refreshStations();
+  } catch (e) {
+    showStationError(card, 'Could not reach the server.');
+  }
+}
+
+async function refreshStations() {
+  try {
+    const res = await fetch('/api/stations');
+    const data = await res.json();
+    applyStations(data.stations);
+  } catch (e) { /* keep what is shown */ }
+  renderSettingsPanel();
+}
+
 function renderSettingsPanel() {
   const sidebar = document.getElementById('sidebar');
   const unitsHtml = `
@@ -1370,24 +1533,7 @@ function renderSettingsPanel() {
       <div class="settings-note" id="test-drone-status">Checking status…</div>
     </div>`;
 
-  const stationHtml = `
-    <div class="settings-group-title">Station</div>
-    <div class="settings-note">
-      Set this device's fixed reference location.
-    </div>
-    <div class="station-form">
-      <input id="station-lat" type="number" step="any" placeholder="Latitude"
-             value="${stationCoord ? stationCoord.lat : ''}">
-      <input id="station-lon" type="number" step="any" placeholder="Longitude"
-             value="${stationCoord ? stationCoord.lon : ''}">
-      <div class="station-form-buttons">
-        <button id="station-save" class="settings-btn">Save</button>
-        <button id="station-clear" class="settings-btn settings-btn-ghost">Clear</button>
-      </div>
-      <div class="settings-note" id="station-status">${stationCoord
-        ? `Currently set: ${stationCoord.lat.toFixed(6)}, ${stationCoord.lon.toFixed(6)}`
-        : 'Not set yet.'}</div>
-    </div>`;
+  const stationHtml = stationsSectionHtml();
 
   const discordHtml = `
     <div class="settings-group-title">Discord Alerts</div>
@@ -1490,43 +1636,30 @@ function renderSettingsPanel() {
     refreshTestDroneStatus();
   });
 
-  document.getElementById('station-save').addEventListener('click', async () => {
-    const lat = parseFloat(document.getElementById('station-lat').value);
-    const lon = parseFloat(document.getElementById('station-lon').value);
-    const statusEl = document.getElementById('station-status');
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-      statusEl.textContent = 'Enter a valid latitude and longitude.';
-      return;
-    }
-    try {
-      const res = await fetch('/api/station', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ lat, lon }),
+  sidebar.querySelectorAll('.station-card').forEach(card => {
+    const sid = card.dataset.sid;
+    const current = () => stationList.find(x => x.id === sid) || {};
+    card.querySelector('.station-rename').addEventListener('click', () => {
+      saveStationConfig(sid, { name: card.querySelector('.station-name').value }, card);
+    });
+    card.querySelectorAll('.station-mode-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (btn.dataset.mode === current().location_mode) return;
+        saveStationConfig(sid, { location: btn.dataset.mode }, card);
       });
-      const data = await res.json();
-      if (!res.ok) {
-        statusEl.textContent = data.error || 'Could not save station location.';
-        return;
-      }
-      stationCoord = { lat, lon };
-      placeStationMarker();
-      map.setView([lat, lon], 14);
-      renderDetailPanel();
-      renderSettingsPanel();
-    } catch (e) {
-      statusEl.textContent = 'Could not reach the server.';
+    });
+    const manualBtn = card.querySelector('.station-manual-save');
+    if (manualBtn) {
+      manualBtn.addEventListener('click', () => {
+        const lat = parseFloat(card.querySelector('.station-lat').value);
+        const lon = parseFloat(card.querySelector('.station-lon').value);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+          showStationError(card, 'Enter a valid latitude and longitude.');
+          return;
+        }
+        saveStationConfig(sid, { lat, lon, location: 'manual' }, card);
+      });
     }
-  });
-
-  document.getElementById('station-clear').addEventListener('click', async () => {
-    try {
-      await fetch('/api/station', { method: 'DELETE' });
-      stationCoord = null;
-      placeStationMarker();
-      renderDetailPanel();
-      renderSettingsPanel();
-    } catch (e) { /* ignore */ }
   });
 
   async function refreshDiscordWebhookStatus() {
@@ -2736,6 +2869,67 @@ function applyHealth(health) {
   });
 }
 
+// ---- other stations (multi-node) ----
+// The master's own station is the home marker above, so it isn't drawn again
+// here. Every other station gets a labelled marker on the map and a chip in
+// the top bar showing its link state.
+const nodeMarkers = new Map();   // station id -> Leaflet marker
+
+function nodeBadgeHtml(s) {
+  const cls = ['node-badge', s.kind, s.stale ? 'stale' : ''].filter(Boolean).join(' ');
+  return `<div class="${cls}">${escapeHtml(s.name)}</div>`;
+}
+
+function nodeTooltipText(s) {
+  const age = s.status_age === null || s.status_age === undefined
+    ? 'no position report yet'
+    : `position ${Math.round(s.status_age)}s ago`;
+  return s.kind === 'roaming' ? `${s.name} · link ${s.link} · ${age}` : `${s.name} · link ${s.link}`;
+}
+
+function applyStations(list) {
+  if (!Array.isArray(list)) return;
+  stationList = list;
+  const live = new Set();
+  list.forEach(s => {
+    if (s.kind === 'master') return;
+    live.add(s.id);
+    const hasPos = s.lat !== null && s.lat !== undefined && s.lon !== null && s.lon !== undefined;
+    let marker = nodeMarkers.get(s.id);
+    if (!hasPos) {
+      if (marker) { stationLayer.removeLayer(marker); nodeMarkers.delete(s.id); }
+      return;
+    }
+    if (!marker) {
+      marker = L.marker([s.lat, s.lon], { icon: L.divIcon({ className: 'node-marker', html: '', iconSize: null }) });
+      marker.bindTooltip('', { direction: 'top' });
+      stationLayer.addLayer(marker);
+      nodeMarkers.set(s.id, marker);
+    }
+    marker.setLatLng([s.lat, s.lon]);
+    const html = nodeBadgeHtml(s);
+    if (marker._nodeHtml !== html) {   // only rebuild the badge when something visible changed
+      marker.setIcon(L.divIcon({ className: 'node-marker', html, iconSize: null }));
+      marker._nodeHtml = html;
+    }
+    marker.setTooltipContent(nodeTooltipText(s));
+  });
+  Array.from(nodeMarkers.keys()).forEach(id => {
+    if (!live.has(id)) { stationLayer.removeLayer(nodeMarkers.get(id)); nodeMarkers.delete(id); }
+  });
+  renderNodeChips(list);
+}
+
+function renderNodeChips(list) {
+  const box = document.getElementById('nodes-health');
+  if (!box) return;
+  box.innerHTML = list.filter(s => s.kind !== 'master').map(s => {
+    const cls = s.link === 'green' ? 'health-ok' : (s.link === 'yellow' ? 'health-yellow' : '');
+    return `<span class="health-item" title="${escapeHtml(nodeTooltipText(s))}">` +
+      `<span class="dot ${cls}"></span>${escapeHtml(s.name)}</span>`;
+  }).join('');
+}
+
 function connectWs() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
@@ -2763,6 +2957,7 @@ function connectWs() {
       });
       msg.drones.forEach(upsertDrone);
       applyHealth(msg.health);
+      applyStations(msg.stations);
     } else if (msg.type === 'update') {
       upsertDrone(msg.drone);
     } else if (msg.type === 'status') {
@@ -2783,6 +2978,8 @@ function connectWs() {
       if (mode === 'history') loadHistoryList();
     } else if (msg.type === 'health') {
       applyHealth(msg.health);
+    } else if (msg.type === 'stations') {
+      applyStations(msg.stations);
     }
   };
 }
