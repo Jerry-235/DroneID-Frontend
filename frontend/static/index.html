@@ -697,7 +697,7 @@ function fmtDistance(meters) {
 }
 
 // The black-and-white station dot is the master. Its hover label uses the name
-// set in the Station settings (default "Master"), falling back to "Station"
+// set in the Station settings (default "Station"), falling back to "Station"
 // until the stations feed has loaded.
 function masterStationName() {
   const master = stationList.find(s => s.kind === 'master' || s.id === 'master');

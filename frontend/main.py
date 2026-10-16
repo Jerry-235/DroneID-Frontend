@@ -109,7 +109,7 @@ WIFI_ZMQ_ADDR = os.environ.get("DRONEID_WIFI_ZMQ_ADDR", "tcp://127.0.0.1:4223")
 NODES_PATH = os.environ.get("DRONEID_NODES_PATH") or os.path.join(
     os.path.dirname(os.path.realpath(__file__)), "nodes.json")
 # Replaced at startup from NODES_PATH; this default covers imports and tests.
-fleet = node_cfg.NodeRegistry(node_cfg.parse_nodes({"nodes": []}, ZMQ_ADDR))
+fleet = node_cfg.NodeRegistry(node_cfg.parse_nodes({"stations": []}, ZMQ_ADDR))
 # Marker lifecycle, in seconds of silence since the last received packet:
 #   0-45s    "live"    — normal identity color
 #   45-105s  "stale"   — icon goes gray, marker stays put at its last known
@@ -985,7 +985,8 @@ async def status_listener(node):
             raw = await sock.recv()
             status = node_cfg.parse_status(parse_message_payload(raw))
             if status is not None:
-                fleet.note_status(status, time.time())
+                # The report belongs to the station whose socket it came from.
+                fleet.note_status(node.id, status, time.time())
         except Exception:
             log.exception("Error in %s status listener", node.id)
             await asyncio.sleep(1)
@@ -1190,12 +1191,10 @@ def station_display_name(station_id: str) -> str:
 
 
 def station_device_label(station_id: str) -> str:
-    kind = fleet.config[station_id].kind
-    if kind == "master":
+    cfg = fleet.config[station_id]
+    if cfg.kind == "master":
         return "Master · decoder host"
-    if kind == "roaming":
-        return "Roaming node · GPS"
-    return "Fixed node"
+    return f"Node - ID: {cfg.number}"
 
 
 def station_manual_position(station_id: str) -> Optional[tuple[float, float]]:
@@ -1758,10 +1757,19 @@ class StationConfigBody(BaseModel):
 async def api_put_station_config(station_id: str, body: StationConfigBody):
     """Admin only (see ADMIN_ONLY_PREFIXES). Renames a station, switches its
     location mode, or sets its manual location. An empty name resets to the
-    default. Lat and lon must be sent together."""
+    default. Lat and lon must be sent together. Everything is saved in the
+    database; nodes.json is never written by the web UI."""
     global station_cache, station_config
     if fleet is None or station_id not in fleet.config:
         return JSONResponse({"error": f"Unknown station '{station_id}'."}, status_code=404)
+    # Check everything before changing anything, so a bad request changes nothing.
+    if body.location is not None and body.location not in ("manual", "gps"):
+        return JSONResponse({"error": "location must be 'manual' or 'gps'."}, status_code=400)
+    if (body.lat is None) != (body.lon is None):
+        return JSONResponse({"error": "Send latitude and longitude together."}, status_code=400)
+    if body.lat is not None and not (-90 <= body.lat <= 90 and -180 <= body.lon <= 180):
+        return JSONResponse({"error": "lat/lon out of range"}, status_code=400)
+
     entry = dict(station_entry(station_id))
     if body.name is not None:
         name = clean_station_name(body.name)
@@ -1770,14 +1778,8 @@ async def api_put_station_config(station_id: str, body: StationConfigBody):
         else:
             entry.pop("name", None)
     if body.location is not None:
-        if body.location not in ("manual", "gps"):
-            return JSONResponse({"error": "location must be 'manual' or 'gps'."}, status_code=400)
         entry["location"] = body.location
-    if body.lat is not None or body.lon is not None:
-        if body.lat is None or body.lon is None:
-            return JSONResponse({"error": "Send latitude and longitude together."}, status_code=400)
-        if not (-90 <= body.lat <= 90) or not (-180 <= body.lon <= 180):
-            return JSONResponse({"error": "lat/lon out of range"}, status_code=400)
+    if body.lat is not None:
         if station_id == node_cfg.MASTER_ID:
             await db.set_setting("station", json.dumps({"lat": body.lat, "lon": body.lon}))
             station_cache = {"lat": body.lat, "lon": body.lon}

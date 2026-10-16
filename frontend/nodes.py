@@ -10,8 +10,9 @@ point came from, and whether a point is a second copy of one another station
 already reported.
 
 Config lives in nodes.json next to main.py (path overridable with
-DRONEID_NODES_PATH). Without that file the server behaves exactly as before:
-a single master fed from DRONEID_ZMQ_ADDR.
+DRONEID_NODES_PATH). It lists only the external stations, by name and address.
+The master is implied by the program running. Without that file the server
+behaves exactly as before: a single master fed from DRONEID_ZMQ_ADDR.
 """
 import json
 import logging
@@ -25,8 +26,6 @@ log = logging.getLogger("droneid-frontend.nodes")
 
 MASTER_ID = "master"
 KINDS = ("master", "static", "roaming")
-_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
-_ENDPOINT_RE = re.compile(r"^tcp://[^\s/]+:\d{1,5}$")
 
 # A remote node's position report older than this is shown as last known
 # rather than current.
@@ -47,16 +46,11 @@ class NodeConfig:
     status: Optional[str] = None   # tcp endpoint of node_agent PUB socket, if any
     lat: Optional[float] = None    # fixed position, for static nodes
     lon: Optional[float] = None
+    number: Optional[int] = None   # the ID number from nodes.json, None for the master
 
 
 class ConfigError(ValueError):
     pass
-
-
-def _check_endpoint(node_id: str, field_name: str, value: str) -> str:
-    if not isinstance(value, str) or not _ENDPOINT_RE.match(value):
-        raise ConfigError(f"node '{node_id}': {field_name} must look like tcp://host:port, got {value!r}")
-    return value
 
 
 def _check_coord(node_id: str, name: str, value, limit: float) -> float:
@@ -69,55 +63,93 @@ def _check_coord(node_id: str, name: str, value, limit: float) -> float:
     return f
 
 
+# Every external station runs the same two services on its address: the
+# decoder's burst feed, and (for a roaming station) the node_agent GPS beacon.
+NODE_BURSTS_PORT = 4224
+NODE_STATUS_PORT = 4230
+MAX_NODE_NUMBER = 999
+ALLOWED_FIELDS = {"id", "ip", "lat", "lon"}
+_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-]{0,252}$")
+
+
+def node_id_for_number(number: int) -> str:
+    """The internal id of station number N. The admin page shows the number;
+    the database and the code use this id."""
+    return f"node-{number}"
+
+
+def _number_of(raw: dict) -> Optional[int]:
+    """The ID number of one entry: an integer, or a string of digits."""
+    value = raw.get("id")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"\d{1,3}", value.strip()):
+        return int(value.strip())
+    return None
+
+
 def parse_nodes(data, default_master_bursts: str) -> list[NodeConfig]:
-    """Validates a nodes.json document. Raises ConfigError with a message
-    that names the bad node and field, so the startup log says what to fix."""
-    if not isinstance(data, dict) or not isinstance(data.get("nodes"), list):
-        raise ConfigError('nodes.json must be an object with a "nodes" list')
-    out: list[NodeConfig] = []
-    seen: set[str] = set()
-    for raw in data["nodes"]:
+    """Validates a nodes.json document. The master is implied by the program
+    running and is not listed. Each station has an id (a number from 1 to 999),
+    an ip, and optionally a starting lat and lon. Anything else is an error, so
+    an old file fails loudly instead of being half-read. Raises ConfigError
+    naming the station."""
+    if not isinstance(data, dict):
+        raise ConfigError('nodes.json must be an object with a "stations" list')
+    unknown_top = set(data) - {"stations"}
+    if unknown_top:
+        raise ConfigError(f"nodes.json: unknown top-level field {sorted(unknown_top)[0]!r}; the file has only \"stations\"")
+    entries = data.get("stations", [])
+    if not isinstance(entries, list):
+        raise ConfigError('"stations" in nodes.json must be a list')
+    out: list[NodeConfig] = [NodeConfig(MASTER_ID, "Station", "master", default_master_bursts)]
+    seen_ids: set[str] = set()
+    seen_ips: set[str] = set()
+    for position, raw in enumerate(entries, start=1):
         if not isinstance(raw, dict):
-            raise ConfigError("every entry in nodes.json must be an object")
-        node_id = str(raw.get("id", "")).strip()
-        if not _ID_RE.match(node_id):
-            raise ConfigError(f"node id {node_id!r} must be lowercase letters, digits or dashes")
-        if node_id in seen:
-            raise ConfigError(f"node id {node_id!r} is listed more than once")
-        seen.add(node_id)
-        kind = raw.get("kind", "static")
-        if kind not in KINDS:
-            raise ConfigError(f"node '{node_id}': kind must be one of {KINDS}, got {kind!r}")
-        if kind == "master" and node_id != MASTER_ID:
-            raise ConfigError(f'the master node must be id "{MASTER_ID}"')
-        bursts = raw.get("bursts") or (default_master_bursts if kind == "master" else None)
-        if bursts is None:
-            raise ConfigError(f"node '{node_id}': bursts endpoint is required")
-        bursts = _check_endpoint(node_id, "bursts", bursts)
-        status = raw.get("status")
-        if status is not None:
-            status = _check_endpoint(node_id, "status", status)
+            raise ConfigError(f"station at position {position}: each entry must be an object")
+        if raw.get("id") == MASTER_ID or raw.get("kind") == "master":
+            raise ConfigError("nodes.json lists the master, which is not allowed: the master is implied "
+                              "by the program running. Remove that entry.")
+        number = _number_of(raw)
+        label = f"ID {raw.get('id')!r}" if raw.get("id") not in (None, "") else f"at position {position}"
+        if number is None or not (1 <= number <= MAX_NODE_NUMBER):
+            raise ConfigError(f"station {label}: id must be a number from 1 to {MAX_NODE_NUMBER}")
+        extra = set(raw) - ALLOWED_FIELDS
+        if extra:
+            raise ConfigError(f"station {label}: unknown field {sorted(extra)[0]!r}. Only id, ip, "
+                              "and optional lat and lon are allowed; names and locations are set in the admin page")
+        ip = str(raw.get("ip") or "").strip()
+        if not _HOST_RE.match(ip):
+            raise ConfigError(f"station {label}: ip must be an address such as 100.100.10.90, got {raw.get('ip')!r}")
+        node_id = node_id_for_number(number)
+        if node_id in seen_ids:
+            raise ConfigError(f"station id {number} is listed more than once")
+        if ip in seen_ips:
+            raise ConfigError(f"station {label}: ip {ip} is listed more than once")
+        seen_ids.add(node_id)
+        seen_ips.add(ip)
         lat = lon = None
-        if kind == "static":
+        if "lat" in raw or "lon" in raw:
             if "lat" not in raw or "lon" not in raw:
-                raise ConfigError(f"node '{node_id}': a static node needs lat and lon")
+                raise ConfigError(f"station {label}: lat and lon must be given together")
             lat = _check_coord(node_id, "lat", raw["lat"], 90)
             lon = _check_coord(node_id, "lon", raw["lon"], 180)
-        if kind == "master":
-            default_name = "Master"
-        else:
-            default_name = f"Node {sum(1 for n in out if n.kind != 'master') + 1}"
+        # With a starting position the station is "static"; without one it is
+        # "roaming" and reports its position from its GPS.
+        kind = "static" if lat is not None else "roaming"
         out.append(NodeConfig(
             id=node_id,
-            name=str(raw.get("name") or default_name),
+            name=f"Node {number}",
             kind=kind,
-            bursts=bursts,
-            status=status,
+            bursts=f"tcp://{ip}:{NODE_BURSTS_PORT}",
+            status=f"tcp://{ip}:{NODE_STATUS_PORT}" if kind == "roaming" else None,
             lat=lat,
             lon=lon,
+            number=number,
         ))
-    if not any(n.kind == "master" for n in out):
-        out.insert(0, NodeConfig(MASTER_ID, "Master", "master", default_master_bursts))
     return out
 
 
@@ -125,7 +157,7 @@ def load_nodes(path: str, default_master_bursts: str) -> list[NodeConfig]:
     """Reads nodes.json. A missing file is not an error — it means a single
     master, exactly as before multi-node support existed."""
     if not os.path.exists(path):
-        return [NodeConfig(MASTER_ID, "Master", "master", default_master_bursts)]
+        return [NodeConfig(MASTER_ID, "Station", "master", default_master_bursts)]
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     nodes = parse_nodes(data, default_master_bursts)
@@ -137,9 +169,6 @@ def parse_status(raw) -> Optional[dict]:
     """A node_agent position report, validated. None for anything else, so a
     malformed or unrelated message can never half-update a station."""
     if not isinstance(raw, dict) or raw.get("type") != "node_status":
-        return None
-    node_id = raw.get("node")
-    if not isinstance(node_id, str) or not _ID_RE.match(node_id):
         return None
     fix = raw.get("fix") is True
     lat = lon = None
@@ -154,8 +183,6 @@ def parse_status(raw) -> Optional[dict]:
             # A receiver with no fix often reports 0,0. That is not a place.
             fix, lat, lon = False, None, None
     return {
-        "node": node_id,
-        "name": raw.get("name") if isinstance(raw.get("name"), str) else None,
         "fix": fix,
         "lat": lat,
         "lon": lon,
@@ -192,7 +219,6 @@ class _NodeState:
     speed: Optional[float] = None
     track: Optional[float] = None
     sats: Optional[int] = None
-    reported_name: Optional[str] = None
 
 
 class NodeRegistry:
@@ -213,12 +239,11 @@ class NodeRegistry:
         if node_id in self.state:
             self.state[node_id].last_burst_at = now
 
-    def note_status(self, status: dict, now: float) -> bool:
-        """Applies a parsed position report. Returns False (and changes
-        nothing) for a node that isn't configured, so an unknown sender can't
-        add itself to the map."""
-        st = self.state.get(status["node"])
-        cfg = self.config.get(status["node"])
+    def note_status(self, node_id: str, status: dict, now: float) -> bool:
+        """Applies a position report from a roaming station's beacon. Returns
+        False, and changes nothing, for a station that isn't roaming."""
+        st = self.state.get(node_id)
+        cfg = self.config.get(node_id)
         if st is None or cfg is None or cfg.kind != "roaming":
             return False
         st.last_status_at = now
@@ -226,8 +251,6 @@ class NodeRegistry:
         if status["fix"]:
             st.lat, st.lon = status["lat"], status["lon"]
         st.alt, st.speed, st.track, st.sats = status["alt"], status["speed"], status["track"], status["sats"]
-        if status.get("name"):
-            st.reported_name = status["name"]
         return True
 
     def position(self, node_id: str) -> Optional[tuple[float, float]]:
@@ -266,7 +289,7 @@ class NodeRegistry:
         status_age = None if st.last_status_at is None else now - st.last_status_at
         return {
             "id": cfg.id,
-            "name": cfg.name if cfg.name != cfg.id else (st.reported_name or cfg.name),
+            "name": cfg.name,
             "kind": cfg.kind,
             "lat": pos[0] if pos else None,
             "lon": pos[1] if pos else None,
