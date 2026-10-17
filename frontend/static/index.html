@@ -31,6 +31,13 @@
     --radius: 3px;
   }
   *{box-sizing:border-box;}
+  /* Dark scrollbars to match the panels. scrollbar-color covers Firefox and
+     current Chromium; the ::-webkit rules cover older WebKit/Blink. */
+  *{ scrollbar-width:thin; scrollbar-color:var(--hairline) var(--panel); }
+  ::-webkit-scrollbar{ width:8px; height:8px; }
+  ::-webkit-scrollbar-track{ background:var(--panel); }
+  ::-webkit-scrollbar-thumb{ background:var(--hairline); border-radius:4px; border:2px solid var(--panel); }
+  ::-webkit-scrollbar-thumb:hover{ background:var(--text-muted); }
   html,body{height:100%;margin:0;}
   body{
     background:var(--bg);
@@ -294,12 +301,12 @@
   .settings-row input{accent-color:var(--amber);width:14px;height:14px;flex:0 0 auto;}
   .settings-note{ padding:12px 14px; font-size:11px; color:var(--text-muted); line-height:1.5; }
   .station-form{ padding:0 14px 14px; display:flex; flex-direction:column; gap:8px; }
-  .station-form input{
+  .station-form input, .station-card-head input{
     background:var(--bg); border:1px solid var(--hairline); color:var(--text);
     font-family:'IBM Plex Mono',monospace; font-size:12px; padding:6px 8px; border-radius:var(--radius);
     width:100%;
   }
-  .station-form input:focus{ outline:none; border-color:var(--amber); }
+  .station-form input:focus, .station-card-head input:focus{ outline:none; border-color:var(--amber); }
   .station-form-buttons{ display:flex; gap:8px; }
   .settings-btn{
     flex:1 1 auto; background:var(--amber); color:#0B121A; border:none;
