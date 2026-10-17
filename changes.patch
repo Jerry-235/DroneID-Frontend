@@ -1,0 +1,2161 @@
+diff --git a/.gitignore b/.gitignore
+index ab3b075..bbda1a7 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -28,7 +28,6 @@ droneid.db-shm
+ 
+ # Python
+ __pycache__/
+-*.pyc
+ venv/
+ .venv/
+ 
+diff --git a/Library/utils.py b/Library/utils.py
+index 4a8129b..ede0911 100644
+--- a/Library/utils.py
++++ b/Library/utils.py
+@@ -8,7 +8,7 @@ from scapy.all import *
+ from subprocess import Popen, PIPE
+ sudopw = None
+ 
+-def _have_raw_caps() -> bool:
++def have_raw_caps() -> bool:
+     """
+     Return True if current process can open an AF_PACKET raw socket.
+     This is a practical probe that usually indicates CAP_NET_RAW (and, in your unit, CAP_NET_ADMIN too).
+@@ -66,29 +66,6 @@ def sudo(command):
+         # If user refused a password, attempt direct (likely to fail), but don't hang
+         return cexec(list(command))
+ 
+-def channel_hopping(interface):
+-    try:
+-        # List to store the channel number and Association Response packet
+-        result = []
+-
+-        # Loop through channels 1 to 14
+-        for channel in range(1, 15):
+-            # Set the channel using Scapy's set_channel() function
+-            sudo(["iwconfig",interface,"channel",channel])
+-
+-            # Sniff for Association Response packets on the current channel
+-            packets = sniff(filter="subtype 0x01", timeout=5)
+-
+-            # Check if any Association Response packets were captured
+-            if packets:
+-                # Add the channel number and the first Association Response packet to the result list
+-                result.append((channel, packets[0]))
+-
+-        return result
+-
+-    except ImportError:
+-        raise ImportError("Scapy library is not installed.")
+-
+ def search_interfaces():
+     l = get_if_list()
+     idict = IFACES.data
+diff --git a/OpenDroneID/json_parser.py b/OpenDroneID/json_parser.py
+index 38cdd57..425d2a5 100644
+--- a/OpenDroneID/json_parser.py
++++ b/OpenDroneID/json_parser.py
+@@ -45,7 +45,7 @@ def json_to_packets(dronefile):
+                         if adi is not None:
+                             packets[drone_id]["ADI"] = adi
+                     else:
+-                        seqno = len(packets[drone_id])
++                        seqno = sum(1 for k in packets[drone_id] if isinstance(k, int))
+                         packets[drone_id][seqno] = []
+             if "Basic ID" in msg:
+                 bid = msg["Basic ID"]
+diff --git a/OpenDroneID/wifi_parser.py b/OpenDroneID/wifi_parser.py
+index 218cc37..21d6245 100644
+--- a/OpenDroneID/wifi_parser.py
++++ b/OpenDroneID/wifi_parser.py
+@@ -25,7 +25,7 @@ class Astm_F3411_22a_adv_data:
+         self.msg = {"AdvData":data.hex()}
+ 
+     def __repr__(self):
+-        return self.msg
++        return json.dumps(self.msg)
+ 
+ class Astm_F3411_22a_nan_service_info:
+     def __init__(self, data):
+@@ -34,7 +34,7 @@ class Astm_F3411_22a_nan_service_info:
+         self.msg = {"AdvData":bt.read().hex()}
+ 
+     def __repr__(self):
+-        return self.msg
++        return json.dumps(self.msg)
+ 
+ class Astm_F3411_22a_nan_desc:
+     attribute_id = None
+@@ -58,19 +58,22 @@ class Astm_F3411_22a_nan_desc:
+             self.service_control = bt.byte()
+             self.service_info_length = bt.byte()
+             self.service_info = Astm_F3411_22a_nan_service_info(bt.read())
+-            self.msg = {"NAN discovery":self.service_info}
++            self.msg_counter = self.service_info.msg_counter
++            self.msg = self.service_info.msg
+         elif self.attribute_id == 0:
+             self.master_performance = bt.byte()
+             self.random_factor = bt.byte()
+             self.cluster_attribute_id = bt.byte()
+             self.anchor_master_info_length = bt.short()
+             self.anchor_master_info = bt.bytes(self.anchor_master_info_length)
+-            self.msg = {"NAN beacon":{"AnchorMasterRank":self.anchor_master_info[:8].hex(),"HopCountToAnchorMaster":self.anchor_master_info[9],"AnchorMasterBeaconTransmissionTime":int.from_bytes(self.anchor_master_info[9:],'little')}}
++            self.msg = {"NAN beacon":{"AnchorMasterRank":self.anchor_master_info[:8].hex(),"HopCountToAnchorMaster":self.anchor_master_info[8] if len(self.anchor_master_info) > 8 else None,"AnchorMasterBeaconTransmissionTime":int.from_bytes(self.anchor_master_info[9:],'little')}}
+ 
+     def __repr__(self):
+-        return self.service_info
++        return json.dumps(self.msg)
+ 
+ class Astm_F3411_22a:
++    msg_counter = None
++
+     def __init__(self, data):
+         bt = structhelper_io(data)
+         self.msg = {}
+@@ -80,6 +83,7 @@ class Astm_F3411_22a:
+             self.nan_service_desc = Astm_F3411_22a_nan_desc(bt.read())
+             if self.nan_service_desc is not None:
+                 if self.nan_service_desc.attribute_id == 3:
++                    self.msg_counter = self.nan_service_desc.msg_counter
+                     self.msg = {"OUI": self.oui.hex(), "VendorType": self.vend_type, "MsgCounter": self.msg_counter,
+                                 "DRI": self.nan_service_desc.msg}
+                 elif self.nan_service_desc.attribute_id == 0:
+@@ -151,7 +155,7 @@ class DJIV1:
+         self.uuid = bt.bytes(20)
+ 
+     def __repr__(self):
+-        return self.msg
++        return json.dumps(self.msg)
+ 
+ class DJIV2:
+     serial_number = b""
+@@ -191,7 +195,7 @@ class DJIV2:
+         self.uuid = bt.bytes(20)
+ 
+     def __repr__(self):
+-        return self.msg
++        return json.dumps(self.msg)
+ 
+ 
+ class DJIMsg:
+@@ -210,11 +214,15 @@ class DJIMsg:
+         self.oui = bt.bytes(3)
+         self.vend_type = bt.bytes(4)
+         self.version = bt.byte()
++        self.adv_data = None
+         if self.version == 1:
+             self.adv_data = DJIV1(bt.read())
+         elif self.version == 2:
+             self.adv_data = DJIV2(bt.read())
+-        self.msg={"OUI":self.oui.hex(),"VendorType":self.vend_type,"DRI":self.adv_data.msg}
++        # DJI frames carry no OpenDroneID AdvData, so DRI stays empty and
++        # filter_frames does not publish them. DJI is decoded by dji_receiver.py.
++        dri = self.adv_data.msg if self.adv_data is not None else {}
++        self.msg={"OUI":self.oui.hex(),"VendorType":self.vend_type.hex(),"DRI":dri}
+ 
+     def __repr__(self):
+         return json.dumps(self.msg)
+diff --git a/bluetooth_receiver.py b/bluetooth_receiver.py
+index a877975..c5cbe3b 100755
+--- a/bluetooth_receiver.py
++++ b/bluetooth_receiver.py
+@@ -17,7 +17,7 @@ if __name__ == "__main__":
+     aparse = argparse.ArgumentParser(description="Host-side receiver for Sniffle BLE5 sniffer")
+     aparse.add_argument("-s", "--serport", default=None, help="Sniffer serial port name")
+     aparse.add_argument("-b", "--baudrate", default=None, help="Sniffer serial port baud rate")
+-    aparse.add_argument("-c", "--advchan", default=40, choices=[37, 38, 39], type=int,
++    aparse.add_argument("-c", "--advchan", default=37, choices=[37, 38, 39], type=int,
+             help="Advertising channel to listen on")
+     aparse.add_argument("-p", "--pause", action="store_true",
+             help="Pause sniffer after disconnect")
+@@ -31,12 +31,12 @@ if __name__ == "__main__":
+             help="Passive scanning, don't follow connections")
+     aparse.add_argument("-A", "--scan", action="store_true",
+             help="Active scanning, don't follow connections")
+-    aparse.add_argument("-e", "--extadv", action="store_true",
+-            help="Capture BT5 extended (auxiliary) advertising")
++    aparse.add_argument("-e", "--extadv", action=argparse.BooleanOptionalAction, default=True,
++            help="Use extended advertising (on by default; --no-extadv to turn off)")
+     aparse.add_argument("-H", "--hop", action="store_true",
+             help="Hop primary advertising channels in extended mode")
+-    aparse.add_argument("-l", "--longrange", action="store_true",
+-            help="Use long range (coded) PHY for primary advertising")
++    aparse.add_argument("-l", "--longrange", action=argparse.BooleanOptionalAction, default=True,
++            help="Use long range (coded) PHY for primary advertising (on by default; --no-longrange to turn off)")
+     aparse.add_argument("-q", "--quiet", action="store_true",
+             help="Don't display empty packets")
+     aparse.add_argument("-Q", "--preload", default=None, help="Preload expected encrypted "
+@@ -52,7 +52,6 @@ if __name__ == "__main__":
+     aparse.add_argument("--zmqsetting", default="127.0.0.1:4222", help="Define zmq server settings")
+     aparse.add_argument("-v", "--verbose", action="store_true", help="Print messages")
+     args = aparse.parse_args()
++    # This script always publishes to ZMQ, so -z is accepted but has no effect.
+     args.zmq = True
+-    args.longrange = True
+-    args.extadv = True
+     main(args)
+diff --git a/dji_receiver.py b/dji_receiver.py
+index 0676a40..3ffd047 100755
+--- a/dji_receiver.py
++++ b/dji_receiver.py
+@@ -21,12 +21,19 @@ import socket
+ import struct
+ import json
+ import logging
++import math
+ import zmq
+ import time
+ import argparse
+ import os
+ from typing import Optional, Tuple
+ 
++# A TCP read can split a frame or hold several; frames are reassembled here.
++# Idle longer than this and the connection is treated as dead and reopened.
++ANTSDR_IDLE_TIMEOUT_S = 10
++# Bytes buffered without a complete frame before the buffer is dropped.
++MAX_FRAME_BUFFER = 65536
++
+ # Cached sensor GPS from the monitor: (lat, lon, alt) or None
+ _last_sensor_gps: Optional[Tuple[float, float, float]] = None
+ 
+@@ -70,6 +77,36 @@ def iso_timestamp_now() -> str:
+     return time.strftime("%Y-%m-%dT%H:%M:%S.%fZ", time.gmtime())
+ 
+ 
++def split_frames(buf: bytearray) -> list:
++    """Remove and return every complete frame at the front of buf.
++
++    A frame's total length is the little-endian u16 at bytes 3-4 (it includes
++    the 5-byte header, matching parse_frame). A length under 5 can't be a real
++    header, so one byte is dropped to resync. An incomplete frame stays in buf.
++    """
++    frames = []
++    while len(buf) >= 5:
++        length = struct.unpack_from('<H', buf, 3)[0]
++        if length < 5:
++            del buf[0]
++            continue
++        if len(buf) < length:
++            break
++        frames.append(bytes(buf[:length]))
++        del buf[:length]
++    if len(buf) > MAX_FRAME_BUFFER:
++        buf.clear()
++    return frames
++
++
++def _f64(data: bytes, start: int, end: int) -> float:
++    """Little-endian double from data[start:end]. NaN and infinity come back as
++    0.0, so they can't reach the JSON (NaN is not valid JSON, and the master
++    drops non-finite numbers anyway). 0.0 is already the 'no position' value."""
++    value = struct.unpack('<d', data[start:end])[0]
++    return value if math.isfinite(value) else 0.0
++
++
+ def parse_frame(frame: bytes):
+     """Parses the raw frame from AntSDR."""
+     try:
+@@ -93,28 +130,28 @@ def parse_data_1(data: bytes, alert_id:str, max_horiz_speed:float) -> dict:
+         device_type   = data[64:128].decode('utf-8', errors='replace').rstrip('\x00')
+ 
+         # Pilot home lat/lon
+-        app_lat = struct.unpack('<d', data[129:137])[0]
+-        app_lon = struct.unpack('<d', data[137:145])[0]
++        app_lat = _f64(data, 129, 137)
++        app_lon = _f64(data, 137, 145)
+ 
+         # Drone lat/lon
+-        drone_lat = struct.unpack('<d', data[145:153])[0]
+-        drone_lon = struct.unpack('<d', data[153:161])[0]
++        drone_lat = _f64(data, 145, 153)
++        drone_lon = _f64(data, 153, 161)
+ 
+         # Height and altitude
+-        height_agl        = struct.unpack('<d', data[161:169])[0]
+-        geodetic_altitude = struct.unpack('<d', data[169:177])[0]
++        height_agl        = _f64(data, 161, 169)
++        geodetic_altitude = _f64(data, 169, 177)
+ 
+         # Home lat/lon (Return-to-home position)
+-        home_lat = struct.unpack('<d', data[177:185])[0]
+-        home_lon = struct.unpack('<d', data[185:193])[0]
++        home_lat = _f64(data, 177, 185)
++        home_lon = _f64(data, 185, 193)
+ 
+         # Frequency (New field)
+-        freq = struct.unpack('<d', data[193:201])[0]  # Frequency value
++        freq = _f64(data, 193, 201)  # Frequency value
+ 
+         # Speeds
+-        speed_e = struct.unpack('<d', data[201:209])[0]  # East
+-        speed_n = struct.unpack('<d', data[209:217])[0]  # North
+-        speed_u = struct.unpack('<d', data[217:225])[0]  # Vertical
++        speed_e = _f64(data, 201, 209)  # East
++        speed_n = _f64(data, 209, 217)  # North
++        speed_u = _f64(data, 217, 225)  # Vertical
+ 
+         # RSSI
+         rssi = struct.unpack('<h', data[225:227])[0]
+@@ -358,29 +395,34 @@ def tcp_client(options):
+     while True:
+         try:
+             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
++                client_socket.settimeout(ANTSDR_IDLE_TIMEOUT_S)
+                 client_socket.connect((options.ANTSDR_IP, options.ANTSDR_PORT))
+                 logging.info(f"Connected to AntSDR at {options.ANTSDR_IP}:{options.ANTSDR_PORT}")
++                pending = bytearray()
+ 
+                 while True:
+                     # Opportunistically poll monitor for fresh GPS
+                     poll_monitor_for_gps(mon_sub)
+ 
+-                    frame = client_socket.recv(1024)
+-                    if not frame:
+-                        logging.warning("Connection closed by AntSDR.")
++                    chunk = client_socket.recv(4096)
++                    if not chunk:
++                        logging.warning("Connection closed by AntSDR. Reconnecting...")
++                        time.sleep(1)  # an endpoint that accepts and closes must not spin
+                         break
+-
+-                    package_type, data = parse_frame(frame)
+-                    if package_type == 0x01 and data:
+-                        parsed_data = parse_data_1(data, alert_id=options.ALERT_ID,
+-                                                   max_horiz_speed=options.MAX_HORIZONTAL_SPEED)
+-                        zmq_message_list = format_as_zmq_json(
+-                            parsed_data,
+-                            alert_id=options.ALERT_ID,
+-                            monitor_gps=_last_sensor_gps,
+-                        )
+-                        if zmq_message_list:
+-                            send_zmq_message(zmq_pub_socket, zmq_message_list)
++                    pending += chunk
++
++                    for frame in split_frames(pending):
++                        package_type, data = parse_frame(frame)
++                        if package_type == 0x01 and data:
++                            parsed_data = parse_data_1(data, alert_id=options.ALERT_ID,
++                                                       max_horiz_speed=options.MAX_HORIZONTAL_SPEED)
++                            zmq_message_list = format_as_zmq_json(
++                                parsed_data,
++                                alert_id=options.ALERT_ID,
++                                monitor_gps=_last_sensor_gps,
++                            )
++                            if zmq_message_list:
++                                send_zmq_message(zmq_pub_socket, zmq_message_list)
+ 
+         except (ConnectionRefusedError, socket.error) as e:
+             logging.error(f"Connection error: {e}. Retrying in 5 seconds...")
+@@ -402,9 +444,11 @@ def main():
+     # WarDragon monitor ZMQ (provides sensor GPS via JSON).
+     # Override via env var WARD_MON_ZMQ if needed (e.g., "tcp://0.0.0.0:4225").
+     if args.wardgps=="":
+-        MON_ZMQ_ENDPOINT = os.getenv("WARD_MON_ZMQ", "127.0.0.1:4225")
++        MON_ZMQ_ENDPOINT = os.getenv("WARD_MON_ZMQ", "tcp://127.0.0.1:4225")
+     else:
+         MON_ZMQ_ENDPOINT = args.wardgps
++    if "://" not in MON_ZMQ_ENDPOINT:
++        MON_ZMQ_ENDPOINT = "tcp://" + MON_ZMQ_ENDPOINT
+     if args.wardgpstimeout=="":
+         MON_ZMQ_RECV_TIMEOUT_MS = int(os.getenv("WARD_MON_RECV_TIMEOUT_MS", "50"))
+     else:
+diff --git a/frontend/.env.example b/frontend/.env.example
+new file mode 100644
+index 0000000..17afc0a
+--- /dev/null
++++ b/frontend/.env.example
+@@ -0,0 +1,37 @@
++# Copy to .env (gitignored) and uncomment only what you need. Real environment
++# variables win over this file. Values shown are the defaults.
++
++# DRONEID_ZMQ_ADDR=tcp://127.0.0.1:4224
++# DRONEID_BT_ZMQ_ADDR=tcp://127.0.0.1:4222
++# DRONEID_WIFI_ZMQ_ADDR=tcp://127.0.0.1:4223
++# DRONEID_HEALTH_TIMEOUT_S=12
++# DRONEID_STALE_AFTER_S=45
++# DRONEID_DROP_AFTER_S=105
++# DRONEID_FLIGHT_MERGE_WINDOW_S=300
++# DRONEID_SOURCE_RECENT_S=15
++# DRONEID_BROADCAST_TIMEOUT_S=5
++
++# Remote stations (see MULTI-NODE.md)
++# DRONEID_NODES_PATH=nodes.json
++# DRONEID_NODE_STATUS_STALE_S=60
++
++# Who may use admin-only endpoints (comma-separated networks)
++# DRONEID_ADMIN_NETS=100.64.0.0/10,fd7a:115c:a1e0::/48,127.0.0.0/8,::1/128
++# Only if a proxy overwrites X-Forwarded-For
++# DRONEID_TRUST_FORWARDED_FOR=
++
++# Discord alerts (leave the webhook blank to turn them off)
++DRONEID_DISCORD_WEBHOOK=
++# DRONEID_DISCORD_ROLE_ID=
++
++# Place names for alerts
++# DRONEID_LANDMARKS_PATH=
++# DRONEID_LANDMARK_RADIUS_M=150
++# DRONEID_NOMINATIM_URL=https://nominatim.openstreetmap.org/reverse
++# DRONEID_GEOCODER_CONTACT=
++# DRONEID_PLACE_TIMEOUT_S=2
++
++# Storage and listening address
++# DRONEID_DB_PATH=droneid.db
++# HOST=0.0.0.0
++# PORT=8000
+diff --git a/frontend/MULTI-NODE.md b/frontend/MULTI-NODE.md
+new file mode 100644
+index 0000000..18c727d
+--- /dev/null
++++ b/frontend/MULTI-NODE.md
+@@ -0,0 +1,165 @@
++# Multi-station setup
++
++One master runs the web UI. Other stations feed it over Tailscale. Every
++station's detections land on one map. A drone heard by two stations is one
++track, and each broadcast is stored once.
++
++```
++ Highway ──┐    decoder :4224  (tailnet)
++ (fixed)      ├──► MASTER  ── web UI / map / history / Discord
++ Rover node ──┘   decoder :4224  (tailnet)
++ (roaming)        health  :4230  (tailnet, node_agent.py)
++```
++
++Nothing changes for a single-station setup. Without `nodes.json` the master
++behaves exactly as before.
++
++## What each station runs
++
++**Master** (the NUC): wifi_receiver, bluetooth_receiver, zmq_decoder and the
++web UI, as now. Its decoder is the `master` station.
++
++**Remote node** (e.g. the Tailscale device at 100.100.10.90): Remote ID
++receivers only, with a decoder that publishes to the tailnet. From the repo
++root on the node:
++
++```bash
++# sniffers, local only
++./wifi_receiver.py --interface wlan0 -z --zmqsetting 127.0.0.1:4223
++./bluetooth_receiver.py -b 2000000 -s /dev/ttyUSB1 --zmqsetting 127.0.0.1:4222
++
++# decoder, published on the tailnet address only
++./zmq_decoder.py -z --zmqsetting 100.100.10.90:4224 --zmqclients 127.0.0.1:4222,127.0.0.1:4223
++```
++
++Bind the decoder to the node's Tailscale IP, not `0.0.0.0`. Then only devices
++on your tailnet can reach it.
++
++**Every remote node** also runs the position beacon, `node_agent.py`. It reports
++the node's health to the master, so the master can show the link and the
++sniffers on the map. It needs `pyzmq`, and gpsd if the node has a GPS:
++
++```bash
++# roaming node with GPS
++python3 node_agent.py --bind 100.100.10.91:4230 --gpsd 127.0.0.1:2947
++
++# any node, health only (the usual case for a fixed station)
++python3 node_agent.py --bind 100.100.10.90:4230
++```
++
++A station's position is set on the master, in `nodes.json` or the admin page,
++not on the node, so a fixed node needs no position here. Bind to the node's
++Tailscale address.
++
++The agent also watches the node's own sniffers over ZMQ. It subscribes to
++`wifi_receiver.py` on `127.0.0.1:4223` and `bluetooth_receiver.py` on
++`127.0.0.1:4222`, the same ports the decoder uses. If a sniffer runs on other
++ports, pass them with `--wifi-zmq` and `--bluetooth-zmq`:
++
++```bash
++python3 node_agent.py --bind 100.100.10.90:4230 --wifi-zmq 127.0.0.1:4223 --bluetooth-zmq 127.0.0.1:4222
++```
++
++A station with no agent still works, but its sniffer lights stay red.
++
++**On the map:** each station is the same ball as the master, with a link dot.
++Green means the master is connected to its decoder; red means it isn't. Hover
++for the title (`<station name> - CONNECTED` or `DISCONNECTED`, e.g. `Node 1 - CONNECTED`) and two lights: Wi-Fi and
++Bluetooth. Each light is the same on the master and the remote nodes:
++
++- green: the sniffer is sending
++- yellow: connected to the sniffer but quiet for 12 seconds
++- red: not connected to the sniffer (or the agent has stopped reporting)
++
++The map dot is green when both sniffers are connected (sending or quiet), yellow
++when one is, and red when neither is.
++
++## The master: nodes.json
++
++Copy `nodes.example.json` to `nodes.json` next to `main.py`. It lists only the
++external stations, each with an ID number and an IP. The master is not listed:
++it exists whenever the program runs.
++
++```json
++{
++  "stations": [
++    { "id": 1, "ip": "100.100.10.90" },
++    { "id": 2, "ip": "100.100.10.91" }
++  ]
++}
++```
++
++| field | meaning |
++|---|---|
++| `id` | required. A number from 1 to 999, unique. Shown on the admin page as `Node - ID: 1`. |
++| `ip` | required. The station's Tailscale address. |
++| `lat`, `lon` | optional, both together. A starting position for a fixed station. The admin page can change it. |
++
++The file sets only the ID and the address. The web UI never writes to it.
++Names, Fixed or GPS mode, and manual positions are set in the admin page and
++stored in the master's database, so a moving GPS never changes the file.
++
++Ports are fixed: the decoder publishes on `:4224` and each remote node's
++node_agent on `:4230`.
++
++The file is read at startup. Restart the server after editing it. A malformed
++file stops the server with a message naming the station and field.
++
++## Tailscale
++
++- The nodes must be on the tailnet and reachable from the master. Check with
++  `tailscale ping 100.100.10.90`.
++- Use a Tailscale ACL that lets the master reach the node's ports 4224 and
++  4230, and nothing else needs to reach them. Nothing on these ports
++  authenticates; the tailnet is what keeps other people out.
++
++## How duplicates are handled
++
++Two stations hearing the same drone:
++
++- **Same drone, one track.** Both feeds use the same burst format, so the
++  track is keyed by serial number exactly as before. The track shows the
++  latest report, the station that sent it, and every station that has heard it
++  (`seen_by`).
++- **Same broadcast, stored once.** A broadcast carries its own timestamp, so
++  when a second station reports the same position and timestamp it's skipped.
++  Without a timestamp, the same position within 2 seconds counts.
++- **A station's own repeats are kept.** Drones repeat each broadcast several
++  times a second. That has always been stored, and it still is, so existing
++  flight data doesn't change shape.
++
++## Decoder update on every node
++
++`zmq_decoder.py` tags each detection with the radio that heard it (`wifi` or
++`bluetooth`). The master uses that tag for the Wi-Fi / Bluetooth lines in the
++drone panel and in History. Run the updated `zmq_decoder.py` on every remote
++node, the same as the master. A node still on the old decoder keeps working,
++but its detections show no sensor line.
++
++## What to check after setup
++
++1. `journalctl`/the server log should show one line per station:
++   `Subscribed to node-1 decoder output at tcp://100.100.10.90:4224`.
++2. The top bar shows the master's ZMQ chip first, named after the master, then a
++   chip for each remote station. Each chip is green when its ZMQ link to the
++   master is up and red when it isn't. Wi-Fi and Bluetooth are shown on each
++   station's map icon: green when both sniffers run, yellow when one does, red
++   when neither does.
++3. Each remote station appears on the map. A roaming station with no GPS fix
++   stays at its last known position and fades.
++4. When both stations hear the same drone, its History points show `station_id`
++   (`master`, or `node-1`, `node-2` and so on for remote stations), and it's
++   only in there once per broadcast.
++
++## Limits
++
++- A Discord alert names the station nearest the drone that heard it, and gives
++  the distance from that station.
++- Drone popups don't show `seen_by` yet. The data is there, and it can be
++  added as a field toggle.
++- A node whose agent has been quiet for `DRONEID_NODE_STATUS_STALE_S` (60 s by
++  default) is marked stale and fades. A roaming node with no GPS fix reports
++  that, and keeps its last known position.
++- Node clocks don't matter for duplicate detection. It compares the drone's
++  own timestamps, and falls back to the master's receive time. Keep node clocks
++  roughly right for history.
+diff --git a/frontend/README.md b/frontend/README.md
+index 5ca8c52..fa855f8 100644
+--- a/frontend/README.md
++++ b/frontend/README.md
+@@ -45,29 +45,39 @@ All via environment variables, or a `.env` file next to `main.py` (copy
+ | `DRONEID_ZMQ_ADDR` | `tcp://127.0.0.1:4224` | The decoder's output — the only source of drone data |
+ | `DRONEID_BT_ZMQ_ADDR` | `tcp://127.0.0.1:4222` | `bluetooth_receiver.py`, health monitoring only |
+ | `DRONEID_WIFI_ZMQ_ADDR` | `tcp://127.0.0.1:4223` | `wifi_receiver.py`, health monitoring only |
+-| `DRONEID_HEALTH_TIMEOUT_S` | `12` | Silence before a sniffer dot goes green → yellow |
++| `DRONEID_HEALTH_TIMEOUT_S` | `12` | Silence before a sniffer goes from green to yellow |
+ | `DRONEID_STALE_AFTER_S` | `45` | Silence before a track goes gray |
+ | `DRONEID_DROP_AFTER_S` | `105` | Silence before it leaves the map |
+ | `DRONEID_FLIGHT_MERGE_WINDOW_S` | `300` | Reappearance window for continuing a flight |
++| `DRONEID_SOURCE_RECENT_S` | `15` | How recently a radio must have heard a drone to show as a source |
++| `DRONEID_BROADCAST_TIMEOUT_S` | `5` | Send timeout for a websocket client that has stopped reading |
++| `DRONEID_NODES_PATH` | `nodes.json` beside `main.py` | Remote stations file (see MULTI-NODE.md) |
++| `DRONEID_NODE_STATUS_STALE_S` | `60` | Silence from a station's node_agent before its status counts as old |
++| `DRONEID_ADMIN_NETS` | Tailscale ranges and loopback | Networks allowed to use admin-only endpoints |
++| `DRONEID_TRUST_FORWARDED_FOR` | off | Read the client address from `X-Forwarded-For`. Only with a proxy that overwrites that header |
+ | `DRONEID_DISCORD_WEBHOOK` | — | Enables alerts (see below) |
+ | `DRONEID_DISCORD_ROLE_ID` | — | Numeric role ID to ping on each alert |
++| `DRONEID_LANDMARKS_PATH` | `landmarks.csv` beside `places.py` | Optional local place names for alerts |
++| `DRONEID_LANDMARK_RADIUS_M` | `150` | How far from a landmark it has to be to name it |
++| `DRONEID_NOMINATIM_URL` | OpenStreetMap's public server | Reverse-geocoder for alert place names |
++| `DRONEID_GEOCODER_CONTACT` | — | Contact address sent with geocoder requests, as their usage policy asks |
++| `DRONEID_PLACE_TIMEOUT_S` | `2` | How long an alert waits for a place name before sending without one |
+ | `DRONEID_DB_PATH` | `droneid.db` beside `main.py` | SQLite file |
+ | `HOST` / `PORT` | `0.0.0.0` / `8000` | Where to listen |
+ 
+-The two sniffer ports are subscribed to purely for liveness — nothing is
+-parsed from them. Each of the three top-bar dots reads:
++The two sniffer ports are subscribed to for liveness only; nothing is parsed
++from them. The top bar shows one chip per station: the master first, named
++after the station, then each remote node. A chip is green while the master's
++ZMQ link to that feed is up, and red when it isn't. Wi-Fi and Bluetooth are
++shown on the master's map icon and on each node's icon instead:
+ 
+-- **green** — connected, and a message arrived recently.
+-- **yellow** (sniffers only) — connected but idle: the process is up, nothing
+-  in range.
+-- **red** — not connected. Detected from ZMQ's socket-monitor
+-  connect/disconnect events rather than just silence, so a dead process is
+-  distinguishable from a quiet one. If a dot stays red with its sniffer
+-  definitely running, check the log for `Could not attach connection
+-  monitor` — that means the monitor API isn't available on your pyzmq build.
+-
+-ZMQ is only ever green or red: it's the data pipeline, not a sniffer being
+-watched.
++- **green** — that sniffer is sending.
++- **yellow** — connected to the sniffer but quiet for `DRONEID_HEALTH_TIMEOUT_S`.
++- **red** — not connected. Detected from ZMQ's socket-monitor connect and
++  disconnect events, not from silence, so a dead process reads differently from
++  a quiet one. If a sniffer stays red while it's running, check the log for
++  `Could not attach connection monitor`, which means your pyzmq build lacks the
++  monitor API.
+ 
+ ## Marker lifecycle
+ 
+@@ -151,15 +161,19 @@ decay through the normal stale/drop timeouts rather than vanishing.
+ 
+ ### Admin view
+ 
+-Settings > Station, Discord Alerts and Debug are hidden by default. Visit
+-once with `?jerry=1` (e.g. `http://<host>:8000/?jerry=1`) to unlock them for
+-that browser; the flag goes into `localStorage` and the parameter is stripped
+-from the URL so it isn't shared by a bookmark. Other browsers see only the
+-field toggles and Units.
++The admin-only endpoints (station location, Discord test, debug drone, flight
++merge and delete) are refused by the server unless the request comes from a
++network in `DRONEID_ADMIN_NETS`. The default is the Tailscale address ranges
++plus loopback, so anyone on your tailnet is an admin and anyone else is not.
++`GET /api/access` reports what the server will allow for the caller, along with
++the address it sees, which is the quickest way to check why a client is refused.
++
++The page hides the admin sections for non-admin clients. That is only tidiness:
++the server's refusal is what counts. A refused request gets `403`.
+ 
+-This is decluttering, **not security** — anyone with dev tools can set the
+-same flag, and none of the endpoints behind those sections have server-side
+-auth.
++If the app sits behind a reverse proxy, the server only sees the proxy's address
++unless `DRONEID_TRUST_FORWARDED_FOR` is set. Only set it when the proxy overwrites
++`X-Forwarded-For`, because otherwise a client can claim any address.
+ 
+ ### Merging and deleting flights (admin view)
+ 
+@@ -225,25 +239,29 @@ Responses over 1 KB are gzipped (a long flight's point list shrinks about
+ | Endpoint | Purpose |
+ | --- | --- |
+ | `GET /api/drones` | Snapshot of all current tracks |
+-| `WS /ws` | Snapshot on connect, then live `update` / `status` / `dropped` / `health` pushes |
+-| `GET /api/health` | `{"zmq": "green\|red", "bluetooth": "green\|yellow\|red", "wifi": ...}` |
++| `WS /ws` | Snapshot on connect, then live `update` / `status` / `dropped` / `health` / `stations` pushes |
++| `GET /api/health` | `{"health": {"zmq": "green\|red", "bluetooth": "green\|yellow\|red", "wifi": ...}}` |
++| `GET /api/stations` | Every station with its position, link state and sniffer states |
++| `GET /api/access` | `{"admin": true\|false, "client": "<address the server sees>"}` |
+ | `GET /api/flights?limit=&offset=` | Flight list, most recent first. `limit` caps at 500 |
+ | `GET /api/flights/{id}` | One flight's metadata plus its full point list |
+ | `POST /api/flights/merge` | `{"flight_ids": [1,2]}` → `{"flight_id": <survivor>, "merged": n}`. 400 on fewer than two, 404 unknown id, 409 mismatched or in progress |
+ | `POST /api/flights/delete` | `{"flight_ids": [1,2]}` → `{"deleted": n}`. 409 if one is in progress |
+ | `GET /api/drones/catalog` | All catalog_key → nickname mappings |
+ | `PATCH /api/drones/{catalog_key}/name` | `{"nickname": "Drone 1"}`; `""` clears it back to serial/MAC |
+-| `GET/PUT/DELETE /api/station` | The station location, `{"lat": , "lon": }` |
++| `GET/PUT/DELETE /api/station` | The home point, `{"lat": , "lon": }`. PUT and DELETE are admin-only |
++| `PUT /api/station-config/{station_id}` | A station's name, location mode, and manual position. Admin-only for the master |
+ | `GET /api/discord_webhook` | `{"configured": true\|false}` — never the URL |
+ | `POST /api/discord_webhook/test` | Sends a test alert, exercising the role-ping path too |
+ | `POST /api/test/drone/start`, `/stop`, `GET /status` | The synthetic test drone |
+ 
+ ## Limitations
+ 
+-- **No auth on any endpoint.** The admin flag is UI-only. `POST
+-  /api/flights/merge` and `/delete` are destructive and irreversible and can
+-  be called by anyone who can reach the server. Fine on a private LAN; put a
+-  reverse proxy with basic auth in front of it before exposing it further.
++- **Network-based access only.** There are no user accounts. Admin-only
++  endpoints check the caller's network (see *Admin view*), so anyone who can
++  reach the server from an admin network can merge or delete flights. Put the
++  server on a private network such as a tailnet, and use a reverse proxy with
++  authentication before exposing it further.
+ - **No undo, no un-merge, no split.** Copy `droneid.db` before a big tidy-up.
+   If the merge window is too generous for your airspace, lower
+   `DRONEID_FLIGHT_MERGE_WINDOW_S` rather than fixing it afterwards.
+@@ -262,11 +280,17 @@ Responses over 1 KB are gzipped (a long flight's point list shrinks about
+ - `db.py` — SQLite layer. Four tables: `drones` (catalog and nicknames),
+   `flights` (one row per detection session), `track_points` (timestamped
+   samples), `app_settings` (the station location).
++- `nodes.py` — the stations file: parsing, validation, and the state each
++  station reports. `node_agent.py` — the beacon every remote node runs.
++- `places.py` — place names for alerts, from `landmarks.csv` or OpenStreetMap.
+ - `static/index.html` — the entire UI.
++- `MULTI-NODE.md` — setting up remote stations. `nodes.example.json` — a
++  template for `nodes.json`.
++- `test_nodes.py` — checks for the station and agent code.
+ - `static/icons/` — tab and bookmark icons, built by `build-icons.py` from the
+   same delta the map draws. Three marks are defined: `a` (bare dart), `b`
+   (dart in a ring), `c` (dart in reticle corners — shipped). `python3
+   build-icons.py a` rebuilds the set from another one; filenames don't change,
+   so `index.html` needs no edit. Rasterizing needs Playwright's Chromium;
+   without it the SVGs are still written and the PNG/ICO step is skipped.
+-- `.env.example` — template for `.env`.
+\ No newline at end of file
++- `.env.example` — template for `.env`. Copy it and uncomment what you need.
+\ No newline at end of file
+diff --git a/frontend/db.py b/frontend/db.py
+index 0200a79..0081151 100644
+--- a/frontend/db.py
++++ b/frontend/db.py
+@@ -49,7 +49,7 @@ import sqlite3
+ import time
+ from typing import Optional
+ 
+-DB_PATH = os.environ.get("DRONEID_DB_PATH", "droneid.db")
++DB_PATH = os.environ.get("DRONEID_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "droneid.db"))
+ 
+ _lock = asyncio.Lock()
+ _conn: Optional[sqlite3.Connection] = None
+diff --git a/frontend/main.py b/frontend/main.py
+index 0c756d3..035aaff 100644
+--- a/frontend/main.py
++++ b/frontend/main.py
+@@ -19,7 +19,6 @@ persists every sample to SQLite through db.py, and serves:
+   - POST /api/flights/delete          remove flights and their points
+ 
+   catalog / config
+-  - GET   /api/drones/catalog         all user-assigned nicknames
+   - PATCH /api/drones/{key}/name      rename (applies retroactively)
+   - GET/PUT/DELETE /api/station       the station ("home point") location
+   - GET  /api/discord_webhook         whether an alert webhook is configured
+@@ -43,7 +42,7 @@ import time
+ import urllib.error
+ import urllib.request
+ from contextlib import asynccontextmanager
+-from dataclasses import dataclass, field, asdict
++from dataclasses import dataclass, field, fields
+ from typing import Optional
+ 
+ import zmq
+@@ -215,6 +214,8 @@ def clean_float(value, heading: bool = False) -> Optional[float]:
+             v = float(num)
+         except ValueError:
+             return None
++    if not math.isfinite(v):   # json.loads accepts Infinity/NaN; neither is a reading
++        return None
+     return None if (heading and v == 361) else v
+ 
+ 
+@@ -232,6 +233,9 @@ def parse_latlon(value) -> Optional[float]:
+     return v
+ 
+ 
++_TRACK_INTERNAL_FIELDS = frozenset({"station_heard", "source_heard", "recent_points"})
++
++
+ @dataclass
+ class DroneTrack:
+     key: str  # serial if known, else MAC
+@@ -306,10 +310,14 @@ class DroneTrack:
+         return "live"
+ 
+     def to_dict(self) -> dict:
+-        d = asdict(self)
+-        d.pop("recent_points", None)
+-        heard = d.pop("station_heard", None) or {}
+-        source_heard = d.pop("source_heard", None) or {}
++        # Built field by field rather than with asdict(): asdict would deep-copy
++        # recent_points on every call, and that list is internal anyway.
++        d = {f.name: getattr(self, f.name) for f in fields(self)
++             if f.name not in _TRACK_INTERNAL_FIELDS}
++        d["seen_by"] = list(self.seen_by)
++        # Snapshot the dicts: the burst handler updates them while this runs.
++        heard = dict(self.station_heard)
++        source_heard = dict(self.source_heard)
+         now = time.time()
+         tracked = sorted(s for s, t in heard.items() if now - t <= STALE_AFTER_S)
+         d["tracked_by"] = tracked
+@@ -402,6 +410,8 @@ class TrackStore:
+         for key in ("Location/Vector Message", "Location Vector"):
+             if key in msg:
+                 loc = msg[key]
++                if not isinstance(loc, dict):
++                    return None, False
+                 coord = loc.get("coord")
+                 if coord:
+                     # newer/raw shape nests direction/speed/lat/lon/alt under
+@@ -417,7 +427,7 @@ class TrackStore:
+     @staticmethod
+     def _get_system(msg: dict) -> Optional[dict]:
+         for key in ("System Message", "System"):
+-            if key in msg:
++            if isinstance(msg.get(key), dict):
+                 return msg[key]
+         return None
+ 
+@@ -521,14 +531,14 @@ class TrackStore:
+             track.source_heard[(station_id, transport)] = time.time()
+ 
+         for msg in messages:
+-            if "Basic ID" in msg:
++            if isinstance(msg.get("Basic ID"), dict):
+                 b = msg["Basic ID"]
+                 if track.ua_type is None and b.get("ua_type") is not None:
+                     track.ua_type = b.get("ua_type")
+                 if b.get("protocol_version"):
+                     track.protocol_version = b.get("protocol_version")
+ 
+-            if "Operator ID" in msg:
++            if isinstance(msg.get("Operator ID"), dict):
+                 op_id = msg["Operator ID"].get("id")
+                 if op_id:
+                     track.operator_id = op_id
+@@ -810,8 +820,8 @@ def extract_bursts(data) -> list[tuple[Optional[str], list[dict]]]:
+         for mac, val in inner.items():
+             if isinstance(val, list):
+                 bursts.append((mac, val))
+-            elif isinstance(val, dict) and "AdvData" in val:
+-                continue  # raw undecoded advert — nothing to correlate yet
++            # A dict carrying only "AdvData" is a raw, undecoded advert with
++            # nothing to correlate yet, so it is skipped by falling through.
+         # A single message dict ({"MAC": ..., "Basic ID": {...}}) has no list
+         # values at all and would otherwise vanish without trace.
+         if not bursts and any(isinstance(v, dict) for v in inner.values()):
+@@ -821,7 +831,25 @@ def extract_bursts(data) -> list[tuple[Optional[str], list[dict]]]:
+     return []
+ 
+ 
++# One lock per aircraft. Two stations can hear the same new aircraft at the same
++# moment; without this both would open a flight and both would send the alert.
++_flight_locks: dict[str, asyncio.Lock] = {}
++
++
+ async def persist_update(track: DroneTrack):
++    """Serialised per aircraft, so only one station at a time can open its flight."""
++    key = track.key
++    if key.startswith(ANON_KEY_PREFIX):
++        # Anonymous tracks are dropped before anything is written; no lock needed.
++        await _persist_update_locked(track)
++        return
++    # Kept for the life of the process: one small lock per aircraft seen. It
++    # can't be dropped when unlocked, since a waiter may be about to take it.
++    async with _flight_locks.setdefault(key, asyncio.Lock()):
++        await _persist_update_locked(track)
++
++
++async def _persist_update_locked(track: DroneTrack):
+     """Append a point to this track's open flight, opening one first if it
+     doesn't have one yet. Also refreshes the catalog row (mac/serial/
+     registration/ua_type/protocol version) and applies any user-assigned
+@@ -980,6 +1008,7 @@ async def burst_listener(node):
+     channel = health_channel(node)
+     connection_state.setdefault(channel, DISCONNECTED)
+     sock = zmq_ctx().socket(zmq.SUB)
++    sock.setsockopt(zmq.IPV6, 1)  # station addresses may be IPv6 (Tailscale)
+     attach_connection_monitor(sock, channel)
+     sock.connect(node.bursts)
+     sock.setsockopt(zmq.SUBSCRIBE, b"")
+@@ -1005,9 +1034,11 @@ async def burst_listener(node):
+ 
+ 
+ async def status_listener(node):
+-    """Position reports from a roaming station's node_agent. A malformed or
+-    unrecognised message is ignored, so it can't move a station on the map."""
++    """Position reports from a station's node_agent (fixed or roaming: every
++    external station publishes one). A malformed or unrecognised message is
++    ignored, so it can't move a station on the map."""
+     sock = zmq_ctx().socket(zmq.SUB)
++    sock.setsockopt(zmq.IPV6, 1)  # station addresses may be IPv6 (Tailscale)
+     sock.connect(node.status)
+     sock.setsockopt(zmq.SUBSCRIBE, b"")
+     log.info("Listening for %s position reports at %s", node.id, node.status)
+@@ -1035,9 +1066,6 @@ def stations_snapshot(now: Optional[float] = None) -> list[dict]:
+     The master's position is the home point, so it isn't duplicated here."""
+     now = now if now is not None else time.time()
+     local = compute_health(now)
+-    master_pos = None
+-    if station_cache and station_cache.get("lat") is not None and station_cache.get("lon") is not None:
+-        master_pos = (station_cache["lat"], station_cache["lon"])
+     out = []
+     for node_id in fleet.ids():
+         link = local["zmq"] if fleet.config[node_id].kind == "master" else _node_link(node_id, now)
+@@ -1062,6 +1090,7 @@ async def sniffer_health_listener(addr: str, channel: str):
+     content — tracks both the TCP-level connection state (process alive?)
+     and message arrival timing (actively sending vs. idle)."""
+     sock = zmq_ctx().socket(zmq.SUB)
++    sock.setsockopt(zmq.IPV6, 1)  # station addresses may be IPv6 (Tailscale)
+     attach_connection_monitor(sock, channel)
+     sock.connect(addr)
+     sock.setsockopt(zmq.SUBSCRIBE, b"")
+@@ -1141,13 +1170,8 @@ def parse_station(raw: Optional[str]) -> Optional[dict]:
+     return {"lat": lat, "lon": lon}
+ 
+ 
+-def haversine_meters(lat1, lon1, lat2, lon2) -> float:
+-    R = 6371000.0
+-    p1, p2 = math.radians(lat1), math.radians(lat2)
+-    dphi = math.radians(lat2 - lat1)
+-    dlambda = math.radians(lon2 - lon1)
+-    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlambda / 2) ** 2
+-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
++# Same formula as places.haversine_m; one copy, so distances can't drift apart.
++haversine_meters = places.haversine_m
+ 
+ 
+ def meters_to_feet(m: float) -> float:
+@@ -1656,9 +1680,9 @@ ADMIN_ONLY_ROUTES = {
+     ("POST", "/api/flights/merge"),
+     ("POST", "/api/flights/delete"),
+     # Renaming is deliberately NOT here: the pencil shows for everyone, as it
+-    # always has, and a wrong name is trivially fixable. Add
+-    # ("PATCH", "/api/drones/<key>/name") to ADMIN_ONLY_PREFIXES below if you
+-    # change your mind.
++    # always has, and a wrong name is trivially fixable. To lock it down, add
++    # ("PATCH", "/api/drones/") to ADMIN_ONLY_PREFIXES below. Prefixes are
++    # matched with startswith(), so a literal "<key>" placeholder would never match.
+ }
+ # Same idea for paths carrying a parameter — matched on the method plus a
+ # path prefix instead of the whole path.
+@@ -1726,6 +1750,18 @@ async def admin_gate(request: Request, call_next):
+     return await call_next(request)
+ 
+ 
++NICKNAME_MAX_LEN = 48
++
++
++def clean_nickname(raw: str) -> Optional[str]:
++    """A drone nickname is shown in the UI and in Discord alerts. Control
++    characters (newlines especially) would break the alert's layout, and an
++    unbounded name could push the post over Discord's length limit."""
++    text = "".join(ch if ch.isprintable() else " " for ch in (raw or ""))
++    text = " ".join(text.split())[:NICKNAME_MAX_LEN].strip()
++    return text or None
++
++
+ class RenameBody(BaseModel):
+     nickname: str
+ 
+@@ -1893,19 +1929,12 @@ async def test_drone_status():
+     return {"running": test_drone_running}
+ 
+ 
+-@app.get("/api/drones/catalog")
+-async def api_catalog():
+-    """All known nicknames, keyed by catalog_key (serial, or MAC if no
+-    serial has ever been seen for that drone)."""
+-    return {"catalog": catalog_nicknames}
+-
+-
+ @app.patch("/api/drones/{catalog_key}/name")
+ async def api_rename_drone(catalog_key: str, body: RenameBody):
+     """Rename a drone. Applies retroactively: every past and future flight
+     for this catalog_key will show the new name, since the name is looked
+     up at query/display time rather than copied into flight rows."""
+-    nickname = body.nickname.strip() or None
++    nickname = clean_nickname(body.nickname)
+     await db.rename_drone(catalog_key, nickname)
+     if nickname:
+         catalog_nicknames[catalog_key] = nickname
+diff --git a/frontend/node_agent.py b/frontend/node_agent.py
+index 16d3379..315071d 100644
+--- a/frontend/node_agent.py
++++ b/frontend/node_agent.py
+@@ -26,7 +26,6 @@ import argparse
+ import json
+ import logging
+ import math
+-import os
+ import socket
+ import sys
+ import threading
+@@ -128,6 +127,7 @@ class SnifferWatch:
+             sock = monitor = None
+             try:
+                 sock = ctx.socket(zmq.SUB)
++                sock.setsockopt(zmq.IPV6, 1)
+                 monitor = sock.get_monitor_socket()
+                 sock.connect(f"tcp://{self.addr}")
+                 sock.setsockopt(zmq.SUBSCRIBE, b"")
+@@ -196,12 +196,14 @@ class GpsdClient:
+         self._sats: Optional[int] = None
+         self._latest: Optional[dict] = None
+         self._latest_at: float = 0.0
++        self._warned_down = False  # one warning per outage, not one per poll
+ 
+     def _connect(self):
+         self.close()
+         sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+         sock.sendall(b'?WATCH={"enable":true,"json":true}\n')
+         self._sock = sock
++        self._warned_down = False
+         self._file = sock.makefile("r", encoding="utf-8", errors="replace")
+ 
+     def close(self):
+@@ -240,7 +242,9 @@ class GpsdClient:
+                 elif rec["kind"] == "SKY" and rec["sats"] is not None:
+                     self._sats = rec["sats"]
+         except OSError as e:
+-            log.warning("gpsd unavailable (%s) — reporting no fix until it returns", e)
++            if not self._warned_down:
++                log.warning("gpsd unavailable (%s) — reporting no fix until it returns", e)
++                self._warned_down = True
+             self.close()
+             self._latest = None
+         if self._latest is not None and time.monotonic() - self._latest_at > FIX_MAX_AGE_S:
+@@ -254,6 +258,7 @@ def open_publisher(bind: str):
+         log.warning("Binding to %s exposes this beacon on every interface. "
+                     "Bind to the node's Tailscale address instead.", bind)
+     sock = zmq.Context.instance().socket(zmq.PUB)
++    sock.setsockopt(zmq.IPV6, 1)  # the Tailscale address may be IPv6
+     sock.bind(f"tcp://{bind}")
+     return sock
+ 
+diff --git a/frontend/nodes.example.json b/frontend/nodes.example.json
+new file mode 100644
+index 0000000..150c6c5
+--- /dev/null
++++ b/frontend/nodes.example.json
+@@ -0,0 +1,6 @@
++{
++  "stations": [
++    { "id": 1, "ip": "100.64.0.10", "lat": 40.000000, "lon": -100.000000 },
++    { "id": 2, "ip": "100.64.0.11" }
++  ]
++}
+diff --git a/frontend/nodes.py b/frontend/nodes.py
+index 04cafb7..3597295 100644
+--- a/frontend/nodes.py
++++ b/frontend/nodes.py
+@@ -18,6 +18,7 @@ import json
+ import logging
+ import math
+ import os
++import ipaddress
+ import re
+ from dataclasses import dataclass
+ from typing import Optional
+@@ -25,7 +26,6 @@ from typing import Optional
+ log = logging.getLogger("droneid-frontend.nodes")
+ 
+ MASTER_ID = "master"
+-KINDS = ("master", "static", "roaming")
+ 
+ # A remote node's position report older than this is shown as last known
+ # rather than current.
+@@ -64,7 +64,7 @@ def _check_coord(node_id: str, name: str, value, limit: float) -> float:
+ 
+ 
+ # Every external station runs the same two services on its address: the
+-# decoder's burst feed, and (for a roaming station) the node_agent GPS beacon.
++# decoder's burst feed, and the node_agent beacon (position and sniffer health).
+ NODE_BURSTS_PORT = 4224
+ NODE_STATUS_PORT = 4230
+ MAX_NODE_NUMBER = 999
+@@ -72,6 +72,20 @@ ALLOWED_FIELDS = {"id", "ip", "lat", "lon"}
+ _HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-]{0,252}$")
+ 
+ 
++def _valid_station_ip(ip: str) -> bool:
++    """An IPv4 or IPv6 literal (Tailscale hands out both), or a plain host name."""
++    try:
++        ipaddress.ip_address(ip)
++        return True
++    except ValueError:
++        return _HOST_RE.match(ip) is not None
++
++
++def _endpoint_host(ip: str) -> str:
++    """ZMQ endpoints need an IPv6 literal in brackets: tcp://[fd7a::1]:4224."""
++    return f"[{ip}]" if ":" in ip else ip
++
++
+ def node_id_for_number(number: int) -> str:
+     """The internal id of station number N. The admin page shows the number;
+     the database and the code use this id."""
+@@ -122,7 +136,7 @@ def parse_nodes(data, default_master_bursts: str) -> list[NodeConfig]:
+             raise ConfigError(f"station {label}: unknown field {sorted(extra)[0]!r}. Only id, ip, "
+                               "and optional lat and lon are allowed; names and locations are set in the admin page")
+         ip = str(raw.get("ip") or "").strip()
+-        if not _HOST_RE.match(ip):
++        if not _valid_station_ip(ip):
+             raise ConfigError(f"station {label}: ip must be an address such as 100.100.10.90, got {raw.get('ip')!r}")
+         node_id = node_id_for_number(number)
+         if node_id in seen_ids:
+@@ -144,8 +158,8 @@ def parse_nodes(data, default_master_bursts: str) -> list[NodeConfig]:
+             id=node_id,
+             name=f"Node {number}",
+             kind=kind,
+-            bursts=f"tcp://{ip}:{NODE_BURSTS_PORT}",
+-            status=f"tcp://{ip}:{NODE_STATUS_PORT}",   # every station reports health here
++            bursts=f"tcp://{_endpoint_host(ip)}:{NODE_BURSTS_PORT}",
++            status=f"tcp://{_endpoint_host(ip)}:{NODE_STATUS_PORT}",   # every station reports health here
+             lat=lat,
+             lon=lon,
+             number=number,
+@@ -293,13 +307,11 @@ class NodeRegistry:
+             return st.lat, st.lon
+         return None
+ 
+-    def describe(self, node_id: str, now: float, link: str, master_position=None) -> dict:
++    def describe(self, node_id: str, now: float, link: str) -> dict:
+         cfg = self.config[node_id]
+         st = self.state[node_id]
+-        if cfg.kind == "master":
+-            pos = master_position
+-        else:
+-            pos = self.position(node_id)
++        # The master has no node_agent position of its own; the server places it.
++        pos = None if cfg.kind == "master" else self.position(node_id)
+         status_age = None if st.last_status_at is None else now - st.last_status_at
+         return {
+             "id": cfg.id,
+diff --git a/frontend/places.py b/frontend/places.py
+index 03d5f2c..0e4b2ce 100644
+--- a/frontend/places.py
++++ b/frontend/places.py
+@@ -42,7 +42,6 @@ GEOCODER_CONTACT = (os.environ.get("DRONEID_GEOCODER_CONTACT") or "").strip()
+ # posts without a place name.
+ LOOKUP_TIMEOUT_S = float(os.environ.get("DRONEID_PLACE_TIMEOUT_S") or 2.0)
+ NOMINATIM_MIN_INTERVAL_S = 1.1  # the policy is 1/s; a little headroom
+-OSM_ATTRIBUTION = "© OpenStreetMap contributors"
+ 
+ EARTH_R_M = 6371000.0
+ 
+@@ -58,7 +57,6 @@ class Landmark:
+ @dataclass(frozen=True)
+ class Place:
+     name: str
+-    source: str  # "landmark" or "osm"
+ 
+ 
+ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+@@ -77,7 +75,9 @@ def load_landmarks(path: str) -> list[Landmark]:
+         log.warning("No landmark file at %s — every alert will use OSM names", path)
+         return []
+     out: list[Landmark] = []
+-    with open(path, newline="", encoding="utf-8") as f:
++    # utf-8-sig: a spreadsheet's "CSV UTF-8" export starts with a BOM, which
++    # would otherwise rename the first header and silently skip every row.
++    with open(path, newline="", encoding="utf-8-sig") as f:
+         for lineno, row in enumerate(csv.DictReader(f), start=2):
+             try:
+                 name = (row.get("name") or "").strip()
+@@ -99,13 +99,6 @@ def load_landmarks(path: str) -> list[Landmark]:
+ _landmarks: list[Landmark] = load_landmarks(LANDMARKS_PATH)
+ 
+ 
+-def reload_landmarks(path: Optional[str] = None) -> int:
+-    """Re-reads the landmark file without restarting the server."""
+-    global _landmarks
+-    _landmarks = load_landmarks(path or LANDMARKS_PATH)
+-    return len(_landmarks)
+-
+-
+ def nearest_landmark(lat: float, lon: float, landmarks: Optional[list[Landmark]] = None) -> Optional[str]:
+     """Name of the nearest landmark whose radius covers the point, or None."""
+     best_name, best_d = None, None
+@@ -119,6 +112,7 @@ def nearest_landmark(lat: float, lon: float, landmarks: Optional[list[Landmark]]
+ # ---- OpenStreetMap fallback ----
+ 
+ _cache: dict[tuple[float, float], Optional[str]] = {}
++_CACHE_MAX = 5000
+ _last_call = 0.0
+ _rate_lock: Optional[asyncio.Lock] = None
+ _warned_no_contact = False
+@@ -193,12 +187,12 @@ async def resolve(lat: Optional[float], lon: Optional[float],
+         return None
+     name = nearest_landmark(lat, lon)
+     if name:
+-        return Place(name, "landmark")
++        return Place(name)
+ 
+     key = _cell(lat, lon)
+     if key in _cache:
+         cached = _cache[key]
+-        return Place(cached, "osm") if cached else None
++        return Place(cached) if cached else None
+     try:
+         name = await asyncio.wait_for(_osm_lookup(lat, lon), timeout or LOOKUP_TIMEOUT_S)
+     except asyncio.TimeoutError:
+@@ -207,5 +201,7 @@ async def resolve(lat: Optional[float], lon: Optional[float],
+     except Exception:
+         log.exception("Place lookup failed for %.5f,%.5f", lat, lon)
+         return None
++    if len(_cache) >= _CACHE_MAX:
++        _cache.clear()  # bounded: a long-running station can't grow this without limit
+     _cache[key] = name  # cache "nothing here" too, so an empty spot isn't re-asked
+-    return Place(name, "osm") if name else None
+\ No newline at end of file
++    return Place(name) if name else None
+\ No newline at end of file
+diff --git a/frontend/static/icons/build-icons.py b/frontend/static/icons/build-icons.py
+index 53e752a..72afa3d 100644
+--- a/frontend/static/icons/build-icons.py
++++ b/frontend/static/icons/build-icons.py
+@@ -4,11 +4,11 @@
+ Three themed marks are defined below, all built from the same delta the live
+ map draws for a drone, in the app's own palette:
+ 
+-  a  marker   the bare dart. Most legible at 16px; the shipped default.
++  a  marker   the bare dart. Most legible at 16px.
+   b  tracked  the dart inside a ring.
+-  c  lock     the dart inside reticle corners.
++  c  lock     the dart inside reticle corners. The shipped default.
+ 
+-    python3 build-icons.py [a|b|c]
++    python3 build-icons.py [a|b|c]     (no argument rebuilds c)
+ 
+ Rewrites favicon.svg and every PNG/ICO from the chosen mark, so switching
+ themes is one command and index.html never has to change. PNG rasterizing
+@@ -102,7 +102,8 @@ def rasterize(jobs):
+ const { chromium } = require('playwright');
+ const jobs = %s;
+ (async () => {
+-  const b = await chromium.launch({ executablePath: process.env.PW_CHROME });
++  // PW_CHROME, when set, names a Chromium binary; otherwise Playwright finds its own.
++  const b = await chromium.launch(process.env.PW_CHROME ? { executablePath: process.env.PW_CHROME } : {});
+   for (const j of jobs) {
+     const p = await b.newPage({ viewport: { width: j.size, height: j.size } });
+     await p.setContent(`<html><body style="margin:0">${j.svg.replace('width="64" height="64"',
+@@ -113,9 +114,7 @@ const jobs = %s;
+   await b.close();
+ })();
+ """ % json.dumps(payload))
+-    chrome = os.environ.get("PW_CHROME") or "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
+-    subprocess.run(["node", script], check=True, cwd=HERE,
+-                   env={**os.environ, "PW_CHROME": chrome})
++    subprocess.run(["node", script], check=True, cwd=HERE, env=dict(os.environ))
+     os.remove(script)
+ 
+ 
+@@ -156,7 +155,7 @@ MANIFEST = """{
+ 
+ 
+ def main():
+-    variant = (sys.argv[1] if len(sys.argv) > 1 else "a").lower()
++    variant = (sys.argv[1] if len(sys.argv) > 1 else "c").lower()
+     if variant not in ("a", "b", "c"):
+         sys.exit("variant must be a, b or c")
+ 
+diff --git a/frontend/static/index.html b/frontend/static/index.html
+index 3f29cd7..f071e49 100644
+--- a/frontend/static/index.html
++++ b/frontend/static/index.html
+@@ -27,8 +27,7 @@
+     --text:          #E6EDF3;
+     --text-muted:    #7C8B99;
+     --amber:         #E8A33D;   /* live drone / primary accent */
+-    --amber-dim:     #7A5A28;
+-    --red:           #E0645A;   /* dropped/error */
++      --red:           #E0645A;   /* dropped/error */
+     --radius: 3px;
+   }
+   *{box-sizing:border-box;}
+@@ -127,6 +126,7 @@
+     transition: width 0.2s ease;
+   }
+   .sidebar.collapsed{ width:0; border-right:none; overflow:hidden; }
++  @media (max-width: 700px){ .sidebar{ width:min(300px, 80vw); } }
+   .sidebar-empty{ padding:24px 16px; color:var(--text-muted); font-size:13px; line-height:1.5; }
+   .track-row{
+     padding:10px 14px; border-bottom:1px solid var(--hairline); cursor:pointer;
+@@ -245,7 +245,7 @@
+   }
+   .track-src{
+     font-size:10px; font-family:'IBM Plex Mono',monospace; color:var(--text-muted);
+-    padding-left:8px; border-left:1px solid var(--border, rgba(255,255,255,0.12));
++    padding-left:8px; border-left:1px solid var(--hairline);
+   }
+   .op-dot{
+     width:6px; height:6px; border-radius:50%; background:var(--text-muted);
+@@ -432,7 +432,7 @@
+   .dp-stations-toggle:hover{ color:var(--text); }
+   .dp-stations-body .dp-row{ padding-left:26px; }
+   .station-list{ display:flex; flex-direction:column; gap:10px; padding:0 14px; }
+-  .station-card{ border:1px solid var(--border, #2a2f36); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:6px; }
++  .station-card{ border:1px solid var(--hairline); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:6px; }
+   .station-card-head{ display:flex; gap:6px; align-items:center; }
+   .station-name{ flex:1 1 auto; min-width:0; }
+   .station-type{ font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace; }
+@@ -507,7 +507,7 @@
+     <div id="map"></div>
+     <div class="scrubber-bar" id="scrubber">
+       <div class="scrub-controls">
+-        <button class="scrub-btn" id="scrub-play">▶</button>
++        <button class="scrub-btn" id="scrub-play" aria-label="Play">▶</button>
+         <input type="range" class="scrub-range" id="scrub-range" min="0" max="0" value="0" step="1"
+                aria-label="Scrub through this flight's recorded points">
+       </div>
+@@ -715,7 +715,7 @@ function refreshMasterChip() {
+ }
+ 
+ // "Wi-Fi - Name" / "Bluetooth - Name" for each (station, transport) that heard a
+-// drone. The feed does not report this yet, so this is empty until it does.
++// drone, or nothing when the detection carried no radio tag (older decoders).
+ const TRANSPORT_LABEL = { wifi: 'Wi-Fi', bluetooth: 'Bluetooth' };
+ function sourceLabels(sources) {
+   if (!Array.isArray(sources)) return [];
+@@ -1271,7 +1271,7 @@ function setPanelOpen(open) {
+   // browsers, which are no worse off than before).
+   if (open) panel.removeAttribute('inert'); else panel.setAttribute('inert', '');
+   main.classList.toggle('sheet-open', open);
+-  if (!open) setPanelExpanded(false);
++  if (!open) setPanelExpanded(false, false);
+   // The map's container just changed size (narrower on desktop, shorter on
+   // mobile). Leaflet doesn't notice on its own; nudge it once the 200ms
+   // transition finishes — same timing as the sidebar collapse. Its default
+@@ -1288,14 +1288,16 @@ function setPanelOpen(open) {
+   }, 220);
+ }
+ 
+-function setPanelExpanded(expanded) {
++function setPanelExpanded(expanded, recentre = true) {
+   if (expanded === panelState.expanded) return;
+   panelState.expanded = expanded;
+   document.getElementById('detail-panel').classList.toggle('expanded', expanded);
+   document.querySelector('.main').classList.toggle('sheet-expanded', expanded);
+   setTimeout(() => {
+     map.invalidateSize();
+-    focusMap(focusedLatLng(), false);   // keep the unit centred as the sheet grows/shrinks
++    // Keep the unit centred as the sheet grows/shrinks. Not when the sheet is
++    // closing: the unit it was showing has just been dismissed.
++    if (recentre) focusMap(focusedLatLng(), false);
+   }, 220);
+ }
+ 
+@@ -1580,7 +1582,7 @@ async function refreshStations() {
+     const data = await res.json();
+     applyStations(data.stations);
+   } catch (e) { /* keep what is shown */ }
+-  renderSettingsPanel();
++  if (mode === 'settings') renderSettingsPanel();
+ }
+ 
+ function renderSettingsPanel() {
+@@ -1810,7 +1812,10 @@ function upsertDrone(d) {
+     entry.flightLoading = true;
+     entry.flightId = d.flight_id;
+     const wantFlight = d.flight_id;
+-    fetch(`/api/flights/${d.flight_id}`).then(r => r.json()).then(data => {
++    fetch(`/api/flights/${d.flight_id}`).then(r => {
++      if (!r.ok) throw new Error(`flight ${r.status}`);
++      return r.json();
++    }).then(data => {
+       // The track may have dropped, or moved on to another flight, while this
+       // was in the air. Writing into a discarded entry would build a trail
+       // nothing references any more and add it to the map, where no code path
+@@ -2192,6 +2197,9 @@ function renderLiveSidebar() {
+         if (e.target.dataset.rename) return; // the pencil handles its own clicks below
+         selectTrack(row.dataset.key);
+       });
++      row.addEventListener('keydown', (e) => {
++        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); row.click(); }
++      });
+     });
+     sidebar.querySelectorAll('[data-rename]').forEach(btn => {
+       btn.addEventListener('click', (e) => {
+@@ -2222,12 +2230,12 @@ function renderLiveSidebar() {
+ function liveRowShell(d) {
+   const key = escapeHtml(d.key);
+   return `
+-    <div class="track-row" data-key="${key}">
++    <div class="track-row" data-key="${key}" tabindex="0" role="button">
+       <div class="row-top">
+         <span class="status-chip" data-f="chip"></span>
+         <span class="name-line" data-f="nameline"></span>
+         <span class="stale-tag" data-f="stale" hidden>STALE</span>
+-        <button class="pencil-btn" data-f="pencil" data-rename="${key}" data-name="">✎</button>
++        <button class="pencil-btn" aria-label="Rename drone" data-f="pencil" data-rename="${key}" data-name="">✎</button>
+       </div>
+       <div class="track-sub">
+         <span data-f="mac"></span>
+@@ -2585,6 +2593,7 @@ async function loadHistoryList(opts = {}) {
+     const limit = more ? HISTORY_PAGE : Math.max(HISTORY_PAGE, historyFlights.length);
+     const res = await fetch(`/api/flights?limit=${limit}&offset=${offset}`);
+     data = await res.json();
++    if (!res.ok || !Array.isArray(data.flights)) throw new Error(`flight list ${res.status}`);
+   } catch (e) {
+     // Without this the promise rejected into nothing and the sidebar sat on
+     // "Loading flights…" forever with no clue why. Nothing retries on its own,
+@@ -2631,11 +2640,11 @@ async function loadHistoryList(opts = {}) {
+     const picked = pickedFlights.has(f.id);
+     const inProgress = !f.ended_at;
+     return `
+-      <div class="track-row${sel}${picked ? ' picked' : ''}" data-flight="${f.id}" data-key="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">
++      <div class="track-row${sel}${picked ? ' picked' : ''}" tabindex="0" role="button" data-flight="${f.id}" data-key="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">
+         <div class="row-top">
+           <span class="status-chip" style="${inProgress ? '' : 'background:#3A4A5A'}"></span>
+           ${nameLineHtml(f.display_name, historyRawIdLabel(f))}
+-          <button class="pencil-btn" data-rename="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">✎</button>
++          <button class="pencil-btn" aria-label="Rename flight" data-rename="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">✎</button>
+         </div>
+         <div class="track-sub">
+           <span class="track-date">${fmtDateTime(f.started_at)}</span>
+@@ -2647,7 +2656,7 @@ async function loadHistoryList(opts = {}) {
+           ${f.segment_count > 1 ? `<span title="Detection dropped out and the same aircraft came back within the merge window, so these were recorded as one flight">${f.segment_count} segments</span>` : ''}
+           ${f.merged_count > 1 ? `<span title="Merged by hand from ${f.merged_count} separate flights">merged ×${f.merged_count}</span>` : ''}
+           ${inProgress ? '<span style="color:#E8A33D">in progress</span>' : ''}
+-          ${admin ? `<input type="checkbox" class="flight-pick" style="margin-left:auto" data-pick="${f.id}" ${picked ? 'checked' : ''} title="Select this flight for merge or delete">` : ''}
++          ${admin ? `<input type="checkbox" class="flight-pick" style="margin-left:auto" data-pick="${f.id}" ${picked ? 'checked' : ''} title="Select this flight for merge or delete" aria-label="Select this flight for merge or delete">` : ''}
+         </div>
+       </div>`;
+   }).join('') + loadMoreHtml();
+@@ -2657,6 +2666,9 @@ async function loadHistoryList(opts = {}) {
+       if (e.target.dataset.rename || e.target.dataset.pick) return;
+       selectHistoryFlight(parseInt(row.dataset.flight, 10));
+     });
++    row.addEventListener('keydown', (e) => {
++      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); row.click(); }
++    });
+   });
+   sidebar.querySelectorAll('[data-pick]').forEach(box => {
+     box.addEventListener('click', (e) => {
+@@ -2923,10 +2935,9 @@ function setSidebarCollapsed(collapsed) {
+ }
+ 
+ function renderSidebar() {
++  // Only the live list refreshes on data. History loads its own list when its
++  // tab opens, and settings renders through renderSettingsPanel().
+   if (mode === 'live') renderLiveSidebar();
+-  else if (mode === 'history') loadHistoryList();
+-  // 'settings' mode renders its own panel via renderSettingsPanel() and is
+-  // untouched by live/history data updates.
+ }
+ 
+ function switchMode(next) {
+@@ -2985,7 +2996,7 @@ function setConnState(connected, label) {
+ 
+ function applyHealth(health) {
+   lastHealth = health || {};
+-  ['zmq', 'bluetooth', 'wifi'].forEach(ch => {
++  ['zmq'].forEach(ch => {
+     const dot = document.getElementById(`health-${ch}-dot`);
+     if (!dot) return;
+     const state = (health && health[ch]) || 'red';
+@@ -3022,9 +3033,8 @@ function nodeTitle(s) {
+ // The hover card: a title, then the two sniffer lights. Green = that script is
+ // running on the station, red = it isn't (or the agent has gone quiet).
+ function nodeHoverHtml(s) {
+-  const row = (label, c) => sniffRowHtml(label, c);
+   return `<div class="tt-title">${nodeTitle(s)}</div>` +
+-    row('Wi-Fi', s.wifi) + row('Bluetooth', s.bluetooth);
++    sniffRowHtml('Wi-Fi', s.wifi) + sniffRowHtml('Bluetooth', s.bluetooth);
+ }
+ 
+ function applyStations(list) {
+@@ -3208,9 +3218,17 @@ function bindHealthItem(item) {
+   if (supportsRealHover) {
+     item.addEventListener('mouseenter', show);
+     item.addEventListener('mouseleave', hide);
+-    item.addEventListener('focus', show);
+-    item.addEventListener('blur', hide);
+   }
++  // Keyboard focus shows the card. A tap also focuses the chip, so focus only
++  // counts when the browser is showing the focus ring (keyboard).
++  item.addEventListener('focus', () => { if (item.matches(':focus-visible')) show(); });
++  item.addEventListener('blur', hide);
++  item.addEventListener('keydown', (e) => {
++    if (e.key === 'Enter' || e.key === ' ') {
++      e.preventDefault();
++      item.click();
++    }
++  });
+   // Tap-to-toggle — the only interaction touch devices get, deliberately,
+   // per the note above.
+   item.addEventListener('click', (e) => {
+diff --git a/frontend/test_nodes.py b/frontend/test_nodes.py
+new file mode 100644
+index 0000000..6cbf7f5
+--- /dev/null
++++ b/frontend/test_nodes.py
+@@ -0,0 +1,274 @@
++"""Tests for multi-node support (nodes.py and the station-aware ingest path).
++
++    python3 test_nodes.py
++
++Needs the server's dependencies (pyzmq, fastapi). If they aren't installed,
++point DRONEID_TEST_STUBS at a stubs.py that fakes them. Uses a throwaway
++SQLite file; nothing touches droneid.db.
++"""
++import asyncio, json, os, sys, tempfile, time
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++sys.path.insert(0, HERE)
++stubs_path = os.environ.get("DRONEID_TEST_STUBS")
++if stubs_path:
++    sys.path.insert(0, os.path.dirname(stubs_path))
++    import stubs; stubs.install()
++
++import db
++import main
++import nodes
++
++fails = []
++def check(label, cond, extra=""):
++    print(f"  {'PASS' if cond else 'FAIL'}  {label}{('  ' + str(extra)) if extra and not cond else ''}")
++    if not cond:
++        fails.append(label)
++
++def raises(fn, *args):
++    try:
++        fn(*args)
++    except nodes.ConfigError as e:
++        return str(e)
++    return None
++
++MASTER_ADDR = "tcp://127.0.0.1:4224"
++
++print("\n[nodes.json parsing]")
++check("no nodes.json -> a single master on the local decoder",
++      [n.id for n in nodes.load_nodes("/nonexistent/nodes.json", MASTER_ADDR)] == ["master"])
++m = nodes.parse_nodes({"stations": [{"id": 1, "ip": "100.100.10.90", "lat": 26.1, "lon": -97.2}]}, MASTER_ADDR)
++check("master is implied and first", m[0].id == "master" and m[0].bursts == MASTER_ADDR and m[0].number is None)
++check("a station with lat/lon is static", m[1].kind == "static" and (m[1].lat, m[1].lon) == (26.1, -97.2))
++check("station id is node-N with number N", m[1].id == "node-1" and m[1].number == 1)
++check("default name is Node N", m[1].name == "Node 1")
++check("ports come from the ip", m[1].bursts == "tcp://100.100.10.90:4224" and m[1].status == "tcp://100.100.10.90:4230")
++r2 = nodes.parse_nodes({"stations": [{"id": 2, "ip": "100.100.10.91"}]}, MASTER_ADDR)[1]
++check("no position -> roaming with a GPS beacon", r2.kind == "roaming" and r2.status == "tcp://100.100.10.91:4230" and r2.lat is None)
++check("id may be given as digits", nodes.parse_nodes({"stations": [{"id": "3", "ip": "100.100.10.92"}]}, MASTER_ADDR)[1].id == "node-3")
++check("the master may not be listed", "is not allowed" in (raises(nodes.parse_nodes, {"stations": [
++    {"id": "master", "ip": "100.100.10.90"}]}, MASTER_ADDR) or ""))
++check("an old file's name field is refused", "unknown field 'name'" in (raises(nodes.parse_nodes, {"stations": [
++    {"id": 1, "ip": "100.100.10.90", "name": "Highway"}]}, MASTER_ADDR) or ""))
++check("an old file's kind field is refused", "unknown field 'kind'" in (raises(nodes.parse_nodes, {"stations": [
++    {"id": 1, "ip": "100.100.10.90", "kind": "static"}]}, MASTER_ADDR) or ""))
++check("an old file's bursts field is refused", "unknown field 'bursts'" in (raises(nodes.parse_nodes, {"stations": [
++    {"id": 1, "ip": "100.100.10.90", "bursts": "tcp://100.100.10.90:4224"}]}, MASTER_ADDR) or ""))
++check("the old nodes key is refused", "unknown top-level field" in (raises(nodes.parse_nodes, {"nodes": [
++    {"id": 1, "ip": "100.100.10.90"}]}, MASTER_ADDR) or ""))
++check("text ids are refused", "from 1 to 999" in (raises(nodes.parse_nodes, {"stations": [
++    {"id": "highway", "ip": "100.100.10.90"}]}, MASTER_ADDR) or ""))
++check("id 0 refused", "from 1 to 999" in (raises(nodes.parse_nodes, {"stations": [
++    {"id": 0, "ip": "100.100.10.90"}]}, MASTER_ADDR) or ""))
++check("id 1000 refused", "from 1 to 999" in (raises(nodes.parse_nodes, {"stations": [
++    {"id": 1000, "ip": "100.100.10.90"}]}, MASTER_ADDR) or ""))
++check("station without an id refused", "from 1 to 999" in (raises(nodes.parse_nodes, {"stations": [
++    {"ip": "100.100.10.90"}]}, MASTER_ADDR) or ""))
++check("station without an ip refused", "ip must be" in (raises(nodes.parse_nodes, {"stations": [
++    {"id": 1}]}, MASTER_ADDR) or ""))
++check("lat without lon refused", "given together" in (raises(nodes.parse_nodes, {"stations": [
++    {"id": 1, "ip": "100.100.10.90", "lat": 26}]}, MASTER_ADDR) or ""))
++check("latitude out of range refused", "out of range" in (raises(nodes.parse_nodes, {"stations": [
++    {"id": 1, "ip": "100.100.10.90", "lat": 95, "lon": 0}]}, MASTER_ADDR) or ""))
++check("duplicate id refused", "more than once" in (raises(nodes.parse_nodes, {"stations": [
++    {"id": 1, "ip": "100.100.10.90"}, {"id": "1", "ip": "100.100.10.91"}]}, MASTER_ADDR) or ""))
++check("duplicate ip refused", "more than once" in (raises(nodes.parse_nodes, {"stations": [
++    {"id": 1, "ip": "100.100.10.90"}, {"id": 2, "ip": "100.100.10.90"}]}, MASTER_ADDR) or ""))
++check("a bad ip refused", "ip must be" in (raises(nodes.parse_nodes, {"stations": [
++    {"id": 1, "ip": "tcp://100.100.10.90:4224"}]}, MASTER_ADDR) or ""))
++
++print("\n[the shipped example config]")
++ex = nodes.parse_nodes(json.load(open(os.path.join(HERE, "nodes.example.json"))), MASTER_ADDR)
++hw = {n.id: n for n in ex}.get("node-1")
++check("example station 1 is static", hw is not None and hw.number == 1 and hw.kind == "static")
++check("station 1 starting position", hw is not None and (hw.lat, hw.lon) == (40.0, -100.0))
++check("station 1 reports from its address", hw is not None and hw.bursts == "tcp://100.64.0.10:4224")
++
++print("\n[node status reports]")
++ok = nodes.parse_status({"type": "node_status", "fix": True, "lat": 26.0, "lon": -97.1, "alt": 12.5})
++check("valid fix parses", ok and ok["fix"] and ok["lat"] == 26.0, ok)
++check("zero/zero is treated as no fix", nodes.parse_status(
++    {"type": "node_status", "fix": True, "lat": 0, "lon": 0})["fix"] is False)
++check("wrong type ignored", nodes.parse_status({"type": "other"}) is None)
++check("out-of-range fix ignored", nodes.parse_status(
++    {"type": "node_status", "fix": True, "lat": 200, "lon": 0}) is None)
++check("non-dict ignored", nodes.parse_status("nonsense") is None)
++
++print("\n[registry]")
++reg = nodes.NodeRegistry(nodes.parse_nodes({"stations": [
++    {"id": 1, "ip": "100.100.10.90", "lat": 26.1, "lon": -97.2},
++    {"id": 2, "ip": "100.100.10.91"},
++]}, MASTER_ADDR))
++now = 1000.0
++check("static position comes from config", reg.position("node-1") == (26.1, -97.2))
++check("roaming with no report has no position", reg.position("node-2") is None)
++check("unknown station cannot add itself", reg.note_status("node-9", ok | {"alt": None, "speed": None, "track": None, "sats": None}, now) is False)
++reg.note_status("node-1", {"fix": True, "lat": 1, "lon": 1, "alt": None, "speed": None, "track": None, "sats": None}, now)
++check("a static station can't be moved by a report", reg.position("node-1") == (26.1, -97.2))
++reg.note_status("node-2", ok | {"alt": 12.5, "speed": 4.0, "track": 90.0, "sats": 9}, now)
++check("roaming moves with its fix", reg.position("node-2") == (26.0, -97.1))
++d = reg.describe("node-2", now + 10, "green")
++check("fresh report is not stale", d["stale"] is False and d["status_age"] == 10.0, d)
++d = reg.describe("node-2", now + nodes.STATUS_STALE_S + 1, "green")
++check("old report is stale but keeps last position", d["stale"] is True and d["lat"] == 26.0, d)
++reg.note_status("node-2", {"fix": False, "lat": None, "lon": None, "alt": None, "speed": None, "track": None, "sats": 0}, now + 5)
++check("losing the fix keeps the last known position", reg.position("node-2") == (26.0, -97.1))
++check("master position comes from the home point", reg.describe("node-1", now, "green")["lat"] == 26.1)
++
++print("\n[sniffer health on the map]")
++import node_agent as na
++w = na.SnifferWatch("wifi", "127.0.0.1:1", timeout=12.0)
++check("a sniffer not connected is red", w.status(100.0) == "red")
++w.note_connected(True)
++check("connected but never heard from is yellow", w.status(100.0) == "yellow")
++w.note_message(100.0)
++check("messages arriving is green", w.status(105.0) == "green")
++check("quiet past the timeout is yellow", w.status(113.0) == "yellow")
++w.note_connected(False)
++check("connection lost is red even with recent messages", w.status(101.0) == "red")
++bt = na.SnifferWatch("bluetooth", "127.0.0.1:2")
++check("agent health covers both sniffers", na.sniffer_health({"wifi": w, "bluetooth": bt}, now=100.0)
++      == {"wifi": "red", "bluetooth": "red"})
++rep_h = na.build_status(fix=None, now=5.0, health={"wifi": "green", "bluetooth": "yellow"})
++check("agent reports sniffer states", rep_h["health"] == {"wifi": "green", "bluetooth": "yellow"}, rep_h)
++check("master reads the states from a report", nodes.parse_status(rep_h)["health"] == {"wifi": "green", "bluetooth": "yellow"})
++check("an older agent's true/false still reads",
++      nodes.parse_status(na.build_status(fix=None, now=5.0, health={"wifi": True, "bluetooth": False}))["health"]
++      == {"wifi": "green", "bluetooth": "red"})
++check("a report without health is accepted", nodes.parse_status(na.build_status(fix=None, now=5.0))["health"] is None)
++hreg = nodes.NodeRegistry(nodes.parse_nodes({"stations": [
++    {"id": 1, "ip": "100.100.10.90", "lat": 26.1, "lon": -97.2},
++    {"id": 2, "ip": "100.100.10.91"}]}, MASTER_ADDR))
++hreg.note_status("node-1", nodes.parse_status(rep_h), now)
++d1 = hreg.describe("node-1", now + 1, "green")
++check("a fixed station's health is kept", d1["wifi"] == "green" and d1["bluetooth"] == "yellow", d1)
++check("fixed station still has a fixed position", hreg.position("node-1") == (26.1, -97.2))
++check("the number is on the station", d1["number"] == 1, d1)
++d2 = hreg.describe("node-2", now + 1, "green")
++check("no report yet reads as red", d2["wifi"] == "red" and d2["bluetooth"] == "red", d2)
++hreg.note_status("node-2", nodes.parse_status(na.build_status(fix=None, now=5.0, health={"wifi": "green", "bluetooth": "green"})), now)
++check("a roaming station's health is kept", hreg.describe("node-2", now + 1, "green")["bluetooth"] == "green")
++check("an old report stops counting", hreg.describe("node-2", now + nodes.STATUS_STALE_S + 5, "green")["wifi"] == "red")
++check("the master has no sniffer lights", hreg.describe("master", now, "green")["wifi"] is None)
++
++print("\n[cross-station duplicates]")
++recent = []
++nodes.remember_point(recent, "master", 26.0, -97.1, 555, now)
++check("same broadcast from another station is a duplicate",
++      nodes.is_cross_station_duplicate(recent, "node-1", 26.0, -97.1, 555, now + 0.3))
++check("same station repeating itself is NOT a duplicate",
++      not nodes.is_cross_station_duplicate(recent, "master", 26.0, -97.1, 555, now + 0.3))
++check("a later Remote ID timestamp is a new point",
++      not nodes.is_cross_station_duplicate(recent, "node-1", 26.0, -97.1, 556, now + 0.3))
++check("a different position is a new point",
++      not nodes.is_cross_station_duplicate(recent, "node-1", 26.001, -97.1, 555, now + 0.3))
++recent2 = []
++nodes.remember_point(recent2, "master", 26.0, -97.1, None, now)
++check("unstamped point within the window is a duplicate",
++      nodes.is_cross_station_duplicate(recent2, "node-1", 26.0, -97.1, None, now + 1.0))
++check("unstamped point after the window is not",
++      not nodes.is_cross_station_duplicate(recent2, "node-1", 26.0, -97.1, None, now + 10))
++
++print("\n[node beacon: gpsd parsing and reports]")
++import json, socket, threading
++import node_agent as na
++tpv_fix = json.dumps({"class": "TPV", "mode": 3, "lat": 26.01, "lon": -97.15, "altMSL": 12.0, "speed": 3.5, "track": 88.0})
++tpv_nofix = json.dumps({"class": "TPV", "mode": 1})
++sky = json.dumps({"class": "SKY", "uSat": 7})
++check("3D fix parses", na.parse_gpsd_line(tpv_fix)["fix"] is True and na.parse_gpsd_line(tpv_fix)["lat"] == 26.01)
++check("no-fix TPV has no position", na.parse_gpsd_line(tpv_nofix)["fix"] is False and na.parse_gpsd_line(tpv_nofix)["lat"] is None)
++check("satellite count parses", na.parse_gpsd_line(sky) == {"kind": "SKY", "sats": 7})
++check("other gpsd classes ignored", na.parse_gpsd_line(json.dumps({"class": "VERSION"})) is None)
++check("garbage ignored", na.parse_gpsd_line("not json") is None)
++rep_fix = na.build_status(fix=na.parse_gpsd_line(tpv_fix), sats=7, now=5.0)
++check("roaming report with a fix", rep_fix["fix"] and rep_fix["lat"] == 26.01 and rep_fix["sats"] == 7, rep_fix)
++rep_nofix = na.build_status(fix=na.parse_gpsd_line(tpv_nofix), now=5.0)
++check("roaming report without a fix carries no position", rep_nofix["fix"] is False and rep_nofix["lat"] is None)
++rep_static = na.build_status(static=(26.1, -97.2), now=5.0)
++check("fixed node always reports its set position", rep_static["fix"] and rep_static["lat"] == 26.1)
++check("a report the master accepts", nodes.parse_status(rep_fix) is not None and nodes.parse_status(rep_nofix) is not None
++      and nodes.parse_status(rep_static) is not None)
++
++srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
++port = srv.getsockname()[1]
++def fake_gpsd():
++    conn, _ = srv.accept()
++    conn.recv(256)                       # the ?WATCH line
++    conn.sendall((tpv_fix + "\n" + sky + "\n").encode())
++    time.sleep(2)
++    conn.close()
++threading.Thread(target=fake_gpsd, daemon=True).start()
++client = na.GpsdClient("127.0.0.1", port, timeout=2.0)
++fix, sats = client.poll(budget_s=1.0)
++check("gpsd client reads the fix and satellite count", fix and fix["fix"] and sats == 7, (fix, sats))
++client.close()
++dead = na.GpsdClient("127.0.0.1", 1, timeout=0.5)
++fix, sats = dead.poll(budget_s=0.5)
++check("unreachable gpsd reports no fix instead of crashing", fix is None and sats is None)
++srv.close()
++
++print("\n[ingest: one drone heard by two stations]")
++tmp = tempfile.mkdtemp()
++db.init(os.path.join(tmp, "t.db"))
++for d_ in (main.store.tracks, main.store.mac_to_key, main.active_flights, main.last_status_sent, main.catalog_nicknames):
++    d_.clear()
++main.pending_refile.clear()
++main.manager.broadcast = lambda *_a, **_k: asyncio.sleep(0)   # no clients in tests
++main.fleet = nodes.NodeRegistry(nodes.parse_nodes({"stations": [
++    {"id": 1, "ip": "100.100.10.90", "lat": 26.1, "lon": -97.2}]}, MASTER_ADDR))
++main.discord_webhook_url = None
++
++MAC = "aa:bb:cc:00:00:42"
++def burst(lat, lon, loc_ts):
++    return [
++        {"MAC": MAC},
++        {"Basic ID": {"id": "SER-MULTI", "id_type": "Serial Number"}},
++        {"Location/Vector Message": {"latitude": lat, "longitude": lon, "timestamp": loc_ts,
++                                     "geodetic_altitude": "80 m"}},
++    ]
++
++async def hear(station, lat, lon, loc_ts):
++    msgs = burst(lat, lon, loc_ts)
++    mac, cleaned = main.extract_bursts(msgs)[0]
++    track = main.store.apply_burst(mac, cleaned, station_id=station)
++    await main.persist_update(track)
++    return track
++
++def points():
++    conn = db._require_conn()
++    return [dict(r) for r in conn.execute("SELECT station_id, lat, lon, loc_timestamp FROM track_points ORDER BY id")]
++
++async def scenario():
++    await hear("master", 26.0, -97.1, "1000")
++    await hear("node-1", 26.0, -97.1, "1000")      # same broadcast, heard by north
++    await hear("master", 26.0, -97.1, "1000")     # master repeats itself: stored, as before
++    await hear("node-1", 26.0005, -97.1005, "1001")  # the drone has moved on
++asyncio.run(scenario())
++pts = points()
++check("a second station's copy of a broadcast is skipped; a station's own repeats are kept",
++      [p["station_id"] for p in pts] == ["master", "master", "node-1"], pts)
++t = main.store.tracks["SER-MULTI"]
++check("track remembers every station that heard it", t.seen_by == ["master", "node-1"], t.seen_by)
++check("track's latest station is the last one to report", t.station_id == "node-1", t.station_id)
++snap = t.to_dict()
++check("recent_points stays out of what clients receive", "recent_points" not in snap)
++check("seen_by reaches clients", snap["seen_by"] == ["master", "node-1"], snap.get("seen_by"))
++
++print("\n[schema]")
++cols = {r[1] for r in db._require_conn().execute("PRAGMA table_info(track_points)")}
++check("track_points has station_id", "station_id" in cols)
++
++print("\n[stations for the map]")
++main.station_cache = {"lat": 26.0, "lon": -97.1}
++snap = main.stations_snapshot(now=time.time())
++by_id = {s["id"]: s for s in snap}
++check("every configured station is listed", set(by_id) == {"master", "node-1"}, list(by_id))
++check("master sits at the home point", by_id["master"]["lat"] == 26.0 and by_id["master"]["kind"] == "master")
++check("static node sits at its configured point", by_id["node-1"]["lat"] == 26.1 and by_id["node-1"]["stale"] is False)
++check("master link follows the local feed", by_id["master"]["link"] in ("red", "green", "yellow"))
++
++print()
++if fails:
++    print(f"{len(fails)} FAILED: {fails}")
++    sys.exit(1)
++print("ALL PASS")
+diff --git a/requirements.txt b/requirements.txt
+index faef759..5ef3bd1 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,6 +1,6 @@
+ scapy
+ pytz
+-zmq
++pyzmq
+ pyserial
+ pwinput
+ 
+diff --git a/setup.sh b/setup.sh
+index 63f94f4..e4d5bc7 100755
+--- a/setup.sh
++++ b/setup.sh
+@@ -1,6 +1,20 @@
+ #!/bin/bash
+-python -m venv .venv
+-source .venv/bin/activate
+-sudo setcap 'CAP_NET_RAW=eip CAP_NET_ADMIN=eip' $(readlink -f .venv/bin/python3)
++# One-time setup: a virtualenv with the requirements, and raw-socket capabilities
++# so the sniffers can run without sudo.
++set -euo pipefail
++cd "$(dirname "$0")"
++
++python3 -m venv .venv
+ .venv/bin/pip3 install -r requirements.txt
+ 
++# The capabilities go on the interpreter binary. .venv/bin/python3 is a symlink,
++# so setcap lands on the system interpreter it resolves to, and every user of that
++# interpreter gets the capabilities. Run the receivers under systemd with
++# AmbientCapabilities instead if that is too broad for the machine.
++sudo setcap 'cap_net_raw,cap_net_admin+eip' "$(readlink -f .venv/bin/python3)"
++
++# The Wi-Fi receiver switches the adapter with these tools (Library/utils.py).
++for tool in iw iwconfig ip rfkill; do
++    command -v "$tool" >/dev/null || echo "missing: $tool (for the Wi-Fi receiver: sudo apt install iw wireless-tools rfkill)"
++done
++echo "Setup complete. Activate with: source .venv/bin/activate"
+diff --git a/wifi_receiver.py b/wifi_receiver.py
+index 66debdf..8ac807c 100755
+--- a/wifi_receiver.py
++++ b/wifi_receiver.py
+@@ -3,7 +3,6 @@
+ import os
+ import sys
+ import time
+-from subprocess import Popen, PIPE, STDOUT
+ import argparse
+ import json
+ from pathlib import Path
+@@ -11,10 +10,10 @@ import socket as pysock
+ from threading import Thread, Event
+ 
+ from Library.utils import search_interfaces, get_iw_interfaces, extract_wifi_if_details, enable_monitor_mode, \
+-    set_interface_channel, cexec, enable_managed_mode
++    set_interface_channel, enable_managed_mode, have_raw_caps
+ from OpenDroneID.wifi_parser import oui_to_parser, parse_nan_action_frame
+ from scapy.all import *
+-from scapy.layers.dot11 import Dot11EltVendorSpecific, Dot11, Dot11Elt
++from scapy.layers.dot11 import Dot11EltVendorSpecific, Dot11
+ from scapy.packet import Raw
+ import zmq
+ 
+@@ -22,18 +21,6 @@ verbose = False
+ context = zmq.Context()
+ socket = None
+ 
+-def _have_raw_caps() -> bool:
+-    """Return True if current process can open an AF_PACKET raw socket."""
+-    try:
+-        s = pysock.socket(pysock.AF_PACKET, pysock.SOCK_RAW, 0)
+-        s.close()
+-        return True
+-    except PermissionError:
+-        return False
+-    except Exception:
+-        # Treat other errors as non-fatal for this probe.
+-        return True
+-
+ def _list_wireless_ifaces() -> list[str]:
+     sys_class = Path("/sys/class/net")
+     if not sys_class.exists():
+@@ -87,14 +74,18 @@ def channel_hopper(interface: str, channels: tuple[int, int], dwell_times: tuple
+         idx = (idx + 1) % 2
+ 
+ def pcapng_parser(filename: str):
++    """Replays the capture in a loop until Ctrl-C. A file with no packets is
++    read once and then ends, rather than spinning forever."""
+     while True:
++        count = 0
+         for packet in PcapReader(filename):
++            count += 1
+             try:
+                 filter_frames(packet)
+-            except Exception as err:
+-                pass
+-            except KeyboardInterrupt:
+-                break
++            except Exception:
++                continue   # one frame the parser can't read doesn't stop the replay
++        if count == 0:
++            return
+ 
+ def filter_frames(packet: Packet) -> None:
+     global socket
+@@ -116,13 +107,19 @@ def filter_frames(packet: Packet) -> None:
+         if packet.haslayer(Dot11EltVendorSpecific):
+             vendor_spec: Dot11EltVendorSpecific = packet.getlayer(Dot11EltVendorSpecific)
+             while vendor_spec:
+-                parser = oui_to_parser(vendor_spec.oui, vendor_spec.info)
++                try:
++                    parser = oui_to_parser(vendor_spec.oui, vendor_spec.info)
++                except Exception as e:
++                    if verbose:
++                        print(f"Error parsing vendor element: {e}")
++                    parser = None
+                 if parser is not None:
+-                    if "DRI" in parser.msg:
+-                        macdb["DroneID"][mac] = parser.msg["DRI"]
+-                        parsed = True
+-                    elif "Beacon" in parser.msg:
+-                        macdb["DroneID"][mac] = parser.msg["Beacon"]
++                    body = parser.msg.get("DRI", parser.msg.get("Beacon"))
++                    # Only a payload with OpenDroneID AdvData is a drone. A
++                    # frame that parsed to an empty body (DJI Wi-Fi, NAN beacon)
++                    # is skipped rather than published as an empty track.
++                    if isinstance(body, dict) and "AdvData" in body:
++                        macdb["DroneID"][mac] = body
+                         parsed = True
+                     break
+                 # Try next vendor specific element
+@@ -190,10 +187,10 @@ def main():
+     args = aparse.parse_args()
+ 
+     # Runtime capability check (works with systemd AmbientCapabilities or setcap)
+-    if os.geteuid() != 0 and not _have_raw_caps():
++    if os.geteuid() != 0 and not have_raw_caps():
+         print(
+             "Missing CAP_NET_RAW/CAP_NET_ADMIN. Either:\n"
+-            f"  sudo setcap 'CAP_NET_RAW+eip CAP_NET_ADMIN+eip' {sys.executable}\n"
++            f"  sudo setcap 'cap_net_raw,cap_net_admin+eip' {sys.executable}\n"
+             "or run via systemd with AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN.\n"
+         )
+         exit(1)
+@@ -259,6 +256,7 @@ def main():
+             hop_thread.start()
+ 
+     zthread = None
++    zmq_stop = Event()
+     if args.zmq:
+         socket = context.socket(zmq.XPUB)
+         socket.setsockopt(zmq.XPUB_VERBOSE, True)
+@@ -267,16 +265,20 @@ def main():
+         socket.bind(url)
+ 
+         def zmq_thread(socket):
+-            try:
+-                while True:
++            poller = zmq.Poller()
++            poller.register(socket, zmq.POLLIN)
++            while not zmq_stop.is_set():
++                try:
++                    if socket not in dict(poller.poll(500)):
++                        continue
+                     event = socket.recv()
+-                    # Event is one byte 0=unsub or 1=sub, followed by topic
+-                    if event[0] == 1:
+-                        log("new subscriber for", event[1:])
+-                    elif event[0] == 0:
+-                        log("unsubscribed", event[1:])
+-            except zmq.error.ContextTerminated:
+-                pass
++                except zmq.error.ContextTerminated:
++                    break
++                # Event is one byte 0=unsub or 1=sub, followed by topic
++                if event[0] == 1:
++                    log("new subscriber for", event[1:])
++                elif event[0] == 0:
++                    log("unsubscribed", event[1:])
+ 
+         def log(*msg):
+             s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+@@ -305,7 +307,9 @@ def main():
+             hop_stop_evt.set()
+             hop_thread.join(timeout=2)
+         if args.zmq:
+-            zthread.join()
++            zmq_stop.set()
++            zthread.join(timeout=2)
++            socket.close(linger=0)
+         if interface is not None:
+             i2d = extract_wifi_if_details(interface)
+             enable_managed_mode(i2d, interface)
+diff --git a/zmq_decoder.py b/zmq_decoder.py
+index fd52938..463738a 100755
+--- a/zmq_decoder.py
++++ b/zmq_decoder.py
+@@ -13,6 +13,7 @@ from OpenDroneID.utils import structhelper_io
+ 
+ verbose = False  # Global variable to control verbosity
+ stop = False
++UART_MAX_BUFFER = 65536  # a partial object longer than this is noise; drop it
+ 
+ 
+ def log(*msg):
+@@ -24,23 +25,26 @@ def log(*msg):
+ 
+ 
+ def zmq_thread(pub_socket):
+-    """Handles ZMQ subscriber notifications."""
++    """Handles ZMQ subscriber notifications. Polls rather than blocking on
++    recv, so shutdown can join this thread before the socket is closed."""
+     global stop
+-    try:
+-        while not stop:
+-            try:
+-                event = pub_socket.recv()
+-                if verbose:
+-                    if event[0] == 1:
+-                        log("New subscriber for", event[1:])
+-                    elif event[0] == 0:
+-                        log("Unsubscribed", event[1:])
+-            except zmq.error.ContextTerminated:
+-                break
+-            except Exception as e:
+-                log("ZMQ Thread Error:", e)
+-    except zmq.error.ContextTerminated:
+-        pass
++    poller = zmq.Poller()
++    poller.register(pub_socket, zmq.POLLIN)
++    while not stop:
++        try:
++            if pub_socket not in dict(poller.poll(500)):
++                continue
++            event = pub_socket.recv()
++        except zmq.error.ContextTerminated:
++            break
++        except zmq.ZMQError as e:
++            log("ZMQ Thread Error:", e)
++            continue
++        if verbose and event:
++            if event[0] == 1:
++                log("New subscriber for", event[1:])
++            elif event[0] == 0:
++                log("Unsubscribed", event[1:])
+ 
+ 
+ def decoder_thread(socket, pub):
+@@ -70,13 +74,65 @@ def decoder_thread(socket, pub):
+                     if verbose:
+                         print("ZMQ Data Received:", json.dumps(dc, indent=2))
+ 
+-                    # Process Bluetooth/Wi-Fi data
+-                    process_decoded_data(dc, pub)
++                    # Process Bluetooth/Wi-Fi data. A message that fails to
++                    # decode is skipped; it must not end this thread, which
++                    # would silently stop every later detection.
++                    try:
++                        process_decoded_data(dc, pub)
++                    except Exception as e:
++                        if verbose:
++                            log("Skipped a message that did not decode:", e)
+     except zmq.error.ContextTerminated:
+         pass
+     except Exception as e:
+         if verbose:
+             log("Decoder Thread Error:", e)
++    finally:
++        # Closed here, on the thread that owns it, so the context can terminate.
++        socket.close(linger=0)
++
++
++def split_json_objects(buf: str):
++    """Pull complete top-level JSON objects out of a UART byte stream.
++
++    Brace counting alone breaks on a '{' or '}' inside a string value, so this
++    scanner tracks string state too. Returns (objects, remainder): remainder is
++    an unfinished object (kept for the next read) or "" when there is none.
++    """
++    objects = []
++    depth = 0
++    in_str = False
++    esc = False
++    start = None
++    for i, ch in enumerate(buf):
++        if in_str:
++            if esc:
++                esc = False
++            elif ch == "\\":
++                esc = True
++            elif ch == '"':
++                in_str = False
++            continue
++        if ch == '"':
++            in_str = True
++        elif ch == "{":
++            if depth == 0:
++                start = i
++            depth += 1
++        elif ch == "}" and depth > 0:
++            depth -= 1
++            if depth == 0:
++                try:
++                    objects.append(json.loads(buf[start:i + 1]))
++                except json.JSONDecodeError as e:
++                    log("UART JSON Decode Error:", e)
++                start = None
++    if depth == 0:
++        return objects, ""
++    remainder = buf[start:]
++    if len(remainder) > UART_MAX_BUFFER:
++        remainder = ""
++    return objects, remainder
+ 
+ 
+ def uart_listener(uart_device, pub):
+@@ -97,26 +153,16 @@ def uart_listener(uart_device, pub):
+                 while not stop:
+                     if ser.in_waiting > 0:
+                         try:
+-                            data = ser.read(ser.in_waiting).decode('utf-8')
+-                            buffer += data
+-
+-                            # Detect complete JSON object(s)
+-                            if buffer.count("{") == buffer.count("}"):
++                            data = ser.read(ser.in_waiting).decode('utf-8', errors='replace')
++                            if verbose:
++                                print("UART received:", data)
++                            objects, buffer = split_json_objects(buffer + data)
++                            for dc in objects:
++                                json_data = json.dumps(dc)
++                                if pub:
++                                    pub.send_string(json_data)
+                                 if verbose:
+-                                    print("UART received:", buffer)
+-
+-                                try:
+-                                    dc = json.loads(buffer)
+-                                    json_data = json.dumps(dc)
+-                                    if pub:
+-                                        pub.send_string(json_data)
+-                                    if verbose:
+-                                        print(f"Forwarded via ZMQ: {json_data}")
+-
+-                                except json.JSONDecodeError as e:
+-                                    log("UART JSON Decode Error:", e)
+-
+-                                buffer = ""  # Always reset buffer afterward
++                                    print(f"Forwarded via ZMQ: {json_data}")
+ 
+                         except Exception as e:
+                             log("UART Read Error:", e)
+@@ -282,6 +328,9 @@ def main():
+     aparse.add_argument("--uart", help="UART device for pre-decoded ESP32 data (e.g., /dev/ttyACM0)")
+     aparse.add_argument("--dji", help="DJI receiver ZMQ endpoint (e.g., 127.0.0.1:4221)")
+     args = aparse.parse_args()
++    if (args.uart or args.dji) and not args.zmq:
++        # Their output is only published over ZMQ; without -z it would be dropped.
++        aparse.error("--uart and --dji need -z: their data is only published over ZMQ")
+ 
+     verbose = args.verbose
+ 
+@@ -301,6 +350,8 @@ def main():
+         zthread = None
+ 
+     # Set up UART listener
++    uart_thread = None
++    dji_thread = None
+     if args.uart:
+         uart_thread = Thread(target=uart_listener, args=(args.uart, pub), daemon=True)
+         uart_thread.start()
+@@ -334,18 +385,17 @@ def main():
+     except KeyboardInterrupt:
+         log("Interrupt received, shutting down...")
+     finally:
++        # Threads stop on their own within a poll interval; join them before
++        # the context is terminated, since term() waits for open sockets.
+         stop = True
++        for thread in subs:
++            thread.join(timeout=5)
++        for thread in (uart_thread, dji_thread, zthread):
++            if thread is not None:
++                thread.join(timeout=5)
+         if pub:
+-            pub.close()
++            pub.close(linger=0)
+         sctx.term()
+-        if args.uart:
+-            uart_thread.join()
+-        for thread in subs:
+-            thread.join()
+-        if args.dji:
+-            dji_thread.join()
+-        if zthread:
+-            zthread.join()
+         log("Shutdown complete.")
+ 
+ 
