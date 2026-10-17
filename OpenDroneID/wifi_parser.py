@@ -25,7 +25,7 @@ class Astm_F3411_22a_adv_data:
         self.msg = {"AdvData":data.hex()}
 
     def __repr__(self):
-        return self.msg
+        return json.dumps(self.msg)
 
 class Astm_F3411_22a_nan_service_info:
     def __init__(self, data):
@@ -34,7 +34,7 @@ class Astm_F3411_22a_nan_service_info:
         self.msg = {"AdvData":bt.read().hex()}
 
     def __repr__(self):
-        return self.msg
+        return json.dumps(self.msg)
 
 class Astm_F3411_22a_nan_desc:
     attribute_id = None
@@ -58,19 +58,22 @@ class Astm_F3411_22a_nan_desc:
             self.service_control = bt.byte()
             self.service_info_length = bt.byte()
             self.service_info = Astm_F3411_22a_nan_service_info(bt.read())
-            self.msg = {"NAN discovery":self.service_info}
+            self.msg_counter = self.service_info.msg_counter
+            self.msg = self.service_info.msg
         elif self.attribute_id == 0:
             self.master_performance = bt.byte()
             self.random_factor = bt.byte()
             self.cluster_attribute_id = bt.byte()
             self.anchor_master_info_length = bt.short()
             self.anchor_master_info = bt.bytes(self.anchor_master_info_length)
-            self.msg = {"NAN beacon":{"AnchorMasterRank":self.anchor_master_info[:8].hex(),"HopCountToAnchorMaster":self.anchor_master_info[9],"AnchorMasterBeaconTransmissionTime":int.from_bytes(self.anchor_master_info[9:],'little')}}
+            self.msg = {"NAN beacon":{"AnchorMasterRank":self.anchor_master_info[:8].hex(),"HopCountToAnchorMaster":self.anchor_master_info[8] if len(self.anchor_master_info) > 8 else None,"AnchorMasterBeaconTransmissionTime":int.from_bytes(self.anchor_master_info[9:],'little')}}
 
     def __repr__(self):
-        return self.service_info
+        return json.dumps(self.msg)
 
 class Astm_F3411_22a:
+    msg_counter = None
+
     def __init__(self, data):
         bt = structhelper_io(data)
         self.msg = {}
@@ -80,6 +83,7 @@ class Astm_F3411_22a:
             self.nan_service_desc = Astm_F3411_22a_nan_desc(bt.read())
             if self.nan_service_desc is not None:
                 if self.nan_service_desc.attribute_id == 3:
+                    self.msg_counter = self.nan_service_desc.msg_counter
                     self.msg = {"OUI": self.oui.hex(), "VendorType": self.vend_type, "MsgCounter": self.msg_counter,
                                 "DRI": self.nan_service_desc.msg}
                 elif self.nan_service_desc.attribute_id == 0:
@@ -151,7 +155,7 @@ class DJIV1:
         self.uuid = bt.bytes(20)
 
     def __repr__(self):
-        return self.msg
+        return json.dumps(self.msg)
 
 class DJIV2:
     serial_number = b""
@@ -191,7 +195,7 @@ class DJIV2:
         self.uuid = bt.bytes(20)
 
     def __repr__(self):
-        return self.msg
+        return json.dumps(self.msg)
 
 
 class DJIMsg:
@@ -210,11 +214,15 @@ class DJIMsg:
         self.oui = bt.bytes(3)
         self.vend_type = bt.bytes(4)
         self.version = bt.byte()
+        self.adv_data = None
         if self.version == 1:
             self.adv_data = DJIV1(bt.read())
         elif self.version == 2:
             self.adv_data = DJIV2(bt.read())
-        self.msg={"OUI":self.oui.hex(),"VendorType":self.vend_type,"DRI":self.adv_data.msg}
+        # DJI frames carry no OpenDroneID AdvData, so DRI stays empty and
+        # filter_frames does not publish them. DJI is decoded by dji_receiver.py.
+        dri = self.adv_data.msg if self.adv_data is not None else {}
+        self.msg={"OUI":self.oui.hex(),"VendorType":self.vend_type.hex(),"DRI":dri}
 
     def __repr__(self):
         return json.dumps(self.msg)
