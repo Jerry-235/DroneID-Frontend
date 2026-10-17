@@ -207,8 +207,8 @@ def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if (args.lat is None) != (args.lon is None):
         ap.error("give both --lat and --lon, or neither")
-    if args.lat is None and not args.gpsd:
-        ap.error("a roaming node needs --gpsd; a fixed node needs --lat and --lon")
+    # Position is optional: the master places a station from nodes.json or the
+    # web UI, so a node may run with just --bind to report its health alone.
     static = (args.lat, args.lon) if args.lat is not None else None
     gps = None
     if args.gpsd:
