@@ -9,12 +9,10 @@ master server subscribes to that and moves the node's marker on the map.
 It sends no detections. The node's decoder sends those on its own port.
 
     # roaming node with a GPS receiver (gpsd must be running)
-    python3 node_agent.py --node-id rover --name "Rover 1" \\
-        --bind 100.100.10.91:4230 --gpsd 127.0.0.1:2947
+    python3 node_agent.py --bind 100.100.10.91:4230 --gpsd 127.0.0.1:2947
 
     # fixed node: report a set position, no GPS needed
-    python3 node_agent.py --node-id highway --name "Highway" \\
-        --bind 100.100.10.90:4230 --lat 25.992678 --lon -97.176886
+    python3 node_agent.py --bind 100.100.10.90:4230 --lat 25.992678 --lon -97.176886
 
 Bind to the node's Tailscale address, not 0.0.0.0, so only your tailnet can
 reach it. Requires pyzmq.
@@ -23,6 +21,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import socket
 import sys
 import time
@@ -71,13 +70,42 @@ def _finite_or_none(v) -> Optional[float]:
     return float(v) if _finite(v) else None
 
 
-def build_status(node_id: str, name: str, *, fix: Optional[dict] = None,
+SNIFFER_SCRIPTS = {"wifi": "wifi_receiver.py", "bluetooth": "bluetooth_receiver.py"}
+
+
+def sniffer_running(script: str, proc_root: str = "/proc") -> bool:
+    """True if a process whose command line names this script is running. Reads
+    /proc directly, so it needs nothing installed. Not Linux: reports not running."""
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        return False
+    me = os.getpid()
+    for entry in entries:
+        if not entry.isdigit() or int(entry) == me:
+            continue
+        try:
+            with open(os.path.join(proc_root, entry, "cmdline"), "rb") as f:
+                argv = f.read().split(b"\0")
+        except OSError:
+            continue   # the process exited while we were looking
+        if any(os.path.basename(a.decode("utf-8", "replace")) == script for a in argv if a):
+            return True
+    return False
+
+
+def sniffer_health() -> dict:
+    return {key: sniffer_running(script) for key, script in SNIFFER_SCRIPTS.items()}
+
+
+def build_status(*, fix: Optional[dict] = None,
                  static: Optional[tuple[float, float]] = None,
-                 sats: Optional[int] = None, now: Optional[float] = None) -> dict:
+                 sats: Optional[int] = None, now: Optional[float] = None,
+                 health: Optional[dict] = None) -> dict:
     """The report the master expects. A fixed node always reports its set
     position; a roaming node reports its GPS fix, or no position at all when
     it has none (the master then keeps the last known one)."""
-    base = {"type": "node_status", "node": node_id, "name": name,
+    base = {"type": "node_status", "health": health,
             "ts": now if now is not None else time.time(), "sats": sats}
     if static is not None:
         return base | {"fix": True, "lat": static[0], "lon": static[1],
@@ -169,8 +197,6 @@ def open_publisher(bind: str):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--node-id", required=True, help="lowercase id, must match nodes.json on the master")
-    ap.add_argument("--name", help="label shown on the map (default: the id)")
     ap.add_argument("--bind", required=True, help="host:port to publish on, e.g. 100.100.10.91:4230")
     ap.add_argument("--gpsd", help="host:port of gpsd, e.g. 127.0.0.1:2947 (roaming nodes)")
     ap.add_argument("--lat", type=float, help="fixed latitude (fixed nodes)")
@@ -190,14 +216,13 @@ def main(argv=None) -> int:
         gps = GpsdClient(host or "127.0.0.1", int(port))
 
     pub = open_publisher(args.bind)
-    name = args.name or args.node_id
-    log.info("Publishing %s status on %s every %.1fs", args.node_id, args.bind, args.interval)
+    log.info("Publishing position on %s every %.1fs", args.bind, args.interval)
     try:
         while True:
             fix, sats = (gps.poll(budget_s=max(0.2, args.interval - 0.5)) if gps else (None, None))
             if gps is None:
                 time.sleep(args.interval)
-            pub.send_string(json.dumps(build_status(args.node_id, name, fix=fix, static=static, sats=sats)))
+            pub.send_string(json.dumps(build_status(fix=fix, static=static, sats=sats, health=sniffer_health())))
     except KeyboardInterrupt:
         return 0
 
