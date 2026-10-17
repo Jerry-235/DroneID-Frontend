@@ -883,7 +883,7 @@ const FIELD_DEFS = {
     { key: 'loc_timestamp',       label: 'Timestamp',           formatter: fmtRemoteIdTimestamp },
     { key: 'drone_op_distance',   label: 'Distance to Operator', formatter: fmtDistance },
     { key: 'station_distance',    label: 'Distance from Station', formatter: fmtDistance },
-    { key: 'station_distances',   label: 'All Stations', expandable: true },
+    { key: 'station_distances',   label: 'Stations', expandable: true },
   ],
   'Operator': [
     { key: 'op_location_type',       label: 'Op Location Type' },
@@ -891,7 +891,7 @@ const FIELD_DEFS = {
     { key: 'op_lat',                 label: 'Operator Latitude',  digits: 7, unit: '' },
     { key: 'op_lon',                 label: 'Operator Longitude', digits: 7, unit: '' },
     { key: 'op_drone_distance',      label: 'Distance to Drone', formatter: fmtDistance },
-    { key: 'op_station_distance',    label: 'Distance to Station', formatter: fmtDistance },
+    { key: 'op_station_distance',    label: 'Distance from Station', formatter: fmtDistance },
   ],
 };
 
@@ -1010,22 +1010,39 @@ async function loadAccess() {
 function metersToFeet(m) { return m * 3.28084; }
 function mpsToMph(mps) { return mps * 2.23694; }
 
-// Distance from a drone to every station that currently has it, nearest first.
-// Live data carries tracked_by (the stations hearing it right now). History
-// points don't, so there the only station is the home point.
-function stationDistances(d) {
-  if (!d || d.lat === null || d.lat === undefined || d.lon === null || d.lon === undefined) return [];
-  if (!Array.isArray(d.tracked_by)) {
-    if (!stationCoord) return [];
-    return [{ id: 'home', name: 'Station',
-      meters: slantRangeMeters(stationCoord.lat, stationCoord.lon, d.lat, d.lon, d.height_agl) }];
-  }
-  const heard = new Set(d.tracked_by);
-  return stationList
-    .filter(s => heard.has(s.id) && s.lat !== null && s.lat !== undefined && s.lon !== null && s.lon !== undefined)
-    .map(s => ({ id: s.id, name: s.name,
-      meters: slantRangeMeters(s.lat, s.lon, d.lat, d.lon, d.height_agl) }))
-    .sort((a, b) => a.meters - b.meters);
+// Which stations detect this drone right now. Live data lists them in
+// tracked_by. A history point carries only the station that recorded it.
+function detectingStations(d) {
+  if (!d) return new Set();
+  if (Array.isArray(d.tracked_by)) return new Set(d.tracked_by);
+  return d.station_id ? new Set([d.station_id]) : new Set();
+}
+
+// Ground-to-drone slant range from one station, or null if either end has no position.
+function stationRangeMeters(s, d) {
+  if (!s || s.lat === null || s.lat === undefined || s.lon === null || s.lon === undefined) return null;
+  if (d.lat === null || d.lat === undefined || d.lon === null || d.lon === undefined) return null;
+  return slantRangeMeters(s.lat, s.lon, d.lat, d.lon, d.height_agl);
+}
+
+// The closest station that detects this drone: { id, name, lat, lon, meters }, or null.
+function closestDetectingStation(d) {
+  const heard = detectingStations(d);
+  let best = null;
+  stationList.forEach(s => {
+    if (!heard.has(s.id)) return;
+    const meters = stationRangeMeters(s, d);
+    if (meters !== null && (best === null || meters < best.meters)) {
+      best = { id: s.id, name: s.name, lat: s.lat, lon: s.lon, meters };
+    }
+  });
+  return best;
+}
+
+// Every station in the list, detected or not, with its soft name.
+function stationDetectionRows(d) {
+  const heard = detectingStations(d);
+  return stationList.map(s => ({ id: s.id, name: s.name, detected: heard.has(s.id) }));
 }
 
 function fieldValue(d, key) {
@@ -1051,15 +1068,17 @@ function fieldValue(d, key) {
     return Math.max(0, (Date.now() / 1000) - d.last_seen);
   }
   if (key === 'station_distance') {
-    // Distance to the closest station that currently hears this drone.
-    const near = stationDistances(d)[0];
+    // Distance to the closest station that detects this drone.
+    const near = closestDetectingStation(d);
     return near ? near.meters : null;
   }
   if (key === 'op_station_distance') {
-    // Operator <-> station: both assumed 0ft AGL, so there's no vertical
-    // leg — this one stays a flat ground distance.
-    if (!stationCoord || d.op_lat === null || d.op_lat === undefined || d.op_lon === null || d.op_lon === undefined) return null;
-    return haversineMeters(stationCoord.lat, stationCoord.lon, d.op_lat, d.op_lon);
+    // Operator to the same closest detecting station the drone row names, so
+    // both rows point at one station. Operator and station are both 0ft AGL,
+    // so this stays a flat ground distance.
+    const near = closestDetectingStation(d);
+    if (!near || d.op_lat === null || d.op_lat === undefined || d.op_lon === null || d.op_lon === undefined) return null;
+    return haversineMeters(near.lat, near.lon, d.op_lat, d.op_lon);
   }
   if (key === 'op_drone_distance' || key === 'drone_op_distance') {
     // Same physical distance either way (symmetric) — two separate toggle
@@ -1389,20 +1408,21 @@ function renderDetailPanel() {
     const html = fieldDisplay(fdef, fieldValue(view.data, fdef.key));
     if (b._v !== html) { b.innerHTML = html; b._v = html; }   // fieldDisplay escapes
   });
-  // The closest-station label names the station it measures from.
-  const near = stationDistances(view.data)[0];
+  // Both distance rows name the closest station that detects the drone.
+  const near = closestDetectingStation(view.data);
   const nearLabel = `Distance from Station [${near ? near.name : '—'}]`;
-  body.querySelectorAll('[data-label="station_distance"]').forEach(s => {
+  body.querySelectorAll('[data-label="station_distance"], [data-label="op_station_distance"]').forEach(s => {
     if (s._v !== nearLabel) { s.textContent = nearLabel; s._v = nearLabel; }
   });
   body.querySelectorAll('.dp-stations').forEach(box => {
-    const all = stationDistances(view.data);
+    const rows = stationDetectionRows(view.data);
+    const detectedCount = rows.filter(r => r.detected).length;
     const count = box.querySelector('[data-stations-count]');
-    const countText = `(${all.length})`;
+    const countText = `(${detectedCount}/${rows.length})`;
     if (count._v !== countText) { count.textContent = countText; count._v = countText; }
-    const inner = all.length
-      ? all.map(s => `<div class="dp-row"><span>${escapeHtml(s.name)}</span><b>${escapeHtml(fmtDistance(s.meters))}</b></div>`).join('')
-      : '<div class="dp-note">No station has a fix on this drone right now.</div>';
+    const inner = rows.length
+      ? rows.map(r => `<div class="dp-row"><span>${escapeHtml(r.name)}</span><b>${r.detected ? 'Detected' : 'Not detected'}</b></div>`).join('')
+      : '<div class="dp-note">No stations are configured.</div>';
     const bodyEl = box.querySelector('[data-stations-body]');
     if (bodyEl._v !== inner) { bodyEl.innerHTML = inner; bodyEl._v = inner; }
   });
@@ -2366,6 +2386,7 @@ function historyPointData(idx) {
     // panel showed Operator Latitude 0.0000000 and a distance of several
     // thousand km — a plausible-looking number that is pure noise.
     op_lat: hasOpFix ? p.op_lat : null, op_lon: hasOpFix ? p.op_lon : null,
+    station_id: p.station_id,
   };
 }
 
