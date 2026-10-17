@@ -26,7 +26,6 @@ import argparse
 import json
 import logging
 import math
-import os
 import socket
 import sys
 import threading
@@ -128,6 +127,7 @@ class SnifferWatch:
             sock = monitor = None
             try:
                 sock = ctx.socket(zmq.SUB)
+                sock.setsockopt(zmq.IPV6, 1)
                 monitor = sock.get_monitor_socket()
                 sock.connect(f"tcp://{self.addr}")
                 sock.setsockopt(zmq.SUBSCRIBE, b"")
@@ -196,12 +196,14 @@ class GpsdClient:
         self._sats: Optional[int] = None
         self._latest: Optional[dict] = None
         self._latest_at: float = 0.0
+        self._warned_down = False  # one warning per outage, not one per poll
 
     def _connect(self):
         self.close()
         sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
         sock.sendall(b'?WATCH={"enable":true,"json":true}\n')
         self._sock = sock
+        self._warned_down = False
         self._file = sock.makefile("r", encoding="utf-8", errors="replace")
 
     def close(self):
@@ -240,7 +242,9 @@ class GpsdClient:
                 elif rec["kind"] == "SKY" and rec["sats"] is not None:
                     self._sats = rec["sats"]
         except OSError as e:
-            log.warning("gpsd unavailable (%s) — reporting no fix until it returns", e)
+            if not self._warned_down:
+                log.warning("gpsd unavailable (%s) — reporting no fix until it returns", e)
+                self._warned_down = True
             self.close()
             self._latest = None
         if self._latest is not None and time.monotonic() - self._latest_at > FIX_MAX_AGE_S:
@@ -254,6 +258,7 @@ def open_publisher(bind: str):
         log.warning("Binding to %s exposes this beacon on every interface. "
                     "Bind to the node's Tailscale address instead.", bind)
     sock = zmq.Context.instance().socket(zmq.PUB)
+    sock.setsockopt(zmq.IPV6, 1)  # the Tailscale address may be IPv6
     sock.bind(f"tcp://{bind}")
     return sock
 

@@ -19,7 +19,6 @@ persists every sample to SQLite through db.py, and serves:
   - POST /api/flights/delete          remove flights and their points
 
   catalog / config
-  - GET   /api/drones/catalog         all user-assigned nicknames
   - PATCH /api/drones/{key}/name      rename (applies retroactively)
   - GET/PUT/DELETE /api/station       the station ("home point") location
   - GET  /api/discord_webhook         whether an alert webhook is configured
@@ -43,7 +42,7 @@ import time
 import urllib.error
 import urllib.request
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, fields
 from typing import Optional
 
 import zmq
@@ -215,6 +214,8 @@ def clean_float(value, heading: bool = False) -> Optional[float]:
             v = float(num)
         except ValueError:
             return None
+    if not math.isfinite(v):   # json.loads accepts Infinity/NaN; neither is a reading
+        return None
     return None if (heading and v == 361) else v
 
 
@@ -230,6 +231,9 @@ def parse_latlon(value) -> Optional[float]:
     if abs(v) > 180:
         v = v / 1e7
     return v
+
+
+_TRACK_INTERNAL_FIELDS = frozenset({"station_heard", "source_heard", "recent_points"})
 
 
 @dataclass
@@ -306,10 +310,14 @@ class DroneTrack:
         return "live"
 
     def to_dict(self) -> dict:
-        d = asdict(self)
-        d.pop("recent_points", None)
-        heard = d.pop("station_heard", None) or {}
-        source_heard = d.pop("source_heard", None) or {}
+        # Built field by field rather than with asdict(): asdict would deep-copy
+        # recent_points on every call, and that list is internal anyway.
+        d = {f.name: getattr(self, f.name) for f in fields(self)
+             if f.name not in _TRACK_INTERNAL_FIELDS}
+        d["seen_by"] = list(self.seen_by)
+        # Snapshot the dicts: the burst handler updates them while this runs.
+        heard = dict(self.station_heard)
+        source_heard = dict(self.source_heard)
         now = time.time()
         tracked = sorted(s for s, t in heard.items() if now - t <= STALE_AFTER_S)
         d["tracked_by"] = tracked
@@ -402,6 +410,8 @@ class TrackStore:
         for key in ("Location/Vector Message", "Location Vector"):
             if key in msg:
                 loc = msg[key]
+                if not isinstance(loc, dict):
+                    return None, False
                 coord = loc.get("coord")
                 if coord:
                     # newer/raw shape nests direction/speed/lat/lon/alt under
@@ -417,7 +427,7 @@ class TrackStore:
     @staticmethod
     def _get_system(msg: dict) -> Optional[dict]:
         for key in ("System Message", "System"):
-            if key in msg:
+            if isinstance(msg.get(key), dict):
                 return msg[key]
         return None
 
@@ -521,14 +531,14 @@ class TrackStore:
             track.source_heard[(station_id, transport)] = time.time()
 
         for msg in messages:
-            if "Basic ID" in msg:
+            if isinstance(msg.get("Basic ID"), dict):
                 b = msg["Basic ID"]
                 if track.ua_type is None and b.get("ua_type") is not None:
                     track.ua_type = b.get("ua_type")
                 if b.get("protocol_version"):
                     track.protocol_version = b.get("protocol_version")
 
-            if "Operator ID" in msg:
+            if isinstance(msg.get("Operator ID"), dict):
                 op_id = msg["Operator ID"].get("id")
                 if op_id:
                     track.operator_id = op_id
@@ -810,8 +820,8 @@ def extract_bursts(data) -> list[tuple[Optional[str], list[dict]]]:
         for mac, val in inner.items():
             if isinstance(val, list):
                 bursts.append((mac, val))
-            elif isinstance(val, dict) and "AdvData" in val:
-                continue  # raw undecoded advert — nothing to correlate yet
+            # A dict carrying only "AdvData" is a raw, undecoded advert with
+            # nothing to correlate yet, so it is skipped by falling through.
         # A single message dict ({"MAC": ..., "Basic ID": {...}}) has no list
         # values at all and would otherwise vanish without trace.
         if not bursts and any(isinstance(v, dict) for v in inner.values()):
@@ -821,7 +831,25 @@ def extract_bursts(data) -> list[tuple[Optional[str], list[dict]]]:
     return []
 
 
+# One lock per aircraft. Two stations can hear the same new aircraft at the same
+# moment; without this both would open a flight and both would send the alert.
+_flight_locks: dict[str, asyncio.Lock] = {}
+
+
 async def persist_update(track: DroneTrack):
+    """Serialised per aircraft, so only one station at a time can open its flight."""
+    key = track.key
+    if key.startswith(ANON_KEY_PREFIX):
+        # Anonymous tracks are dropped before anything is written; no lock needed.
+        await _persist_update_locked(track)
+        return
+    # Kept for the life of the process: one small lock per aircraft seen. It
+    # can't be dropped when unlocked, since a waiter may be about to take it.
+    async with _flight_locks.setdefault(key, asyncio.Lock()):
+        await _persist_update_locked(track)
+
+
+async def _persist_update_locked(track: DroneTrack):
     """Append a point to this track's open flight, opening one first if it
     doesn't have one yet. Also refreshes the catalog row (mac/serial/
     registration/ua_type/protocol version) and applies any user-assigned
@@ -980,6 +1008,7 @@ async def burst_listener(node):
     channel = health_channel(node)
     connection_state.setdefault(channel, DISCONNECTED)
     sock = zmq_ctx().socket(zmq.SUB)
+    sock.setsockopt(zmq.IPV6, 1)  # station addresses may be IPv6 (Tailscale)
     attach_connection_monitor(sock, channel)
     sock.connect(node.bursts)
     sock.setsockopt(zmq.SUBSCRIBE, b"")
@@ -1005,9 +1034,11 @@ async def burst_listener(node):
 
 
 async def status_listener(node):
-    """Position reports from a roaming station's node_agent. A malformed or
-    unrecognised message is ignored, so it can't move a station on the map."""
+    """Position reports from a station's node_agent (fixed or roaming: every
+    external station publishes one). A malformed or unrecognised message is
+    ignored, so it can't move a station on the map."""
     sock = zmq_ctx().socket(zmq.SUB)
+    sock.setsockopt(zmq.IPV6, 1)  # station addresses may be IPv6 (Tailscale)
     sock.connect(node.status)
     sock.setsockopt(zmq.SUBSCRIBE, b"")
     log.info("Listening for %s position reports at %s", node.id, node.status)
@@ -1035,9 +1066,6 @@ def stations_snapshot(now: Optional[float] = None) -> list[dict]:
     The master's position is the home point, so it isn't duplicated here."""
     now = now if now is not None else time.time()
     local = compute_health(now)
-    master_pos = None
-    if station_cache and station_cache.get("lat") is not None and station_cache.get("lon") is not None:
-        master_pos = (station_cache["lat"], station_cache["lon"])
     out = []
     for node_id in fleet.ids():
         link = local["zmq"] if fleet.config[node_id].kind == "master" else _node_link(node_id, now)
@@ -1062,6 +1090,7 @@ async def sniffer_health_listener(addr: str, channel: str):
     content — tracks both the TCP-level connection state (process alive?)
     and message arrival timing (actively sending vs. idle)."""
     sock = zmq_ctx().socket(zmq.SUB)
+    sock.setsockopt(zmq.IPV6, 1)  # station addresses may be IPv6 (Tailscale)
     attach_connection_monitor(sock, channel)
     sock.connect(addr)
     sock.setsockopt(zmq.SUBSCRIBE, b"")
@@ -1141,13 +1170,8 @@ def parse_station(raw: Optional[str]) -> Optional[dict]:
     return {"lat": lat, "lon": lon}
 
 
-def haversine_meters(lat1, lon1, lat2, lon2) -> float:
-    R = 6371000.0
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlambda / 2) ** 2
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+# Same formula as places.haversine_m; one copy, so distances can't drift apart.
+haversine_meters = places.haversine_m
 
 
 def meters_to_feet(m: float) -> float:
@@ -1656,9 +1680,9 @@ ADMIN_ONLY_ROUTES = {
     ("POST", "/api/flights/merge"),
     ("POST", "/api/flights/delete"),
     # Renaming is deliberately NOT here: the pencil shows for everyone, as it
-    # always has, and a wrong name is trivially fixable. Add
-    # ("PATCH", "/api/drones/<key>/name") to ADMIN_ONLY_PREFIXES below if you
-    # change your mind.
+    # always has, and a wrong name is trivially fixable. To lock it down, add
+    # ("PATCH", "/api/drones/") to ADMIN_ONLY_PREFIXES below. Prefixes are
+    # matched with startswith(), so a literal "<key>" placeholder would never match.
 }
 # Same idea for paths carrying a parameter — matched on the method plus a
 # path prefix instead of the whole path.
@@ -1724,6 +1748,18 @@ async def admin_gate(request: Request, call_next):
             status_code=403,
         )
     return await call_next(request)
+
+
+NICKNAME_MAX_LEN = 48
+
+
+def clean_nickname(raw: str) -> Optional[str]:
+    """A drone nickname is shown in the UI and in Discord alerts. Control
+    characters (newlines especially) would break the alert's layout, and an
+    unbounded name could push the post over Discord's length limit."""
+    text = "".join(ch if ch.isprintable() else " " for ch in (raw or ""))
+    text = " ".join(text.split())[:NICKNAME_MAX_LEN].strip()
+    return text or None
 
 
 class RenameBody(BaseModel):
@@ -1893,19 +1929,12 @@ async def test_drone_status():
     return {"running": test_drone_running}
 
 
-@app.get("/api/drones/catalog")
-async def api_catalog():
-    """All known nicknames, keyed by catalog_key (serial, or MAC if no
-    serial has ever been seen for that drone)."""
-    return {"catalog": catalog_nicknames}
-
-
 @app.patch("/api/drones/{catalog_key}/name")
 async def api_rename_drone(catalog_key: str, body: RenameBody):
     """Rename a drone. Applies retroactively: every past and future flight
     for this catalog_key will show the new name, since the name is looked
     up at query/display time rather than copied into flight rows."""
-    nickname = body.nickname.strip() or None
+    nickname = clean_nickname(body.nickname)
     await db.rename_drone(catalog_key, nickname)
     if nickname:
         catalog_nicknames[catalog_key] = nickname

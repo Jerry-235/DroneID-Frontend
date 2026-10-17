@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import os
+import ipaddress
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -25,7 +26,6 @@ from typing import Optional
 log = logging.getLogger("droneid-frontend.nodes")
 
 MASTER_ID = "master"
-KINDS = ("master", "static", "roaming")
 
 # A remote node's position report older than this is shown as last known
 # rather than current.
@@ -64,12 +64,26 @@ def _check_coord(node_id: str, name: str, value, limit: float) -> float:
 
 
 # Every external station runs the same two services on its address: the
-# decoder's burst feed, and (for a roaming station) the node_agent GPS beacon.
+# decoder's burst feed, and the node_agent beacon (position and sniffer health).
 NODE_BURSTS_PORT = 4224
 NODE_STATUS_PORT = 4230
 MAX_NODE_NUMBER = 999
 ALLOWED_FIELDS = {"id", "ip", "lat", "lon"}
 _HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-]{0,252}$")
+
+
+def _valid_station_ip(ip: str) -> bool:
+    """An IPv4 or IPv6 literal (Tailscale hands out both), or a plain host name."""
+    try:
+        ipaddress.ip_address(ip)
+        return True
+    except ValueError:
+        return _HOST_RE.match(ip) is not None
+
+
+def _endpoint_host(ip: str) -> str:
+    """ZMQ endpoints need an IPv6 literal in brackets: tcp://[fd7a::1]:4224."""
+    return f"[{ip}]" if ":" in ip else ip
 
 
 def node_id_for_number(number: int) -> str:
@@ -122,7 +136,7 @@ def parse_nodes(data, default_master_bursts: str) -> list[NodeConfig]:
             raise ConfigError(f"station {label}: unknown field {sorted(extra)[0]!r}. Only id, ip, "
                               "and optional lat and lon are allowed; names and locations are set in the admin page")
         ip = str(raw.get("ip") or "").strip()
-        if not _HOST_RE.match(ip):
+        if not _valid_station_ip(ip):
             raise ConfigError(f"station {label}: ip must be an address such as 100.100.10.90, got {raw.get('ip')!r}")
         node_id = node_id_for_number(number)
         if node_id in seen_ids:
@@ -144,8 +158,8 @@ def parse_nodes(data, default_master_bursts: str) -> list[NodeConfig]:
             id=node_id,
             name=f"Node {number}",
             kind=kind,
-            bursts=f"tcp://{ip}:{NODE_BURSTS_PORT}",
-            status=f"tcp://{ip}:{NODE_STATUS_PORT}",   # every station reports health here
+            bursts=f"tcp://{_endpoint_host(ip)}:{NODE_BURSTS_PORT}",
+            status=f"tcp://{_endpoint_host(ip)}:{NODE_STATUS_PORT}",   # every station reports health here
             lat=lat,
             lon=lon,
             number=number,
@@ -293,13 +307,11 @@ class NodeRegistry:
             return st.lat, st.lon
         return None
 
-    def describe(self, node_id: str, now: float, link: str, master_position=None) -> dict:
+    def describe(self, node_id: str, now: float, link: str) -> dict:
         cfg = self.config[node_id]
         st = self.state[node_id]
-        if cfg.kind == "master":
-            pos = master_position
-        else:
-            pos = self.position(node_id)
+        # The master has no node_agent position of its own; the server places it.
+        pos = None if cfg.kind == "master" else self.position(node_id)
         status_age = None if st.last_status_at is None else now - st.last_status_at
         return {
             "id": cfg.id,

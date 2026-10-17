@@ -13,6 +13,7 @@ from OpenDroneID.utils import structhelper_io
 
 verbose = False  # Global variable to control verbosity
 stop = False
+UART_MAX_BUFFER = 65536  # a partial object longer than this is noise; drop it
 
 
 def log(*msg):
@@ -24,23 +25,26 @@ def log(*msg):
 
 
 def zmq_thread(pub_socket):
-    """Handles ZMQ subscriber notifications."""
+    """Handles ZMQ subscriber notifications. Polls rather than blocking on
+    recv, so shutdown can join this thread before the socket is closed."""
     global stop
-    try:
-        while not stop:
-            try:
-                event = pub_socket.recv()
-                if verbose:
-                    if event[0] == 1:
-                        log("New subscriber for", event[1:])
-                    elif event[0] == 0:
-                        log("Unsubscribed", event[1:])
-            except zmq.error.ContextTerminated:
-                break
-            except Exception as e:
-                log("ZMQ Thread Error:", e)
-    except zmq.error.ContextTerminated:
-        pass
+    poller = zmq.Poller()
+    poller.register(pub_socket, zmq.POLLIN)
+    while not stop:
+        try:
+            if pub_socket not in dict(poller.poll(500)):
+                continue
+            event = pub_socket.recv()
+        except zmq.error.ContextTerminated:
+            break
+        except zmq.ZMQError as e:
+            log("ZMQ Thread Error:", e)
+            continue
+        if verbose and event:
+            if event[0] == 1:
+                log("New subscriber for", event[1:])
+            elif event[0] == 0:
+                log("Unsubscribed", event[1:])
 
 
 def decoder_thread(socket, pub):
@@ -70,13 +74,65 @@ def decoder_thread(socket, pub):
                     if verbose:
                         print("ZMQ Data Received:", json.dumps(dc, indent=2))
 
-                    # Process Bluetooth/Wi-Fi data
-                    process_decoded_data(dc, pub)
+                    # Process Bluetooth/Wi-Fi data. A message that fails to
+                    # decode is skipped; it must not end this thread, which
+                    # would silently stop every later detection.
+                    try:
+                        process_decoded_data(dc, pub)
+                    except Exception as e:
+                        if verbose:
+                            log("Skipped a message that did not decode:", e)
     except zmq.error.ContextTerminated:
         pass
     except Exception as e:
         if verbose:
             log("Decoder Thread Error:", e)
+    finally:
+        # Closed here, on the thread that owns it, so the context can terminate.
+        socket.close(linger=0)
+
+
+def split_json_objects(buf: str):
+    """Pull complete top-level JSON objects out of a UART byte stream.
+
+    Brace counting alone breaks on a '{' or '}' inside a string value, so this
+    scanner tracks string state too. Returns (objects, remainder): remainder is
+    an unfinished object (kept for the next read) or "" when there is none.
+    """
+    objects = []
+    depth = 0
+    in_str = False
+    esc = False
+    start = None
+    for i, ch in enumerate(buf):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0:
+                try:
+                    objects.append(json.loads(buf[start:i + 1]))
+                except json.JSONDecodeError as e:
+                    log("UART JSON Decode Error:", e)
+                start = None
+    if depth == 0:
+        return objects, ""
+    remainder = buf[start:]
+    if len(remainder) > UART_MAX_BUFFER:
+        remainder = ""
+    return objects, remainder
 
 
 def uart_listener(uart_device, pub):
@@ -97,26 +153,16 @@ def uart_listener(uart_device, pub):
                 while not stop:
                     if ser.in_waiting > 0:
                         try:
-                            data = ser.read(ser.in_waiting).decode('utf-8')
-                            buffer += data
-
-                            # Detect complete JSON object(s)
-                            if buffer.count("{") == buffer.count("}"):
+                            data = ser.read(ser.in_waiting).decode('utf-8', errors='replace')
+                            if verbose:
+                                print("UART received:", data)
+                            objects, buffer = split_json_objects(buffer + data)
+                            for dc in objects:
+                                json_data = json.dumps(dc)
+                                if pub:
+                                    pub.send_string(json_data)
                                 if verbose:
-                                    print("UART received:", buffer)
-
-                                try:
-                                    dc = json.loads(buffer)
-                                    json_data = json.dumps(dc)
-                                    if pub:
-                                        pub.send_string(json_data)
-                                    if verbose:
-                                        print(f"Forwarded via ZMQ: {json_data}")
-
-                                except json.JSONDecodeError as e:
-                                    log("UART JSON Decode Error:", e)
-
-                                buffer = ""  # Always reset buffer afterward
+                                    print(f"Forwarded via ZMQ: {json_data}")
 
                         except Exception as e:
                             log("UART Read Error:", e)
@@ -282,6 +328,9 @@ def main():
     aparse.add_argument("--uart", help="UART device for pre-decoded ESP32 data (e.g., /dev/ttyACM0)")
     aparse.add_argument("--dji", help="DJI receiver ZMQ endpoint (e.g., 127.0.0.1:4221)")
     args = aparse.parse_args()
+    if (args.uart or args.dji) and not args.zmq:
+        # Their output is only published over ZMQ; without -z it would be dropped.
+        aparse.error("--uart and --dji need -z: their data is only published over ZMQ")
 
     verbose = args.verbose
 
@@ -301,6 +350,8 @@ def main():
         zthread = None
 
     # Set up UART listener
+    uart_thread = None
+    dji_thread = None
     if args.uart:
         uart_thread = Thread(target=uart_listener, args=(args.uart, pub), daemon=True)
         uart_thread.start()
@@ -334,18 +385,17 @@ def main():
     except KeyboardInterrupt:
         log("Interrupt received, shutting down...")
     finally:
+        # Threads stop on their own within a poll interval; join them before
+        # the context is terminated, since term() waits for open sockets.
         stop = True
-        if pub:
-            pub.close()
-        sctx.term()
-        if args.uart:
-            uart_thread.join()
         for thread in subs:
-            thread.join()
-        if args.dji:
-            dji_thread.join()
-        if zthread:
-            zthread.join()
+            thread.join(timeout=5)
+        for thread in (uart_thread, dji_thread, zthread):
+            if thread is not None:
+                thread.join(timeout=5)
+        if pub:
+            pub.close(linger=0)
+        sctx.term()
         log("Shutdown complete.")
 
 

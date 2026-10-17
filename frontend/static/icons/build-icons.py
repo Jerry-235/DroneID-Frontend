@@ -4,11 +4,11 @@
 Three themed marks are defined below, all built from the same delta the live
 map draws for a drone, in the app's own palette:
 
-  a  marker   the bare dart. Most legible at 16px; the shipped default.
+  a  marker   the bare dart. Most legible at 16px.
   b  tracked  the dart inside a ring.
-  c  lock     the dart inside reticle corners.
+  c  lock     the dart inside reticle corners. The shipped default.
 
-    python3 build-icons.py [a|b|c]
+    python3 build-icons.py [a|b|c]     (no argument rebuilds c)
 
 Rewrites favicon.svg and every PNG/ICO from the chosen mark, so switching
 themes is one command and index.html never has to change. PNG rasterizing
@@ -102,7 +102,8 @@ def rasterize(jobs):
 const { chromium } = require('playwright');
 const jobs = %s;
 (async () => {
-  const b = await chromium.launch({ executablePath: process.env.PW_CHROME });
+  // PW_CHROME, when set, names a Chromium binary; otherwise Playwright finds its own.
+  const b = await chromium.launch(process.env.PW_CHROME ? { executablePath: process.env.PW_CHROME } : {});
   for (const j of jobs) {
     const p = await b.newPage({ viewport: { width: j.size, height: j.size } });
     await p.setContent(`<html><body style="margin:0">${j.svg.replace('width="64" height="64"',
@@ -113,9 +114,7 @@ const jobs = %s;
   await b.close();
 })();
 """ % json.dumps(payload))
-    chrome = os.environ.get("PW_CHROME") or "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
-    subprocess.run(["node", script], check=True, cwd=HERE,
-                   env={**os.environ, "PW_CHROME": chrome})
+    subprocess.run(["node", script], check=True, cwd=HERE, env=dict(os.environ))
     os.remove(script)
 
 
@@ -156,7 +155,7 @@ MANIFEST = """{
 
 
 def main():
-    variant = (sys.argv[1] if len(sys.argv) > 1 else "a").lower()
+    variant = (sys.argv[1] if len(sys.argv) > 1 else "c").lower()
     if variant not in ("a", "b", "c"):
         sys.exit("variant must be a, b or c")
 

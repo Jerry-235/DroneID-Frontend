@@ -21,11 +21,18 @@ import socket
 import struct
 import json
 import logging
+import math
 import zmq
 import time
 import argparse
 import os
 from typing import Optional, Tuple
+
+# A TCP read can split a frame or hold several; frames are reassembled here.
+# Idle longer than this and the connection is treated as dead and reopened.
+ANTSDR_IDLE_TIMEOUT_S = 10
+# Bytes buffered without a complete frame before the buffer is dropped.
+MAX_FRAME_BUFFER = 65536
 
 # Cached sensor GPS from the monitor: (lat, lon, alt) or None
 _last_sensor_gps: Optional[Tuple[float, float, float]] = None
@@ -70,6 +77,36 @@ def iso_timestamp_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S.%fZ", time.gmtime())
 
 
+def split_frames(buf: bytearray) -> list:
+    """Remove and return every complete frame at the front of buf.
+
+    A frame's total length is the little-endian u16 at bytes 3-4 (it includes
+    the 5-byte header, matching parse_frame). A length under 5 can't be a real
+    header, so one byte is dropped to resync. An incomplete frame stays in buf.
+    """
+    frames = []
+    while len(buf) >= 5:
+        length = struct.unpack_from('<H', buf, 3)[0]
+        if length < 5:
+            del buf[0]
+            continue
+        if len(buf) < length:
+            break
+        frames.append(bytes(buf[:length]))
+        del buf[:length]
+    if len(buf) > MAX_FRAME_BUFFER:
+        buf.clear()
+    return frames
+
+
+def _f64(data: bytes, start: int, end: int) -> float:
+    """Little-endian double from data[start:end]. NaN and infinity come back as
+    0.0, so they can't reach the JSON (NaN is not valid JSON, and the master
+    drops non-finite numbers anyway). 0.0 is already the 'no position' value."""
+    value = struct.unpack('<d', data[start:end])[0]
+    return value if math.isfinite(value) else 0.0
+
+
 def parse_frame(frame: bytes):
     """Parses the raw frame from AntSDR."""
     try:
@@ -93,28 +130,28 @@ def parse_data_1(data: bytes, alert_id:str, max_horiz_speed:float) -> dict:
         device_type   = data[64:128].decode('utf-8', errors='replace').rstrip('\x00')
 
         # Pilot home lat/lon
-        app_lat = struct.unpack('<d', data[129:137])[0]
-        app_lon = struct.unpack('<d', data[137:145])[0]
+        app_lat = _f64(data, 129, 137)
+        app_lon = _f64(data, 137, 145)
 
         # Drone lat/lon
-        drone_lat = struct.unpack('<d', data[145:153])[0]
-        drone_lon = struct.unpack('<d', data[153:161])[0]
+        drone_lat = _f64(data, 145, 153)
+        drone_lon = _f64(data, 153, 161)
 
         # Height and altitude
-        height_agl        = struct.unpack('<d', data[161:169])[0]
-        geodetic_altitude = struct.unpack('<d', data[169:177])[0]
+        height_agl        = _f64(data, 161, 169)
+        geodetic_altitude = _f64(data, 169, 177)
 
         # Home lat/lon (Return-to-home position)
-        home_lat = struct.unpack('<d', data[177:185])[0]
-        home_lon = struct.unpack('<d', data[185:193])[0]
+        home_lat = _f64(data, 177, 185)
+        home_lon = _f64(data, 185, 193)
 
         # Frequency (New field)
-        freq = struct.unpack('<d', data[193:201])[0]  # Frequency value
+        freq = _f64(data, 193, 201)  # Frequency value
 
         # Speeds
-        speed_e = struct.unpack('<d', data[201:209])[0]  # East
-        speed_n = struct.unpack('<d', data[209:217])[0]  # North
-        speed_u = struct.unpack('<d', data[217:225])[0]  # Vertical
+        speed_e = _f64(data, 201, 209)  # East
+        speed_n = _f64(data, 209, 217)  # North
+        speed_u = _f64(data, 217, 225)  # Vertical
 
         # RSSI
         rssi = struct.unpack('<h', data[225:227])[0]
@@ -358,29 +395,34 @@ def tcp_client(options):
     while True:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
+                client_socket.settimeout(ANTSDR_IDLE_TIMEOUT_S)
                 client_socket.connect((options.ANTSDR_IP, options.ANTSDR_PORT))
                 logging.info(f"Connected to AntSDR at {options.ANTSDR_IP}:{options.ANTSDR_PORT}")
+                pending = bytearray()
 
                 while True:
                     # Opportunistically poll monitor for fresh GPS
                     poll_monitor_for_gps(mon_sub)
 
-                    frame = client_socket.recv(1024)
-                    if not frame:
-                        logging.warning("Connection closed by AntSDR.")
+                    chunk = client_socket.recv(4096)
+                    if not chunk:
+                        logging.warning("Connection closed by AntSDR. Reconnecting...")
+                        time.sleep(1)  # an endpoint that accepts and closes must not spin
                         break
+                    pending += chunk
 
-                    package_type, data = parse_frame(frame)
-                    if package_type == 0x01 and data:
-                        parsed_data = parse_data_1(data, alert_id=options.ALERT_ID,
-                                                   max_horiz_speed=options.MAX_HORIZONTAL_SPEED)
-                        zmq_message_list = format_as_zmq_json(
-                            parsed_data,
-                            alert_id=options.ALERT_ID,
-                            monitor_gps=_last_sensor_gps,
-                        )
-                        if zmq_message_list:
-                            send_zmq_message(zmq_pub_socket, zmq_message_list)
+                    for frame in split_frames(pending):
+                        package_type, data = parse_frame(frame)
+                        if package_type == 0x01 and data:
+                            parsed_data = parse_data_1(data, alert_id=options.ALERT_ID,
+                                                       max_horiz_speed=options.MAX_HORIZONTAL_SPEED)
+                            zmq_message_list = format_as_zmq_json(
+                                parsed_data,
+                                alert_id=options.ALERT_ID,
+                                monitor_gps=_last_sensor_gps,
+                            )
+                            if zmq_message_list:
+                                send_zmq_message(zmq_pub_socket, zmq_message_list)
 
         except (ConnectionRefusedError, socket.error) as e:
             logging.error(f"Connection error: {e}. Retrying in 5 seconds...")
@@ -402,9 +444,11 @@ def main():
     # WarDragon monitor ZMQ (provides sensor GPS via JSON).
     # Override via env var WARD_MON_ZMQ if needed (e.g., "tcp://0.0.0.0:4225").
     if args.wardgps=="":
-        MON_ZMQ_ENDPOINT = os.getenv("WARD_MON_ZMQ", "127.0.0.1:4225")
+        MON_ZMQ_ENDPOINT = os.getenv("WARD_MON_ZMQ", "tcp://127.0.0.1:4225")
     else:
         MON_ZMQ_ENDPOINT = args.wardgps
+    if "://" not in MON_ZMQ_ENDPOINT:
+        MON_ZMQ_ENDPOINT = "tcp://" + MON_ZMQ_ENDPOINT
     if args.wardgpstimeout=="":
         MON_ZMQ_RECV_TIMEOUT_MS = int(os.getenv("WARD_MON_RECV_TIMEOUT_MS", "50"))
     else:

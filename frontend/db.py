@@ -49,7 +49,7 @@ import sqlite3
 import time
 from typing import Optional
 
-DB_PATH = os.environ.get("DRONEID_DB_PATH", "droneid.db")
+DB_PATH = os.environ.get("DRONEID_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "droneid.db"))
 
 _lock = asyncio.Lock()
 _conn: Optional[sqlite3.Connection] = None

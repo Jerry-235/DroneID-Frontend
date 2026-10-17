@@ -45,7 +45,7 @@ def json_to_packets(dronefile):
                         if adi is not None:
                             packets[drone_id]["ADI"] = adi
                     else:
-                        seqno = len(packets[drone_id])
+                        seqno = sum(1 for k in packets[drone_id] if isinstance(k, int))
                         packets[drone_id][seqno] = []
             if "Basic ID" in msg:
                 bid = msg["Basic ID"]

@@ -45,29 +45,39 @@ All via environment variables, or a `.env` file next to `main.py` (copy
 | `DRONEID_ZMQ_ADDR` | `tcp://127.0.0.1:4224` | The decoder's output — the only source of drone data |
 | `DRONEID_BT_ZMQ_ADDR` | `tcp://127.0.0.1:4222` | `bluetooth_receiver.py`, health monitoring only |
 | `DRONEID_WIFI_ZMQ_ADDR` | `tcp://127.0.0.1:4223` | `wifi_receiver.py`, health monitoring only |
-| `DRONEID_HEALTH_TIMEOUT_S` | `12` | Silence before a sniffer dot goes green → yellow |
+| `DRONEID_HEALTH_TIMEOUT_S` | `12` | Silence before a sniffer goes from green to yellow |
 | `DRONEID_STALE_AFTER_S` | `45` | Silence before a track goes gray |
 | `DRONEID_DROP_AFTER_S` | `105` | Silence before it leaves the map |
 | `DRONEID_FLIGHT_MERGE_WINDOW_S` | `300` | Reappearance window for continuing a flight |
+| `DRONEID_SOURCE_RECENT_S` | `15` | How recently a radio must have heard a drone to show as a source |
+| `DRONEID_BROADCAST_TIMEOUT_S` | `5` | Send timeout for a websocket client that has stopped reading |
+| `DRONEID_NODES_PATH` | `nodes.json` beside `main.py` | Remote stations file (see MULTI-NODE.md) |
+| `DRONEID_NODE_STATUS_STALE_S` | `60` | Silence from a station's node_agent before its status counts as old |
+| `DRONEID_ADMIN_NETS` | Tailscale ranges and loopback | Networks allowed to use admin-only endpoints |
+| `DRONEID_TRUST_FORWARDED_FOR` | off | Read the client address from `X-Forwarded-For`. Only with a proxy that overwrites that header |
 | `DRONEID_DISCORD_WEBHOOK` | — | Enables alerts (see below) |
 | `DRONEID_DISCORD_ROLE_ID` | — | Numeric role ID to ping on each alert |
+| `DRONEID_LANDMARKS_PATH` | `landmarks.csv` beside `places.py` | Optional local place names for alerts |
+| `DRONEID_LANDMARK_RADIUS_M` | `150` | How far from a landmark it has to be to name it |
+| `DRONEID_NOMINATIM_URL` | OpenStreetMap's public server | Reverse-geocoder for alert place names |
+| `DRONEID_GEOCODER_CONTACT` | — | Contact address sent with geocoder requests, as their usage policy asks |
+| `DRONEID_PLACE_TIMEOUT_S` | `2` | How long an alert waits for a place name before sending without one |
 | `DRONEID_DB_PATH` | `droneid.db` beside `main.py` | SQLite file |
 | `HOST` / `PORT` | `0.0.0.0` / `8000` | Where to listen |
 
-The two sniffer ports are subscribed to purely for liveness — nothing is
-parsed from them. Each of the three top-bar dots reads:
+The two sniffer ports are subscribed to for liveness only; nothing is parsed
+from them. The top bar shows one chip per station: the master first, named
+after the station, then each remote node. A chip is green while the master's
+ZMQ link to that feed is up, and red when it isn't. Wi-Fi and Bluetooth are
+shown on the master's map icon and on each node's icon instead:
 
-- **green** — connected, and a message arrived recently.
-- **yellow** (sniffers only) — connected but idle: the process is up, nothing
-  in range.
-- **red** — not connected. Detected from ZMQ's socket-monitor
-  connect/disconnect events rather than just silence, so a dead process is
-  distinguishable from a quiet one. If a dot stays red with its sniffer
-  definitely running, check the log for `Could not attach connection
-  monitor` — that means the monitor API isn't available on your pyzmq build.
-
-ZMQ is only ever green or red: it's the data pipeline, not a sniffer being
-watched.
+- **green** — that sniffer is sending.
+- **yellow** — connected to the sniffer but quiet for `DRONEID_HEALTH_TIMEOUT_S`.
+- **red** — not connected. Detected from ZMQ's socket-monitor connect and
+  disconnect events, not from silence, so a dead process reads differently from
+  a quiet one. If a sniffer stays red while it's running, check the log for
+  `Could not attach connection monitor`, which means your pyzmq build lacks the
+  monitor API.
 
 ## Marker lifecycle
 
@@ -151,15 +161,19 @@ decay through the normal stale/drop timeouts rather than vanishing.
 
 ### Admin view
 
-Settings > Station, Discord Alerts and Debug are hidden by default. Visit
-once with `?jerry=1` (e.g. `http://<host>:8000/?jerry=1`) to unlock them for
-that browser; the flag goes into `localStorage` and the parameter is stripped
-from the URL so it isn't shared by a bookmark. Other browsers see only the
-field toggles and Units.
+The admin-only endpoints (station location, Discord test, debug drone, flight
+merge and delete) are refused by the server unless the request comes from a
+network in `DRONEID_ADMIN_NETS`. The default is the Tailscale address ranges
+plus loopback, so anyone on your tailnet is an admin and anyone else is not.
+`GET /api/access` reports what the server will allow for the caller, along with
+the address it sees, which is the quickest way to check why a client is refused.
 
-This is decluttering, **not security** — anyone with dev tools can set the
-same flag, and none of the endpoints behind those sections have server-side
-auth.
+The page hides the admin sections for non-admin clients. That is only tidiness:
+the server's refusal is what counts. A refused request gets `403`.
+
+If the app sits behind a reverse proxy, the server only sees the proxy's address
+unless `DRONEID_TRUST_FORWARDED_FOR` is set. Only set it when the proxy overwrites
+`X-Forwarded-For`, because otherwise a client can claim any address.
 
 ### Merging and deleting flights (admin view)
 
@@ -225,25 +239,29 @@ Responses over 1 KB are gzipped (a long flight's point list shrinks about
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/drones` | Snapshot of all current tracks |
-| `WS /ws` | Snapshot on connect, then live `update` / `status` / `dropped` / `health` pushes |
-| `GET /api/health` | `{"zmq": "green\|red", "bluetooth": "green\|yellow\|red", "wifi": ...}` |
+| `WS /ws` | Snapshot on connect, then live `update` / `status` / `dropped` / `health` / `stations` pushes |
+| `GET /api/health` | `{"health": {"zmq": "green\|red", "bluetooth": "green\|yellow\|red", "wifi": ...}}` |
+| `GET /api/stations` | Every station with its position, link state and sniffer states |
+| `GET /api/access` | `{"admin": true\|false, "client": "<address the server sees>"}` |
 | `GET /api/flights?limit=&offset=` | Flight list, most recent first. `limit` caps at 500 |
 | `GET /api/flights/{id}` | One flight's metadata plus its full point list |
 | `POST /api/flights/merge` | `{"flight_ids": [1,2]}` → `{"flight_id": <survivor>, "merged": n}`. 400 on fewer than two, 404 unknown id, 409 mismatched or in progress |
 | `POST /api/flights/delete` | `{"flight_ids": [1,2]}` → `{"deleted": n}`. 409 if one is in progress |
 | `GET /api/drones/catalog` | All catalog_key → nickname mappings |
 | `PATCH /api/drones/{catalog_key}/name` | `{"nickname": "Drone 1"}`; `""` clears it back to serial/MAC |
-| `GET/PUT/DELETE /api/station` | The station location, `{"lat": , "lon": }` |
+| `GET/PUT/DELETE /api/station` | The home point, `{"lat": , "lon": }`. PUT and DELETE are admin-only |
+| `PUT /api/station-config/{station_id}` | A station's name, location mode, and manual position. Admin-only for the master |
 | `GET /api/discord_webhook` | `{"configured": true\|false}` — never the URL |
 | `POST /api/discord_webhook/test` | Sends a test alert, exercising the role-ping path too |
 | `POST /api/test/drone/start`, `/stop`, `GET /status` | The synthetic test drone |
 
 ## Limitations
 
-- **No auth on any endpoint.** The admin flag is UI-only. `POST
-  /api/flights/merge` and `/delete` are destructive and irreversible and can
-  be called by anyone who can reach the server. Fine on a private LAN; put a
-  reverse proxy with basic auth in front of it before exposing it further.
+- **Network-based access only.** There are no user accounts. Admin-only
+  endpoints check the caller's network (see *Admin view*), so anyone who can
+  reach the server from an admin network can merge or delete flights. Put the
+  server on a private network such as a tailnet, and use a reverse proxy with
+  authentication before exposing it further.
 - **No undo, no un-merge, no split.** Copy `droneid.db` before a big tidy-up.
   If the merge window is too generous for your airspace, lower
   `DRONEID_FLIGHT_MERGE_WINDOW_S` rather than fixing it afterwards.
@@ -262,11 +280,17 @@ Responses over 1 KB are gzipped (a long flight's point list shrinks about
 - `db.py` — SQLite layer. Four tables: `drones` (catalog and nicknames),
   `flights` (one row per detection session), `track_points` (timestamped
   samples), `app_settings` (the station location).
+- `nodes.py` — the stations file: parsing, validation, and the state each
+  station reports. `node_agent.py` — the beacon every remote node runs.
+- `places.py` — place names for alerts, from `landmarks.csv` or OpenStreetMap.
 - `static/index.html` — the entire UI.
+- `MULTI-NODE.md` — setting up remote stations. `nodes.example.json` — a
+  template for `nodes.json`.
+- `test_nodes.py` — checks for the station and agent code.
 - `static/icons/` — tab and bookmark icons, built by `build-icons.py` from the
   same delta the map draws. Three marks are defined: `a` (bare dart), `b`
   (dart in a ring), `c` (dart in reticle corners — shipped). `python3
   build-icons.py a` rebuilds the set from another one; filenames don't change,
   so `index.html` needs no edit. Rasterizing needs Playwright's Chromium;
   without it the SVGs are still written and the PNG/ICO step is skipped.
-- `.env.example` — template for `.env`.
+- `.env.example` — template for `.env`. Copy it and uncomment what you need.

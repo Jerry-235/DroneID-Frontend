@@ -3,7 +3,6 @@
 import os
 import sys
 import time
-from subprocess import Popen, PIPE, STDOUT
 import argparse
 import json
 from pathlib import Path
@@ -11,28 +10,16 @@ import socket as pysock
 from threading import Thread, Event
 
 from Library.utils import search_interfaces, get_iw_interfaces, extract_wifi_if_details, enable_monitor_mode, \
-    set_interface_channel, cexec, enable_managed_mode
+    set_interface_channel, enable_managed_mode, have_raw_caps
 from OpenDroneID.wifi_parser import oui_to_parser, parse_nan_action_frame
 from scapy.all import *
-from scapy.layers.dot11 import Dot11EltVendorSpecific, Dot11, Dot11Elt
+from scapy.layers.dot11 import Dot11EltVendorSpecific, Dot11
 from scapy.packet import Raw
 import zmq
 
 verbose = False
 context = zmq.Context()
 socket = None
-
-def _have_raw_caps() -> bool:
-    """Return True if current process can open an AF_PACKET raw socket."""
-    try:
-        s = pysock.socket(pysock.AF_PACKET, pysock.SOCK_RAW, 0)
-        s.close()
-        return True
-    except PermissionError:
-        return False
-    except Exception:
-        # Treat other errors as non-fatal for this probe.
-        return True
 
 def _list_wireless_ifaces() -> list[str]:
     sys_class = Path("/sys/class/net")
@@ -87,14 +74,18 @@ def channel_hopper(interface: str, channels: tuple[int, int], dwell_times: tuple
         idx = (idx + 1) % 2
 
 def pcapng_parser(filename: str):
+    """Replays the capture in a loop until Ctrl-C. A file with no packets is
+    read once and then ends, rather than spinning forever."""
     while True:
+        count = 0
         for packet in PcapReader(filename):
+            count += 1
             try:
                 filter_frames(packet)
-            except Exception as err:
-                pass
-            except KeyboardInterrupt:
-                break
+            except Exception:
+                continue   # one frame the parser can't read doesn't stop the replay
+        if count == 0:
+            return
 
 def filter_frames(packet: Packet) -> None:
     global socket
@@ -116,13 +107,19 @@ def filter_frames(packet: Packet) -> None:
         if packet.haslayer(Dot11EltVendorSpecific):
             vendor_spec: Dot11EltVendorSpecific = packet.getlayer(Dot11EltVendorSpecific)
             while vendor_spec:
-                parser = oui_to_parser(vendor_spec.oui, vendor_spec.info)
+                try:
+                    parser = oui_to_parser(vendor_spec.oui, vendor_spec.info)
+                except Exception as e:
+                    if verbose:
+                        print(f"Error parsing vendor element: {e}")
+                    parser = None
                 if parser is not None:
-                    if "DRI" in parser.msg:
-                        macdb["DroneID"][mac] = parser.msg["DRI"]
-                        parsed = True
-                    elif "Beacon" in parser.msg:
-                        macdb["DroneID"][mac] = parser.msg["Beacon"]
+                    body = parser.msg.get("DRI", parser.msg.get("Beacon"))
+                    # Only a payload with OpenDroneID AdvData is a drone. A
+                    # frame that parsed to an empty body (DJI Wi-Fi, NAN beacon)
+                    # is skipped rather than published as an empty track.
+                    if isinstance(body, dict) and "AdvData" in body:
+                        macdb["DroneID"][mac] = body
                         parsed = True
                     break
                 # Try next vendor specific element
@@ -190,10 +187,10 @@ def main():
     args = aparse.parse_args()
 
     # Runtime capability check (works with systemd AmbientCapabilities or setcap)
-    if os.geteuid() != 0 and not _have_raw_caps():
+    if os.geteuid() != 0 and not have_raw_caps():
         print(
             "Missing CAP_NET_RAW/CAP_NET_ADMIN. Either:\n"
-            f"  sudo setcap 'CAP_NET_RAW+eip CAP_NET_ADMIN+eip' {sys.executable}\n"
+            f"  sudo setcap 'cap_net_raw,cap_net_admin+eip' {sys.executable}\n"
             "or run via systemd with AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN.\n"
         )
         exit(1)
@@ -259,6 +256,7 @@ def main():
             hop_thread.start()
 
     zthread = None
+    zmq_stop = Event()
     if args.zmq:
         socket = context.socket(zmq.XPUB)
         socket.setsockopt(zmq.XPUB_VERBOSE, True)
@@ -267,16 +265,20 @@ def main():
         socket.bind(url)
 
         def zmq_thread(socket):
-            try:
-                while True:
+            poller = zmq.Poller()
+            poller.register(socket, zmq.POLLIN)
+            while not zmq_stop.is_set():
+                try:
+                    if socket not in dict(poller.poll(500)):
+                        continue
                     event = socket.recv()
-                    # Event is one byte 0=unsub or 1=sub, followed by topic
-                    if event[0] == 1:
-                        log("new subscriber for", event[1:])
-                    elif event[0] == 0:
-                        log("unsubscribed", event[1:])
-            except zmq.error.ContextTerminated:
-                pass
+                except zmq.error.ContextTerminated:
+                    break
+                # Event is one byte 0=unsub or 1=sub, followed by topic
+                if event[0] == 1:
+                    log("new subscriber for", event[1:])
+                elif event[0] == 0:
+                    log("unsubscribed", event[1:])
 
         def log(*msg):
             s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -305,7 +307,9 @@ def main():
             hop_stop_evt.set()
             hop_thread.join(timeout=2)
         if args.zmq:
-            zthread.join()
+            zmq_stop.set()
+            zthread.join(timeout=2)
+            socket.close(linger=0)
         if interface is not None:
             i2d = extract_wifi_if_details(interface)
             enable_managed_mode(i2d, interface)

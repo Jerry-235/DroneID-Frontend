@@ -27,8 +27,7 @@
     --text:          #E6EDF3;
     --text-muted:    #7C8B99;
     --amber:         #E8A33D;   /* live drone / primary accent */
-    --amber-dim:     #7A5A28;
-    --red:           #E0645A;   /* dropped/error */
+      --red:           #E0645A;   /* dropped/error */
     --radius: 3px;
   }
   *{box-sizing:border-box;}
@@ -127,6 +126,7 @@
     transition: width 0.2s ease;
   }
   .sidebar.collapsed{ width:0; border-right:none; overflow:hidden; }
+  @media (max-width: 700px){ .sidebar{ width:min(300px, 80vw); } }
   .sidebar-empty{ padding:24px 16px; color:var(--text-muted); font-size:13px; line-height:1.5; }
   .track-row{
     padding:10px 14px; border-bottom:1px solid var(--hairline); cursor:pointer;
@@ -245,7 +245,7 @@
   }
   .track-src{
     font-size:10px; font-family:'IBM Plex Mono',monospace; color:var(--text-muted);
-    padding-left:8px; border-left:1px solid var(--border, rgba(255,255,255,0.12));
+    padding-left:8px; border-left:1px solid var(--hairline);
   }
   .op-dot{
     width:6px; height:6px; border-radius:50%; background:var(--text-muted);
@@ -432,7 +432,7 @@
   .dp-stations-toggle:hover{ color:var(--text); }
   .dp-stations-body .dp-row{ padding-left:26px; }
   .station-list{ display:flex; flex-direction:column; gap:10px; padding:0 14px; }
-  .station-card{ border:1px solid var(--border, #2a2f36); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:6px; }
+  .station-card{ border:1px solid var(--hairline); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:6px; }
   .station-card-head{ display:flex; gap:6px; align-items:center; }
   .station-name{ flex:1 1 auto; min-width:0; }
   .station-type{ font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace; }
@@ -507,7 +507,7 @@
     <div id="map"></div>
     <div class="scrubber-bar" id="scrubber">
       <div class="scrub-controls">
-        <button class="scrub-btn" id="scrub-play">▶</button>
+        <button class="scrub-btn" id="scrub-play" aria-label="Play">▶</button>
         <input type="range" class="scrub-range" id="scrub-range" min="0" max="0" value="0" step="1"
                aria-label="Scrub through this flight's recorded points">
       </div>
@@ -715,7 +715,7 @@ function refreshMasterChip() {
 }
 
 // "Wi-Fi - Name" / "Bluetooth - Name" for each (station, transport) that heard a
-// drone. The feed does not report this yet, so this is empty until it does.
+// drone, or nothing when the detection carried no radio tag (older decoders).
 const TRANSPORT_LABEL = { wifi: 'Wi-Fi', bluetooth: 'Bluetooth' };
 function sourceLabels(sources) {
   if (!Array.isArray(sources)) return [];
@@ -1271,7 +1271,7 @@ function setPanelOpen(open) {
   // browsers, which are no worse off than before).
   if (open) panel.removeAttribute('inert'); else panel.setAttribute('inert', '');
   main.classList.toggle('sheet-open', open);
-  if (!open) setPanelExpanded(false);
+  if (!open) setPanelExpanded(false, false);
   // The map's container just changed size (narrower on desktop, shorter on
   // mobile). Leaflet doesn't notice on its own; nudge it once the 200ms
   // transition finishes — same timing as the sidebar collapse. Its default
@@ -1288,14 +1288,16 @@ function setPanelOpen(open) {
   }, 220);
 }
 
-function setPanelExpanded(expanded) {
+function setPanelExpanded(expanded, recentre = true) {
   if (expanded === panelState.expanded) return;
   panelState.expanded = expanded;
   document.getElementById('detail-panel').classList.toggle('expanded', expanded);
   document.querySelector('.main').classList.toggle('sheet-expanded', expanded);
   setTimeout(() => {
     map.invalidateSize();
-    focusMap(focusedLatLng(), false);   // keep the unit centred as the sheet grows/shrinks
+    // Keep the unit centred as the sheet grows/shrinks. Not when the sheet is
+    // closing: the unit it was showing has just been dismissed.
+    if (recentre) focusMap(focusedLatLng(), false);
   }, 220);
 }
 
@@ -1580,7 +1582,7 @@ async function refreshStations() {
     const data = await res.json();
     applyStations(data.stations);
   } catch (e) { /* keep what is shown */ }
-  renderSettingsPanel();
+  if (mode === 'settings') renderSettingsPanel();
 }
 
 function renderSettingsPanel() {
@@ -1810,7 +1812,10 @@ function upsertDrone(d) {
     entry.flightLoading = true;
     entry.flightId = d.flight_id;
     const wantFlight = d.flight_id;
-    fetch(`/api/flights/${d.flight_id}`).then(r => r.json()).then(data => {
+    fetch(`/api/flights/${d.flight_id}`).then(r => {
+      if (!r.ok) throw new Error(`flight ${r.status}`);
+      return r.json();
+    }).then(data => {
       // The track may have dropped, or moved on to another flight, while this
       // was in the air. Writing into a discarded entry would build a trail
       // nothing references any more and add it to the map, where no code path
@@ -2192,6 +2197,9 @@ function renderLiveSidebar() {
         if (e.target.dataset.rename) return; // the pencil handles its own clicks below
         selectTrack(row.dataset.key);
       });
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); row.click(); }
+      });
     });
     sidebar.querySelectorAll('[data-rename]').forEach(btn => {
       btn.addEventListener('click', (e) => {
@@ -2222,12 +2230,12 @@ function renderLiveSidebar() {
 function liveRowShell(d) {
   const key = escapeHtml(d.key);
   return `
-    <div class="track-row" data-key="${key}">
+    <div class="track-row" data-key="${key}" tabindex="0" role="button">
       <div class="row-top">
         <span class="status-chip" data-f="chip"></span>
         <span class="name-line" data-f="nameline"></span>
         <span class="stale-tag" data-f="stale" hidden>STALE</span>
-        <button class="pencil-btn" data-f="pencil" data-rename="${key}" data-name="">✎</button>
+        <button class="pencil-btn" aria-label="Rename drone" data-f="pencil" data-rename="${key}" data-name="">✎</button>
       </div>
       <div class="track-sub">
         <span data-f="mac"></span>
@@ -2585,6 +2593,7 @@ async function loadHistoryList(opts = {}) {
     const limit = more ? HISTORY_PAGE : Math.max(HISTORY_PAGE, historyFlights.length);
     const res = await fetch(`/api/flights?limit=${limit}&offset=${offset}`);
     data = await res.json();
+    if (!res.ok || !Array.isArray(data.flights)) throw new Error(`flight list ${res.status}`);
   } catch (e) {
     // Without this the promise rejected into nothing and the sidebar sat on
     // "Loading flights…" forever with no clue why. Nothing retries on its own,
@@ -2631,11 +2640,11 @@ async function loadHistoryList(opts = {}) {
     const picked = pickedFlights.has(f.id);
     const inProgress = !f.ended_at;
     return `
-      <div class="track-row${sel}${picked ? ' picked' : ''}" data-flight="${f.id}" data-key="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">
+      <div class="track-row${sel}${picked ? ' picked' : ''}" tabindex="0" role="button" data-flight="${f.id}" data-key="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">
         <div class="row-top">
           <span class="status-chip" style="${inProgress ? '' : 'background:#3A4A5A'}"></span>
           ${nameLineHtml(f.display_name, historyRawIdLabel(f))}
-          <button class="pencil-btn" data-rename="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">✎</button>
+          <button class="pencil-btn" aria-label="Rename flight" data-rename="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">✎</button>
         </div>
         <div class="track-sub">
           <span class="track-date">${fmtDateTime(f.started_at)}</span>
@@ -2647,7 +2656,7 @@ async function loadHistoryList(opts = {}) {
           ${f.segment_count > 1 ? `<span title="Detection dropped out and the same aircraft came back within the merge window, so these were recorded as one flight">${f.segment_count} segments</span>` : ''}
           ${f.merged_count > 1 ? `<span title="Merged by hand from ${f.merged_count} separate flights">merged ×${f.merged_count}</span>` : ''}
           ${inProgress ? '<span style="color:#E8A33D">in progress</span>' : ''}
-          ${admin ? `<input type="checkbox" class="flight-pick" style="margin-left:auto" data-pick="${f.id}" ${picked ? 'checked' : ''} title="Select this flight for merge or delete">` : ''}
+          ${admin ? `<input type="checkbox" class="flight-pick" style="margin-left:auto" data-pick="${f.id}" ${picked ? 'checked' : ''} title="Select this flight for merge or delete" aria-label="Select this flight for merge or delete">` : ''}
         </div>
       </div>`;
   }).join('') + loadMoreHtml();
@@ -2656,6 +2665,9 @@ async function loadHistoryList(opts = {}) {
     row.addEventListener('click', (e) => {
       if (e.target.dataset.rename || e.target.dataset.pick) return;
       selectHistoryFlight(parseInt(row.dataset.flight, 10));
+    });
+    row.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); row.click(); }
     });
   });
   sidebar.querySelectorAll('[data-pick]').forEach(box => {
@@ -2923,10 +2935,9 @@ function setSidebarCollapsed(collapsed) {
 }
 
 function renderSidebar() {
+  // Only the live list refreshes on data. History loads its own list when its
+  // tab opens, and settings renders through renderSettingsPanel().
   if (mode === 'live') renderLiveSidebar();
-  else if (mode === 'history') loadHistoryList();
-  // 'settings' mode renders its own panel via renderSettingsPanel() and is
-  // untouched by live/history data updates.
 }
 
 function switchMode(next) {
@@ -2985,7 +2996,7 @@ function setConnState(connected, label) {
 
 function applyHealth(health) {
   lastHealth = health || {};
-  ['zmq', 'bluetooth', 'wifi'].forEach(ch => {
+  ['zmq'].forEach(ch => {
     const dot = document.getElementById(`health-${ch}-dot`);
     if (!dot) return;
     const state = (health && health[ch]) || 'red';
@@ -3022,9 +3033,8 @@ function nodeTitle(s) {
 // The hover card: a title, then the two sniffer lights. Green = that script is
 // running on the station, red = it isn't (or the agent has gone quiet).
 function nodeHoverHtml(s) {
-  const row = (label, c) => sniffRowHtml(label, c);
   return `<div class="tt-title">${nodeTitle(s)}</div>` +
-    row('Wi-Fi', s.wifi) + row('Bluetooth', s.bluetooth);
+    sniffRowHtml('Wi-Fi', s.wifi) + sniffRowHtml('Bluetooth', s.bluetooth);
 }
 
 function applyStations(list) {
@@ -3208,9 +3218,17 @@ function bindHealthItem(item) {
   if (supportsRealHover) {
     item.addEventListener('mouseenter', show);
     item.addEventListener('mouseleave', hide);
-    item.addEventListener('focus', show);
-    item.addEventListener('blur', hide);
   }
+  // Keyboard focus shows the card. A tap also focuses the chip, so focus only
+  // counts when the browser is showing the focus ring (keyboard).
+  item.addEventListener('focus', () => { if (item.matches(':focus-visible')) show(); });
+  item.addEventListener('blur', hide);
+  item.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      item.click();
+    }
+  });
   // Tap-to-toggle — the only interaction touch devices get, deliberately,
   // per the note above.
   item.addEventListener('click', (e) => {

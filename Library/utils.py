@@ -8,7 +8,7 @@ from scapy.all import *
 from subprocess import Popen, PIPE
 sudopw = None
 
-def _have_raw_caps() -> bool:
+def have_raw_caps() -> bool:
     """
     Return True if current process can open an AF_PACKET raw socket.
     This is a practical probe that usually indicates CAP_NET_RAW (and, in your unit, CAP_NET_ADMIN too).
@@ -65,29 +65,6 @@ def sudo(command):
     else:
         # If user refused a password, attempt direct (likely to fail), but don't hang
         return cexec(list(command))
-
-def channel_hopping(interface):
-    try:
-        # List to store the channel number and Association Response packet
-        result = []
-
-        # Loop through channels 1 to 14
-        for channel in range(1, 15):
-            # Set the channel using Scapy's set_channel() function
-            sudo(["iwconfig",interface,"channel",channel])
-
-            # Sniff for Association Response packets on the current channel
-            packets = sniff(filter="subtype 0x01", timeout=5)
-
-            # Check if any Association Response packets were captured
-            if packets:
-                # Add the channel number and the first Association Response packet to the result list
-                result.append((channel, packets[0]))
-
-        return result
-
-    except ImportError:
-        raise ImportError("Scapy library is not installed.")
 
 def search_interfaces():
     l = get_if_list()

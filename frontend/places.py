@@ -42,7 +42,6 @@ GEOCODER_CONTACT = (os.environ.get("DRONEID_GEOCODER_CONTACT") or "").strip()
 # posts without a place name.
 LOOKUP_TIMEOUT_S = float(os.environ.get("DRONEID_PLACE_TIMEOUT_S") or 2.0)
 NOMINATIM_MIN_INTERVAL_S = 1.1  # the policy is 1/s; a little headroom
-OSM_ATTRIBUTION = "© OpenStreetMap contributors"
 
 EARTH_R_M = 6371000.0
 
@@ -58,7 +57,6 @@ class Landmark:
 @dataclass(frozen=True)
 class Place:
     name: str
-    source: str  # "landmark" or "osm"
 
 
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -77,7 +75,9 @@ def load_landmarks(path: str) -> list[Landmark]:
         log.warning("No landmark file at %s — every alert will use OSM names", path)
         return []
     out: list[Landmark] = []
-    with open(path, newline="", encoding="utf-8") as f:
+    # utf-8-sig: a spreadsheet's "CSV UTF-8" export starts with a BOM, which
+    # would otherwise rename the first header and silently skip every row.
+    with open(path, newline="", encoding="utf-8-sig") as f:
         for lineno, row in enumerate(csv.DictReader(f), start=2):
             try:
                 name = (row.get("name") or "").strip()
@@ -99,13 +99,6 @@ def load_landmarks(path: str) -> list[Landmark]:
 _landmarks: list[Landmark] = load_landmarks(LANDMARKS_PATH)
 
 
-def reload_landmarks(path: Optional[str] = None) -> int:
-    """Re-reads the landmark file without restarting the server."""
-    global _landmarks
-    _landmarks = load_landmarks(path or LANDMARKS_PATH)
-    return len(_landmarks)
-
-
 def nearest_landmark(lat: float, lon: float, landmarks: Optional[list[Landmark]] = None) -> Optional[str]:
     """Name of the nearest landmark whose radius covers the point, or None."""
     best_name, best_d = None, None
@@ -119,6 +112,7 @@ def nearest_landmark(lat: float, lon: float, landmarks: Optional[list[Landmark]]
 # ---- OpenStreetMap fallback ----
 
 _cache: dict[tuple[float, float], Optional[str]] = {}
+_CACHE_MAX = 5000
 _last_call = 0.0
 _rate_lock: Optional[asyncio.Lock] = None
 _warned_no_contact = False
@@ -193,12 +187,12 @@ async def resolve(lat: Optional[float], lon: Optional[float],
         return None
     name = nearest_landmark(lat, lon)
     if name:
-        return Place(name, "landmark")
+        return Place(name)
 
     key = _cell(lat, lon)
     if key in _cache:
         cached = _cache[key]
-        return Place(cached, "osm") if cached else None
+        return Place(cached) if cached else None
     try:
         name = await asyncio.wait_for(_osm_lookup(lat, lon), timeout or LOOKUP_TIMEOUT_S)
     except asyncio.TimeoutError:
@@ -207,5 +201,7 @@ async def resolve(lat: Optional[float], lon: Optional[float],
     except Exception:
         log.exception("Place lookup failed for %.5f,%.5f", lat, lon)
         return None
+    if len(_cache) >= _CACHE_MAX:
+        _cache.clear()  # bounded: a long-running station can't grow this without limit
     _cache[key] = name  # cache "nothing here" too, so an empty spot isn't re-asked
-    return Place(name, "osm") if name else None
+    return Place(name) if name else None
