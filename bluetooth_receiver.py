@@ -17,7 +17,7 @@ if __name__ == "__main__":
     aparse = argparse.ArgumentParser(description="Host-side receiver for Sniffle BLE5 sniffer")
     aparse.add_argument("-s", "--serport", default=None, help="Sniffer serial port name")
     aparse.add_argument("-b", "--baudrate", default=None, help="Sniffer serial port baud rate")
-    aparse.add_argument("-c", "--advchan", default=37, choices=[37, 38, 39], type=int,
+    aparse.add_argument("-c", "--advchan", default=40, choices=[37, 38, 39], type=int,
             help="Advertising channel to listen on")
     aparse.add_argument("-p", "--pause", action="store_true",
             help="Pause sniffer after disconnect")
@@ -31,12 +31,12 @@ if __name__ == "__main__":
             help="Passive scanning, don't follow connections")
     aparse.add_argument("-A", "--scan", action="store_true",
             help="Active scanning, don't follow connections")
-    aparse.add_argument("-e", "--extadv", action=argparse.BooleanOptionalAction, default=True,
-            help="Use extended advertising (on by default; --no-extadv to turn off)")
+    aparse.add_argument("-e", "--extadv", action="store_true",
+            help="Capture BT5 extended (auxiliary) advertising")
     aparse.add_argument("-H", "--hop", action="store_true",
             help="Hop primary advertising channels in extended mode")
-    aparse.add_argument("-l", "--longrange", action=argparse.BooleanOptionalAction, default=True,
-            help="Use long range (coded) PHY for primary advertising (on by default; --no-longrange to turn off)")
+    aparse.add_argument("-l", "--longrange", action="store_true",
+            help="Use long range (coded) PHY for primary advertising")
     aparse.add_argument("-q", "--quiet", action="store_true",
             help="Don't display empty packets")
     aparse.add_argument("-Q", "--preload", default=None, help="Preload expected encrypted "
