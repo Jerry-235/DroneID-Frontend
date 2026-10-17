@@ -864,6 +864,7 @@ const FIELD_DEFS = {
     { key: 'tracked_time',     label: 'Tracked Time', formatter: fmtTrackedTime },
     { key: 'last_seen_elapsed', label: 'Last Seen',   formatter: fmtLastSeen },
     { key: 'tracked_by_count', label: 'Tracked By' },
+    { key: 'station_distances', label: 'Stations', expandable: true },
   ],
   'Drone': [
     { key: 'op_status',           label: 'Op Status' },
@@ -883,7 +884,6 @@ const FIELD_DEFS = {
     { key: 'loc_timestamp',       label: 'Timestamp',           formatter: fmtRemoteIdTimestamp },
     { key: 'drone_op_distance',   label: 'Distance to Operator', formatter: fmtDistance },
     { key: 'station_distance',    label: 'Distance from Station', formatter: fmtDistance },
-    { key: 'station_distances',   label: 'Stations', expandable: true },
   ],
   'Operator': [
     { key: 'op_location_type',       label: 'Op Location Type' },
@@ -898,12 +898,12 @@ const FIELD_DEFS = {
 // Requested defaults: everything else in Basic/Drone starts OFF. Operator
 // (System Message) defaults ON.
 const FIELD_DEFAULTS = {
-  'Basic': { protocol_version: false, serial: true, ua_type: false, id: false, mac: true, status: true, tracked_time: true, last_seen_elapsed: true, tracked_by_count: true },
+  'Basic': { protocol_version: false, serial: true, ua_type: false, id: false, mac: true, status: true, tracked_time: true, last_seen_elapsed: true, tracked_by_count: true, station_distances: true },
   'Drone': {
     op_status: true, height_type: true, heading: true, speed: true, vert_speed: true,
     lat: true, lon: true, pressure_altitude: false, alt: true, height_agl: true,
     vertical_accuracy: false, horizontal_accuracy: false, baro_accuracy: false,
-    speed_accuracy: false, loc_timestamp: false, station_distance: true, station_distances: true, drone_op_distance: true,
+    speed_accuracy: false, loc_timestamp: false, station_distance: true, drone_op_distance: true,
   },
   'Operator': { op_location_type: true, op_classification_type: false, op_lat: true, op_lon: true, op_station_distance: true, op_drone_distance: true },
 };
