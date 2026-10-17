@@ -13,12 +13,14 @@ from OpenDroneID.utils import structhelper_io
 verbose = False  # Global variable to control verbosity
 stop = False
 
+
 def log(*msg):
     """Logs messages to stderr if verbose is enabled."""
     global verbose
     if verbose:
         s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         print(f"{s}:", *msg, end="\n", file=sys.stderr)
+
 
 def zmq_thread(pub_socket):
     """Handles ZMQ subscriber notifications."""
@@ -38,6 +40,7 @@ def zmq_thread(pub_socket):
                 log("ZMQ Thread Error:", e)
     except zmq.error.ContextTerminated:
         pass
+
 
 def decoder_thread(socket, pub):
     """Handles Bluetooth/Wi-Fi OpenDroneID messages."""
@@ -65,7 +68,7 @@ def decoder_thread(socket, pub):
 
                     if verbose:
                         print("ZMQ Data Received:", json.dumps(dc, indent=2))
-                    
+
                     # Process Bluetooth/Wi-Fi data
                     process_decoded_data(dc, pub)
     except zmq.error.ContextTerminated:
@@ -73,6 +76,7 @@ def decoder_thread(socket, pub):
     except Exception as e:
         if verbose:
             log("Decoder Thread Error:", e)
+
 
 def uart_listener(uart_device, pub):
     """Reads ESP32 UART data and forwards it via ZMQ, with automatic reconnect."""
@@ -124,7 +128,8 @@ def uart_listener(uart_device, pub):
         except Exception as e:
             log(f"Unexpected UART error: {e}")
             time.sleep(2)
-            
+
+
 def dji_listener(dji_url, pub):
     """Subscribes to DJI Receiver and forwards data as-is."""
     global stop
@@ -154,6 +159,28 @@ def dji_listener(dji_url, pub):
         socket.close()
         context.term()
 
+
+def tag_transport(messages, transport):
+    """Stamp each decoded message with the radio it was heard on ("wifi" or
+    "bluetooth"), so the master can say which sensor saw a drone."""
+    for msg in messages:
+        if isinstance(msg, dict):
+            msg["transport"] = transport
+    return messages
+
+
+def tag_transport_json(json_data, transport):
+    """tag_transport for a JSON array string. Anything that isn't a JSON array
+    is passed through unchanged."""
+    try:
+        parsed = json.loads(json_data)
+    except (TypeError, ValueError):
+        return json_data
+    if not isinstance(parsed, list):
+        return json_data
+    return json.dumps(tag_transport(parsed, transport))
+
+
 def process_decoded_data(dc, pub):
     """Processes and forwards the decoded Bluetooth/Wi-Fi data."""
     # --- BLE path (unchanged behavior) ---
@@ -181,6 +208,7 @@ def process_decoded_data(dc, pub):
                         except json.JSONDecodeError:
                             pass
 
+                    json_data = tag_transport_json(json_data, "bluetooth")
                     if pub:
                         pub.send_string(json_data)
                     if verbose:
@@ -232,13 +260,14 @@ def process_decoded_data(dc, pub):
 
             # CHANGED: Publish once as a JSON array (BLE-style)
             if merged:
-                json_data = json.dumps(merged)
+                json_data = json.dumps(tag_transport(merged, "wifi"))
                 if pub:
                     pub.send_string(json_data)
                 if verbose:
                     print(json_data)
                 print() if verbose else None
             sys.stdout.flush()
+
 
 def main():
     global stop, verbose
@@ -247,7 +276,8 @@ def main():
     aparse.add_argument("-z", "--zmq", action="store_true", help="Enable ZMQ")
     aparse.add_argument("-v", "--verbose", action="store_true", help="Print decoded messages")
     aparse.add_argument("--zmqsetting", default="127.0.0.1:4224", help="Define ZMQ server settings")
-    aparse.add_argument("--zmqclients", default="127.0.0.1:4222,127.0.0.1:4223", help="Define Bluetooth/Wi-Fi ZMQ clients")
+    aparse.add_argument("--zmqclients", default="127.0.0.1:4222,127.0.0.1:4223",
+                        help="Define Bluetooth/Wi-Fi ZMQ clients")
     aparse.add_argument("--uart", help="UART device for pre-decoded ESP32 data (e.g., /dev/ttyACM0)")
     aparse.add_argument("--dji", help="DJI receiver ZMQ endpoint (e.g., 127.0.0.1:4221)")
     args = aparse.parse_args()
@@ -317,6 +347,6 @@ def main():
             zthread.join()
         log("Shutdown complete.")
 
+
 if __name__ == "__main__":
     main()
-
