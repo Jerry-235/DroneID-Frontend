@@ -69,6 +69,9 @@ POINT_COLUMNS = [
     # Which station reported this point. Points recorded before multi-node
     # support all came from the master, which is backfilled below.
     "station_id",
+    # Radio that heard this point ("wifi" or "bluetooth"), as tagged by the
+    # decoder. NULL for points recorded before the tag existed.
+    "transport",
 ]
 
 _REAL_POINT_COLUMNS = {
@@ -528,7 +531,10 @@ def _list_flights(limit, offset):
         """
         SELECT f.id, f.catalog_key, f.mac, f.serial, f.started_at, f.ended_at,
                f.last_point_at, f.point_count, f.segment_count, f.merged_count,
-               COALESCE(d.nickname, f.serial, f.mac, f.catalog_key) AS display_name
+               COALESCE(d.nickname, f.serial, f.mac, f.catalog_key) AS display_name,
+               (SELECT GROUP_CONCAT(DISTINCT tp.station_id || '|' || tp.transport)
+                  FROM track_points tp
+                 WHERE tp.flight_id = f.id AND tp.transport IS NOT NULL) AS source_pairs
         FROM flights f
         LEFT JOIN drones d ON d.catalog_key = f.catalog_key
         ORDER BY f.started_at DESC
@@ -536,7 +542,19 @@ def _list_flights(limit, offset):
         """,
         (limit, offset),
     ).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        pairs = d.pop("source_pairs") or ""
+        # Which (station, radio) pairs heard this flight, e.g. [{"station_id":
+        # "master", "transport": "wifi"}]. Empty for flights recorded before the
+        # decoder tagged its output.
+        d["sources"] = [
+            {"station_id": st, "transport": tr}
+            for st, tr in (p.split("|", 1) for p in pairs.split(",") if "|" in p)
+        ]
+        out.append(d)
+    return out
 
 
 def _get_flight(flight_id):

@@ -124,6 +124,9 @@ DROP_AFTER_S = float(os.environ.get("DRONEID_DROP_AFTER_S", "105"))
 # with the defaults above, the real dead-air tolerance is 105s + 300s.
 FLIGHT_MERGE_WINDOW_S = float(os.environ.get("DRONEID_FLIGHT_MERGE_WINDOW_S", "300"))
 HEALTH_TIMEOUT_S = float(os.environ.get("DRONEID_HEALTH_TIMEOUT_S", "12"))
+# How recently a radio must have heard a drone to still count as a live source
+# (the "Wi-Fi - Name" lines in the drone panel).
+SOURCE_RECENT_S = float(os.environ.get("DRONEID_SOURCE_RECENT_S", "15"))
 # How long to wait on one client before giving up on it and closing it out.
 BROADCAST_TIMEOUT_S = float(os.environ.get("DRONEID_BROADCAST_TIMEOUT_S", "5"))
 
@@ -280,6 +283,13 @@ class DroneTrack:
     # the closest-station alert distance. Internal; to_dict() turns it into
     # tracked_by / tracked_by_count.
     station_heard: dict = field(default_factory=dict)
+    # (station_id, transport) -> when that radio last heard this aircraft. Drives
+    # the Wi-Fi / Bluetooth lines in the drone panel. Internal; to_dict() reports
+    # the recent ones as "sources".
+    source_heard: dict = field(default_factory=dict)
+    # Radio ("wifi" or "bluetooth") on the latest burst, stored with its point.
+    # None when the decoder didn't say (older decoders).
+    transport: Optional[str] = None
     # Recent points, so a second station's copy of a broadcast can be spotted.
     # Internal only — never sent to clients.
     recent_points: list = field(default_factory=list, repr=False)
@@ -299,12 +309,28 @@ class DroneTrack:
         d = asdict(self)
         d.pop("recent_points", None)
         heard = d.pop("station_heard", None) or {}
+        source_heard = d.pop("source_heard", None) or {}
         now = time.time()
         tracked = sorted(s for s, t in heard.items() if now - t <= STALE_AFTER_S)
         d["tracked_by"] = tracked
         d["tracked_by_count"] = len(tracked)
+        d["sources"] = sorted(
+            ({"station_id": s, "transport": t} for (s, t), when in source_heard.items()
+             if now - when <= SOURCE_RECENT_S),
+            key=lambda x: (x["station_id"], x["transport"]),
+        )
         d["status"] = self.status()
         return d
+
+
+def _burst_transport(messages: list) -> Optional[str]:
+    """The radio a burst was heard on, as the decoder tagged it. None when no
+    message carries a tag (older decoders)."""
+    for msg in messages:
+        t = msg.get("transport") if isinstance(msg, dict) else None
+        if t in ("wifi", "bluetooth"):
+            return t
+    return None
 
 
 class TrackStore:
@@ -488,6 +514,11 @@ class TrackStore:
             track.station_heard[station_id] = time.time()
             if station_id not in track.seen_by:
                 track.seen_by.append(station_id)
+
+        transport = _burst_transport(messages)
+        track.transport = transport
+        if station_id and transport:
+            track.source_heard[(station_id, transport)] = time.time()
 
         for msg in messages:
             if "Basic ID" in msg:
