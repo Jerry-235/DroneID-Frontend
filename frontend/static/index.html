@@ -83,15 +83,27 @@
     font-size:11px; font-family:'IBM Plex Mono',monospace; color:var(--text-muted);
   }
   .health-item{ display:flex; align-items:center; gap:6px; position:relative; cursor:default; }
-  /* Other stations on the map (multi-node). Dashed = roaming, faded = no recent position. */
-  .node-badge{
-    display:inline-block; white-space:nowrap; transform:translate(-50%,-50%);
-    padding:3px 7px; border-radius:6px; border:1.5px solid #60A5FA;
-    background:#1C2A38; color:#E6EDF3; box-shadow:0 2px 6px rgba(0,0,0,0.4);
-    font:600 11px/1.2 'IBM Plex Mono',monospace;
+  /* Other stations on the map (multi-node): the same ball as the master, with a
+     link dot at its top right (green connected, red not). */
+  .node-ball{ position:relative; width:22px; height:22px; }
+  .node-ball svg{ display:block; }
+  .node-ball.stale{ opacity:0.5; }
+  .node-ball .link-dot{
+    position:absolute; right:-3px; top:-3px; width:9px; height:9px; border-radius:50%;
+    border:2px solid #0B121A;
   }
-  .node-badge.roaming{ border-style:dashed; }
-  .node-badge.stale{ opacity:0.5; }
+  .node-ball .link-dot.green{ background:#34D399; }
+  .node-ball .link-dot.red{ background:#E0645A; }
+  /* Hover card for a station, styled like the top-bar health cards. */
+  .leaflet-tooltip.node-hover{
+    background:var(--panel-raised); color:var(--text); border:1px solid var(--hairline);
+    border-radius:var(--radius); padding:10px 12px; box-shadow:0 10px 24px rgba(0,0,0,0.5);
+    font:12px/1.4 'Inter',sans-serif; white-space:nowrap;
+  }
+  .leaflet-tooltip.node-hover.leaflet-tooltip-top::before{ border-top-color:var(--hairline); }
+  .node-hover .tt-title{ font:700 12px 'IBM Plex Mono',monospace; margin-bottom:6px; color:var(--text); }
+  .node-hover .tt-row{ display:flex; align-items:center; gap:7px; margin-top:4px; }
+  .node-hover .tt-dot{ width:7px; height:7px; border-radius:50%; flex:0 0 auto; }
   .health-tooltip{
     display:none;
     position:fixed; z-index:99999;
@@ -649,15 +661,15 @@ function opIconSvg(color) {
   });
 }
 
-function stationIconSvg() {
-  return L.divIcon({
-    className: 'drone-icon',
-    html: `<svg width="22" height="22" viewBox="0 0 22 22">
+function ballSvg() {
+  return `<svg width="22" height="22" viewBox="0 0 22 22">
       <circle cx="11" cy="11" r="9" fill="#1C2A38" stroke="#E6EDF3" stroke-width="2"/>
       <circle cx="11" cy="11" r="3" fill="#E6EDF3"/>
-    </svg>`,
-    iconSize: [22, 22], iconAnchor: [11, 11]
-  });
+    </svg>`;
+}
+
+function stationIconSvg() {
+  return L.divIcon({ className: 'drone-icon', html: ballSvg(), iconSize: [22, 22], iconAnchor: [11, 11] });
 }
 
 // Haversine great-circle distance in meters — used for "distance to station".
@@ -2473,7 +2485,27 @@ function historyRawIdLabel(f) {
   return rawIdCopyLabel(f && f.display_name, f);
 }
 
-async function loadHistoryList() {
+// The history list shows flights a page at a time. historyFlights holds the
+// pages loaded so far; historyTotal is how many flights exist in all.
+const HISTORY_PAGE = 100;
+let historyFlights = [];
+let historyTotal = 0;
+let historyListSeq = 0;
+
+function loadMoreHtml() {
+  const left = historyTotal - historyFlights.length;
+  if (left <= 0) return '';
+  return `<button class="settings-btn settings-btn-ghost" id="history-load-more" type="button" `
+    + `style="margin:10px 12px;width:calc(100% - 24px)">`
+    + `Load ${Math.min(HISTORY_PAGE, left)} more (${left} left)</button>`;
+}
+
+// more: false refreshes the list from the top, keeping as many rows as are
+// already loaded so a refresh never shrinks what you've scrolled through.
+// more: true appends the next page.
+async function loadHistoryList(opts = {}) {
+  const more = opts.more === true;
+  const seq = ++historyListSeq;
   const sidebar = document.getElementById('sidebar');
   // Kept across the re-render below: a plain innerHTML replacement resets
   // scrollTop, which would throw you back to the top of a long list.
@@ -2487,7 +2519,9 @@ async function loadHistoryList() {
   }
   let data;
   try {
-    const res = await fetch('/api/flights?limit=100');
+    const offset = more ? historyFlights.length : 0;
+    const limit = more ? HISTORY_PAGE : Math.max(HISTORY_PAGE, historyFlights.length);
+    const res = await fetch(`/api/flights?limit=${limit}&offset=${offset}`);
     data = await res.json();
   } catch (e) {
     // Without this the promise rejected into nothing and the sidebar sat on
@@ -2503,8 +2537,14 @@ async function loadHistoryList() {
   // after a switch to Live would paint recorded flights over the live list and
   // leave the header reading "N flights" under the LIVE tab.
   if (mode !== 'history') return;
-  const flights = data.flights || [];
-  document.getElementById('track-count').textContent = flights.length;
+  // A newer list request has started since this one: let that one paint.
+  if (seq !== historyListSeq) return;
+  const seen = new Set(more ? historyFlights.map(f => f.id) : []);
+  const fresh = (data.flights || []).filter(f => !seen.has(f.id));
+  historyFlights = more ? historyFlights.concat(fresh) : (data.flights || []);
+  historyTotal = typeof data.total === 'number' ? data.total : historyFlights.length;
+  const flights = historyFlights;
+  document.getElementById('track-count').textContent = historyTotal;
   document.getElementById('count-label').textContent = 'flights';
 
   if (flights.length === 0) {
@@ -2547,7 +2587,7 @@ async function loadHistoryList() {
           ${admin ? `<input type="checkbox" class="flight-pick" style="margin-left:auto" data-pick="${f.id}" ${picked ? 'checked' : ''} title="Select this flight for merge or delete">` : ''}
         </div>
       </div>`;
-  }).join('');
+  }).join('') + loadMoreHtml();
 
   sidebar.querySelectorAll('.track-row').forEach(row => {
     row.addEventListener('click', (e) => {
@@ -2569,6 +2609,14 @@ async function loadHistoryList() {
       renameDrone(btn.dataset.rename, btn.dataset.name);
     });
   });
+  const moreBtn = sidebar.querySelector('#history-load-more');
+  if (moreBtn) {
+    moreBtn.addEventListener('click', () => {
+      moreBtn.disabled = true;
+      moreBtn.textContent = 'Loading…';
+      loadHistoryList({ more: true });
+    });
+  }
   sidebar.dataset.view = 'history';
   // Re-attached after the rows, since the innerHTML above wiped it.
   syncBulkBar();
@@ -2888,16 +2936,28 @@ function applyHealth(health) {
 // the top bar showing its link state.
 const nodeMarkers = new Map();   // station id -> Leaflet marker
 
-function nodeBadgeHtml(s) {
-  const cls = ['node-badge', s.kind, s.stale ? 'stale' : ''].filter(Boolean).join(' ');
-  return `<div class="${cls}">${escapeHtml(s.name)}</div>`;
+function nodeIconHtml(s) {
+  const cls = ['node-ball', s.stale ? 'stale' : ''].filter(Boolean).join(' ');
+  return `<div class="${cls}">${ballSvg()}<span class="link-dot ${s.link === 'green' ? 'green' : 'red'}"></span></div>`;
+}
+
+function nodeTitle(s) {
+  const label = s.number !== null && s.number !== undefined ? `NODE ${s.number}` : escapeHtml(s.name);
+  return `${label} - ${s.link === 'green' ? 'CONNECTED' : 'DISCONNECTED'}`;
+}
+
+// The hover card: a title, then the two sniffer lights. Green = that script is
+// running on the station, red = it isn't (or the agent has gone quiet).
+function nodeHoverHtml(s) {
+  const dot = c => (c === 'green' ? '#34D399' : '#E0645A');
+  const row = (label, c) =>
+    `<div class="tt-row"><span class="tt-dot" style="background:${dot(c)}"></span>${label} — ${c === 'green' ? 'running' : 'not running'}</div>`;
+  return `<div class="tt-title">${nodeTitle(s)}</div>` +
+    row('Wi-Fi', s.wifi) + row('Bluetooth', s.bluetooth);
 }
 
 function nodeTooltipText(s) {
-  const age = s.status_age === null || s.status_age === undefined
-    ? 'no position report yet'
-    : `position ${Math.round(s.status_age)}s ago`;
-  return s.kind === 'roaming' ? `${s.name} · link ${s.link} · ${age}` : `${s.name} · link ${s.link}`;
+  return nodeTitle(s);
 }
 
 function applyStations(list) {
@@ -2915,18 +2975,18 @@ function applyStations(list) {
       return;
     }
     if (!marker) {
-      marker = L.marker([s.lat, s.lon], { icon: L.divIcon({ className: 'node-marker', html: '', iconSize: null }) });
-      marker.bindTooltip('', { direction: 'top' });
+      marker = L.marker([s.lat, s.lon], { icon: L.divIcon({ className: 'node-marker', html: '', iconSize: [22, 22], iconAnchor: [11, 11] }) });
+      marker.bindTooltip('', { direction: 'top', className: 'node-hover' });
       stationLayer.addLayer(marker);
       nodeMarkers.set(s.id, marker);
     }
     marker.setLatLng([s.lat, s.lon]);
-    const html = nodeBadgeHtml(s);
-    if (marker._nodeHtml !== html) {   // only rebuild the badge when something visible changed
-      marker.setIcon(L.divIcon({ className: 'node-marker', html, iconSize: null }));
+    const html = nodeIconHtml(s);
+    if (marker._nodeHtml !== html) {   // only rebuild the icon when something visible changed
+      marker.setIcon(L.divIcon({ className: 'node-marker', html, iconSize: [22, 22], iconAnchor: [11, 11] }));
       marker._nodeHtml = html;
     }
-    marker.setTooltipContent(nodeTooltipText(s));
+    marker.setTooltipContent(nodeHoverHtml(s));
   });
   Array.from(nodeMarkers.keys()).forEach(id => {
     if (!live.has(id)) { stationLayer.removeLayer(nodeMarkers.get(id)); nodeMarkers.delete(id); }

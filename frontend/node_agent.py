@@ -21,6 +21,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import socket
 import sys
 import time
@@ -69,13 +70,42 @@ def _finite_or_none(v) -> Optional[float]:
     return float(v) if _finite(v) else None
 
 
+SNIFFER_SCRIPTS = {"wifi": "wifi_receiver.py", "bluetooth": "bluetooth_receiver.py"}
+
+
+def sniffer_running(script: str, proc_root: str = "/proc") -> bool:
+    """True if a process whose command line names this script is running. Reads
+    /proc directly, so it needs nothing installed. Not Linux: reports not running."""
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        return False
+    me = os.getpid()
+    for entry in entries:
+        if not entry.isdigit() or int(entry) == me:
+            continue
+        try:
+            with open(os.path.join(proc_root, entry, "cmdline"), "rb") as f:
+                argv = f.read().split(b"\0")
+        except OSError:
+            continue   # the process exited while we were looking
+        if any(os.path.basename(a.decode("utf-8", "replace")) == script for a in argv if a):
+            return True
+    return False
+
+
+def sniffer_health() -> dict:
+    return {key: sniffer_running(script) for key, script in SNIFFER_SCRIPTS.items()}
+
+
 def build_status(*, fix: Optional[dict] = None,
                  static: Optional[tuple[float, float]] = None,
-                 sats: Optional[int] = None, now: Optional[float] = None) -> dict:
+                 sats: Optional[int] = None, now: Optional[float] = None,
+                 health: Optional[dict] = None) -> dict:
     """The report the master expects. A fixed node always reports its set
     position; a roaming node reports its GPS fix, or no position at all when
     it has none (the master then keeps the last known one)."""
-    base = {"type": "node_status",
+    base = {"type": "node_status", "health": health,
             "ts": now if now is not None else time.time(), "sats": sats}
     if static is not None:
         return base | {"fix": True, "lat": static[0], "lon": static[1],
@@ -192,7 +222,7 @@ def main(argv=None) -> int:
             fix, sats = (gps.poll(budget_s=max(0.2, args.interval - 0.5)) if gps else (None, None))
             if gps is None:
                 time.sleep(args.interval)
-            pub.send_string(json.dumps(build_status(fix=fix, static=static, sats=sats)))
+            pub.send_string(json.dumps(build_status(fix=fix, static=static, sats=sats, health=sniffer_health())))
     except KeyboardInterrupt:
         return 0
 

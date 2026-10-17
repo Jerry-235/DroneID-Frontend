@@ -145,7 +145,7 @@ def parse_nodes(data, default_master_bursts: str) -> list[NodeConfig]:
             name=f"Node {number}",
             kind=kind,
             bursts=f"tcp://{ip}:{NODE_BURSTS_PORT}",
-            status=f"tcp://{ip}:{NODE_STATUS_PORT}" if kind == "roaming" else None,
+            status=f"tcp://{ip}:{NODE_STATUS_PORT}",   # every station reports health here
             lat=lat,
             lon=lon,
             number=number,
@@ -182,7 +182,12 @@ def parse_status(raw) -> Optional[dict]:
         if lat == 0 and lon == 0:
             # A receiver with no fix often reports 0,0. That is not a place.
             fix, lat, lon = False, None, None
+    health = None
+    if isinstance(raw.get("health"), dict):
+        h = raw["health"]
+        health = {"wifi": h.get("wifi") is True, "bluetooth": h.get("bluetooth") is True}
     return {
+        "health": health,
         "fix": fix,
         "lat": lat,
         "lon": lon,
@@ -219,6 +224,8 @@ class _NodeState:
     speed: Optional[float] = None
     track: Optional[float] = None
     sats: Optional[int] = None
+    health: Optional[dict] = None    # {"wifi": bool, "bluetooth": bool} from node_agent
+    last_health_at: Optional[float] = None
 
 
 class NodeRegistry:
@@ -240,13 +247,20 @@ class NodeRegistry:
             self.state[node_id].last_burst_at = now
 
     def note_status(self, node_id: str, status: dict, now: float) -> bool:
-        """Applies a position report from a roaming station's beacon. Returns
-        False, and changes nothing, for a station that isn't roaming."""
+        """Applies a report from a station's node_agent. Sniffer health is kept
+        for every external station; position only for a roaming one, since a
+        fixed station's position comes from its config. False, and nothing
+        changes, for an unknown station."""
         st = self.state.get(node_id)
         cfg = self.config.get(node_id)
-        if st is None or cfg is None or cfg.kind != "roaming":
+        if st is None or cfg is None or cfg.kind == "master":
             return False
         st.last_status_at = now
+        if status.get("health") is not None:
+            st.health = status["health"]
+            st.last_health_at = now
+        if cfg.kind != "roaming":
+            return True
         st.fix = status["fix"]
         if status["fix"]:
             st.lat, st.lon = status["lat"], status["lon"]
@@ -290,7 +304,10 @@ class NodeRegistry:
         return {
             "id": cfg.id,
             "name": cfg.name,
+            "number": cfg.number,
             "kind": cfg.kind,
+            "wifi": _sniffer_color(st, now) if cfg.kind != "master" else None,
+            "bluetooth": _sniffer_color(st, now, "bluetooth") if cfg.kind != "master" else None,
             "lat": pos[0] if pos else None,
             "lon": pos[1] if pos else None,
             "fix": (st.fix if cfg.kind == "roaming" else pos is not None),
@@ -302,6 +319,14 @@ class NodeRegistry:
             "track": st.track if cfg.kind == "roaming" else None,
             "sats": st.sats if cfg.kind == "roaming" else None,
         }
+
+
+def _sniffer_color(st: "_NodeState", now: float, key: str = "wifi") -> str:
+    """Green if that sniffer script was running at the station's last report.
+    Red if it wasn't, or if no report has arrived lately (the agent may be down)."""
+    if st.health is None or st.last_health_at is None or now - st.last_health_at > STATUS_STALE_S:
+        return "red"
+    return "green" if st.health.get(key) else "red"
 
 
 @dataclass

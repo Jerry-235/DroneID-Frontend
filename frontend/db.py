@@ -621,6 +621,17 @@ async def list_flights(limit=50, offset=0):
     return await run(_list_flights, limit, offset)
 
 
+def _count_flights():
+    conn = _require_conn()
+    return conn.execute("SELECT COUNT(*) FROM flights").fetchone()[0]
+
+
+async def count_flights():
+    """How many flights exist in all, so the history list can say how many
+    it hasn't shown yet."""
+    return await run(_count_flights)
+
+
 async def get_flight(flight_id):
     return await run(_get_flight, flight_id)
 

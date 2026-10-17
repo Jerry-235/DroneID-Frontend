@@ -993,16 +993,10 @@ async def status_listener(node):
 
 
 def _node_link(node_id: str, now: float) -> str:
-    """Same green/yellow/red meaning as the local feeds: red if the socket
-    isn't connected, yellow if it is but nothing has arrived recently, green
-    if traffic is flowing."""
-    channel = f"node:{node_id}"
-    if connection_state.get(channel) != CONNECTED:
-        return "red"
-    ts = last_message_at.get(channel)
-    if ts is not None and (now - ts) < HEALTH_TIMEOUT_S:
-        return "green"
-    return "yellow"
+    """Green while the master's socket to the station is connected, red when it
+    isn't. Only the connection is judged, not traffic, so an idle station still
+    reads as connected."""
+    return "green" if connection_state.get(f"node:{node_id}") == CONNECTED else "red"
 
 
 def stations_snapshot(now: Optional[float] = None) -> list[dict]:
@@ -1902,7 +1896,11 @@ async def api_list_flights(limit: int = 50, offset: int = 0):
     hold the single DB lock (and so all ingest) for as long as that took."""
     limit = max(1, min(int(limit), MAX_FLIGHT_PAGE))
     offset = max(0, int(offset))
-    return {"flights": await db.list_flights(limit, offset)}
+    return {
+        "flights": await db.list_flights(limit, offset),
+        "total": await db.count_flights(),
+        "offset": offset,
+    }
 
 
 @app.get("/api/flights/{flight_id}")
