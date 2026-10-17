@@ -16,6 +16,11 @@ It sends no detections. The node's decoder sends those on its own port.
 
 Bind to the node's Tailscale address, not 0.0.0.0, so only your tailnet can
 reach it. Requires pyzmq.
+
+It also watches the node's own Bluetooth and Wi-Fi sniffers over their ZMQ
+ports and reports each one as green (sending), yellow (connected but quiet) or
+red (not connected). That is the same check the master makes for its own
+sniffers, so the map shows the same states for every station.
 """
 import argparse
 import json
@@ -24,6 +29,7 @@ import math
 import os
 import socket
 import sys
+import threading
 import time
 from typing import Optional
 
@@ -70,32 +76,89 @@ def _finite_or_none(v) -> Optional[float]:
     return float(v) if _finite(v) else None
 
 
-SNIFFER_SCRIPTS = {"wifi": "wifi_receiver.py", "bluetooth": "bluetooth_receiver.py"}
+# A sniffer whose messages stop for this long is yellow (connected but idle).
+HEALTH_TIMEOUT_S = 12.0
+
+# Where each sniffer publishes on this node. These match the defaults the
+# decoder subscribes to; override with --bluetooth-zmq / --wifi-zmq if a sniffer
+# was started with a different --zmqsetting.
+SNIFFER_ZMQ = {"bluetooth": "127.0.0.1:4222", "wifi": "127.0.0.1:4223"}
 
 
-def sniffer_running(script: str, proc_root: str = "/proc") -> bool:
-    """True if a process whose command line names this script is running. Reads
-    /proc directly, so it needs nothing installed. Not Linux: reports not running."""
-    try:
-        entries = os.listdir(proc_root)
-    except OSError:
-        return False
-    me = os.getpid()
-    for entry in entries:
-        if not entry.isdigit() or int(entry) == me:
-            continue
-        try:
-            with open(os.path.join(proc_root, entry, "cmdline"), "rb") as f:
-                argv = f.read().split(b"\0")
-        except OSError:
-            continue   # the process exited while we were looking
-        if any(os.path.basename(a.decode("utf-8", "replace")) == script for a in argv if a):
-            return True
-    return False
+class SnifferWatch:
+    """Watches one sniffer's ZMQ output. Connected means the socket is up to the
+    sniffer; green means its messages are arriving; yellow means it is connected
+    but has been quiet for HEALTH_TIMEOUT_S; red means it isn't connected.
+
+    The socket runs on a background thread and reconnects on its own, so a
+    sniffer restart shows as red and then green again."""
+
+    def __init__(self, name: str, addr: str, timeout: float = HEALTH_TIMEOUT_S):
+        self.name, self.addr, self.timeout = name, addr, timeout
+        self._lock = threading.Lock()
+        self._connected = False
+        self._last_message_at: Optional[float] = None
+
+    # State changes, called from the reader thread (and directly by tests).
+    def note_connected(self, connected: bool):
+        with self._lock:
+            self._connected = connected
+
+    def note_message(self, now: float):
+        with self._lock:
+            self._last_message_at = now
+
+    def status(self, now: float) -> str:
+        with self._lock:
+            connected, last = self._connected, self._last_message_at
+        if not connected:
+            return "red"
+        if last is not None and now - last < self.timeout:
+            return "green"
+        return "yellow"
+
+    def start(self):
+        threading.Thread(target=self._run, name=f"sniffer-{self.name}", daemon=True).start()
+
+    def _run(self):
+        import zmq
+        from zmq.utils.monitor import parse_monitor_message
+        ctx = zmq.Context.instance()
+        while True:
+            sock = monitor = None
+            try:
+                sock = ctx.socket(zmq.SUB)
+                monitor = sock.get_monitor_socket()
+                sock.connect(f"tcp://{self.addr}")
+                sock.setsockopt(zmq.SUBSCRIBE, b"")
+                poller = zmq.Poller()
+                poller.register(sock, zmq.POLLIN)
+                poller.register(monitor, zmq.POLLIN)
+                while True:
+                    ready = dict(poller.poll(500))
+                    if monitor in ready:
+                        ev = parse_monitor_message(monitor.recv_multipart())["event"]
+                        if ev == zmq.EVENT_CONNECTED:
+                            self.note_connected(True)
+                        elif ev in (zmq.EVENT_DISCONNECTED, zmq.EVENT_CLOSED, zmq.EVENT_CONNECT_RETRIED):
+                            self.note_connected(False)
+                    if sock in ready:
+                        sock.recv()
+                        self.note_message(time.time())
+            except Exception:
+                log.exception("%s sniffer watch failed at %s — retrying", self.name, self.addr)
+                self.note_connected(False)
+                time.sleep(1)
+            finally:
+                for h in (monitor, sock):
+                    if h is not None:
+                        h.close(linger=0)
 
 
-def sniffer_health() -> dict:
-    return {key: sniffer_running(script) for key, script in SNIFFER_SCRIPTS.items()}
+def sniffer_health(watches: dict, now: Optional[float] = None) -> dict:
+    """{"wifi": "green"|"yellow"|"red", "bluetooth": ...} from the watches."""
+    now = now if now is not None else time.time()
+    return {key: w.status(now) for key, w in watches.items()}
 
 
 def build_status(*, fix: Optional[dict] = None,
@@ -202,18 +265,28 @@ def main(argv=None) -> int:
     ap.add_argument("--lat", type=float, help="fixed latitude (fixed nodes)")
     ap.add_argument("--lon", type=float, help="fixed longitude (fixed nodes)")
     ap.add_argument("--interval", type=float, default=2.0, help="seconds between reports [2]")
+    ap.add_argument("--bluetooth-zmq", default=SNIFFER_ZMQ["bluetooth"],
+                    help="host:port of the bluetooth sniffer's ZMQ output [127.0.0.1:4222]")
+    ap.add_argument("--wifi-zmq", default=SNIFFER_ZMQ["wifi"],
+                    help="host:port of the wifi sniffer's ZMQ output [127.0.0.1:4223]")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if (args.lat is None) != (args.lon is None):
         ap.error("give both --lat and --lon, or neither")
-    if args.lat is None and not args.gpsd:
-        ap.error("a roaming node needs --gpsd; a fixed node needs --lat and --lon")
+    # Position is optional: the master places a station from nodes.json or the
+    # web UI, so a node may run with just --bind to report its health alone.
     static = (args.lat, args.lon) if args.lat is not None else None
     gps = None
     if args.gpsd:
         host, _, port = args.gpsd.rpartition(":")
         gps = GpsdClient(host or "127.0.0.1", int(port))
+
+    watches = {"bluetooth": SnifferWatch("bluetooth", args.bluetooth_zmq),
+               "wifi": SnifferWatch("wifi", args.wifi_zmq)}
+    for w in watches.values():
+        w.start()
+        log.info("Watching %s sniffer at %s", w.name, w.addr)
 
     pub = open_publisher(args.bind)
     log.info("Publishing position on %s every %.1fs", args.bind, args.interval)
@@ -222,7 +295,8 @@ def main(argv=None) -> int:
             fix, sats = (gps.poll(budget_s=max(0.2, args.interval - 0.5)) if gps else (None, None))
             if gps is None:
                 time.sleep(args.interval)
-            pub.send_string(json.dumps(build_status(fix=fix, static=static, sats=sats, health=sniffer_health())))
+            pub.send_string(json.dumps(build_status(fix=fix, static=static, sats=sats,
+                                                    health=sniffer_health(watches))))
     except KeyboardInterrupt:
         return 0
 

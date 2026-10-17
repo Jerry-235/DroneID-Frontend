@@ -681,15 +681,18 @@ function masterIconHtml() {
 // The master's hover card, laid out like a roaming node's: title, then Wi-Fi
 // and Bluetooth rows.
 function masterHoverHtml() {
-  const label = { green: 'running', yellow: 'connected, idle', red: 'not running' };
-  const colour = { green: '#34D399', yellow: '#E8A33D', red: '#E0645A' };
-  const row = (text, ch) => {
-    const state = lastHealth[ch] === 'green' || lastHealth[ch] === 'yellow' ? lastHealth[ch] : 'red';
-    return `<div class="tt-row"><span class="tt-dot" style="background:${colour[state]}"></span>${text} — ${label[state]}</div>`;
-  };
   const link = masterLinkState() === 'green' ? 'CONNECTED' : 'DISCONNECTED';
   return `<div class="tt-title">${escapeHtml(masterStationName())} - ${link}</div>` +
-    row('Wi-Fi', 'wifi') + row('Bluetooth', 'bluetooth');
+    sniffRowHtml('Wi-Fi', lastHealth.wifi) + sniffRowHtml('Bluetooth', lastHealth.bluetooth);
+}
+
+// One sniffer's line in a hover card, the same for the master and the remote
+// nodes: green = sending, yellow = connected but quiet, red = not connected.
+function sniffRowHtml(label, state) {
+  const s = state === 'green' || state === 'yellow' ? state : 'red';
+  const text = { green: 'running', yellow: 'connected, idle', red: 'not running' }[s];
+  const colour = { green: '#34D399', yellow: '#E8A33D', red: '#E0645A' }[s];
+  return `<div class="tt-row"><span class="tt-dot" style="background:${colour}"></span>${label} — ${text}</div>`;
 }
 
 function refreshMasterMarker() {
@@ -776,6 +779,7 @@ function placeStationMarker() {
   if (!stationMarker) {
     stationMarker = L.marker(latlng, { icon: L.divIcon({ className: 'node-marker', html: '', iconSize: [22, 22], iconAnchor: [11, 11] }) });
     stationMarker.bindTooltip('', { direction: 'top', className: 'node-hover' });
+    stationMarker.on('click', () => zoomToStation('master'));
     stationLayer.addLayer(stationMarker);
   } else {
     stationMarker.setLatLng(latlng);
@@ -3000,8 +3004,8 @@ const nodeMarkers = new Map();   // station id -> Leaflet marker
 // The map dot counts the two sniffers: green when Wi-Fi and Bluetooth are both
 // running on the station, yellow when one is, red when neither is.
 function nodeLightClass(s) {
-  const running = [s.wifi, s.bluetooth].filter(c => c === 'green').length;
-  return running === 2 ? 'green' : (running === 1 ? 'yellow' : 'red');
+  const up = [s.wifi, s.bluetooth].filter(c => c === 'green' || c === 'yellow').length;
+  return up === 2 ? 'green' : (up === 1 ? 'yellow' : 'red');
 }
 
 function nodeIconHtml(s) {
@@ -3018,9 +3022,7 @@ function nodeTitle(s) {
 // The hover card: a title, then the two sniffer lights. Green = that script is
 // running on the station, red = it isn't (or the agent has gone quiet).
 function nodeHoverHtml(s) {
-  const dot = c => (c === 'green' ? '#34D399' : '#E0645A');
-  const row = (label, c) =>
-    `<div class="tt-row"><span class="tt-dot" style="background:${dot(c)}"></span>${label} — ${c === 'green' ? 'running' : 'not running'}</div>`;
+  const row = (label, c) => sniffRowHtml(label, c);
   return `<div class="tt-title">${nodeTitle(s)}</div>` +
     row('Wi-Fi', s.wifi) + row('Bluetooth', s.bluetooth);
 }
@@ -3090,10 +3092,18 @@ function renderNodeChips(list) {
 
 // Centres the map on a station at the same zoom as the start-up view. A
 // station with no position yet has nothing to centre on, so nothing happens.
+// The master is centred on its home point, the same place its map icon sits.
 function zoomToStation(stationId) {
-  const s = stationList.find(x => x.id === stationId);
-  if (!s || s.lat === null || s.lat === undefined || s.lon === null || s.lon === undefined) return;
-  map.setView([s.lat, s.lon], 14);
+  let lat, lon;
+  if (stationId === 'master') {
+    if (!stationCoord) return;
+    ({ lat, lon } = stationCoord);
+  } else {
+    const s = stationList.find(x => x.id === stationId);
+    if (!s || s.lat === null || s.lat === undefined || s.lon === null || s.lon === undefined) return;
+    ({ lat, lon } = s);
+  }
+  map.setView([lat, lon], 14);
 }
 
 function connectWs() {
@@ -3212,6 +3222,7 @@ function bindHealthItem(item) {
 }
 
 document.querySelectorAll('.health-item').forEach(bindHealthItem);
+document.getElementById('master-chip').addEventListener('click', () => zoomToStation('master'));
 
 // Tapping anywhere outside a health-item closes whatever tooltip is open —
 // mobile has no hover-away equivalent to fall back on.

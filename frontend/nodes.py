@@ -185,7 +185,7 @@ def parse_status(raw) -> Optional[dict]:
     health = None
     if isinstance(raw.get("health"), dict):
         h = raw["health"]
-        health = {"wifi": h.get("wifi") is True, "bluetooth": h.get("bluetooth") is True}
+        health = {"wifi": _sniffer_state(h.get("wifi")), "bluetooth": _sniffer_state(h.get("bluetooth"))}
     return {
         "health": health,
         "fix": fix,
@@ -224,7 +224,7 @@ class _NodeState:
     speed: Optional[float] = None
     track: Optional[float] = None
     sats: Optional[int] = None
-    health: Optional[dict] = None    # {"wifi": bool, "bluetooth": bool} from node_agent
+    health: Optional[dict] = None    # {"wifi": "green"|"yellow"|"red", "bluetooth": ...} from node_agent
     last_health_at: Optional[float] = None
 
 
@@ -321,12 +321,23 @@ class NodeRegistry:
         }
 
 
+def _sniffer_state(value) -> str:
+    """A sniffer's state as the agent reports it. Older agents sent true/false
+    for "running"; those read as green/red."""
+    if value is True:
+        return "green"
+    if value is False:
+        return "red"
+    return value if value in ("green", "yellow", "red") else "red"
+
+
 def _sniffer_color(st: "_NodeState", now: float, key: str = "wifi") -> str:
-    """Green if that sniffer script was running at the station's last report.
-    Red if it wasn't, or if no report has arrived lately (the agent may be down)."""
+    """The sniffer's state at the station's last report: green (sending), yellow
+    (connected but quiet), or red (not connected). Red as well if no report has
+    arrived lately, since the agent may be down."""
     if st.health is None or st.last_health_at is None or now - st.last_health_at > STATUS_STALE_S:
         return "red"
-    return "green" if st.health.get(key) else "red"
+    return st.health.get(key) or "red"
 
 
 @dataclass
