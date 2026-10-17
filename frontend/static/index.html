@@ -243,6 +243,10 @@
     display:flex; align-items:center; gap:5px;
     font-size:10px; font-family:'IBM Plex Mono',monospace; color:var(--text-muted);
   }
+  .track-src{
+    font-size:10px; font-family:'IBM Plex Mono',monospace; color:var(--text-muted);
+    padding-left:8px; border-left:1px solid var(--border, rgba(255,255,255,0.12));
+  }
   .op-dot{
     width:6px; height:6px; border-radius:50%; background:var(--text-muted);
     flex:0 0 auto;
@@ -479,30 +483,15 @@
   </div>
   <div class="status"><span class="dot" id="conn-dot"></span><span id="conn-label">connecting…</span></div>
   <div class="health-group">
-    <span class="health-item" tabindex="0">
-      <span class="dot" id="health-zmq-dot"></span>ZMQ
+    <!-- The master's own chip: its ZMQ link, named like the roaming node chips.
+         Name and title are filled in from the stations feed. Wi-Fi and
+         Bluetooth now live on the master's map icon and its hover card. -->
+    <span class="health-item" tabindex="0" id="master-chip">
+      <span class="dot" id="health-zmq-dot"></span><span id="master-chip-name">Station</span>
       <div class="health-tooltip">
-        <div class="tt-title">ZMQ Decoder</div>
+        <div class="tt-title" id="master-chip-title">Station — ZMQ</div>
         <div class="tt-row"><span class="tt-dot" style="background:#34D399;"></span>Green — connected, receiving data</div>
         <div class="tt-row"><span class="tt-dot" style="background:#E0645A;"></span>Red — not connected to zmq_decoder.py</div>
-      </div>
-    </span>
-    <span class="health-item" tabindex="0">
-      <span class="dot" id="health-bluetooth-dot"></span>Bluetooth
-      <div class="health-tooltip">
-        <div class="tt-title">Bluetooth Sniffer</div>
-        <div class="tt-row"><span class="tt-dot" style="background:#34D399;"></span>Green — connected, receiving data</div>
-        <div class="tt-row"><span class="tt-dot" style="background:#E8A33D;"></span>Yellow — connected, idle (no recent detections)</div>
-        <div class="tt-row"><span class="tt-dot" style="background:#E0645A;"></span>Red — bluetooth_receiver.py unreachable</div>
-      </div>
-    </span>
-    <span class="health-item" tabindex="0">
-      <span class="dot" id="health-wifi-dot"></span>WiFi
-      <div class="health-tooltip">
-        <div class="tt-title">WiFi Sniffer</div>
-        <div class="tt-row"><span class="tt-dot" style="background:#34D399;"></span>Green — connected, receiving data</div>
-        <div class="tt-row"><span class="tt-dot" style="background:#E8A33D;"></span>Yellow — connected, idle (no recent detections)</div>
-        <div class="tt-row"><span class="tt-dot" style="background:#E0645A;"></span>Red — wifi_receiver.py unreachable</div>
       </div>
     </span>
     <span id="nodes-health" style="display:contents"></span>
@@ -669,8 +658,69 @@ function ballSvg() {
     </svg>`;
 }
 
-function stationIconSvg() {
-  return L.divIcon({ className: 'drone-icon', html: ballSvg(), iconSize: [22, 22], iconAnchor: [11, 11] });
+// The master's map icon is built the same way as a roaming node's: the ball
+// with a link dot. Here the dot is the master's own Wi-Fi/Bluetooth state, and
+// its ZMQ link to the decoder drives the hover title.
+let lastHealth = {};   // the latest health snapshot, as applyHealth() received it
+
+function masterLinkState() {
+  return lastHealth.zmq === 'green' ? 'green' : 'red';
+}
+
+// Same rule as nodeLightClass(): both sniffers connected -> green, one -> yellow,
+// neither -> red. Idle (yellow health) still counts as connected here.
+function masterLightClass() {
+  const up = ['wifi', 'bluetooth'].filter(ch => lastHealth[ch] === 'green' || lastHealth[ch] === 'yellow').length;
+  return up === 2 ? 'green' : (up === 1 ? 'yellow' : 'red');
+}
+
+function masterIconHtml() {
+  return `<div class="node-ball">${ballSvg()}<span class="link-dot ${masterLightClass()}"></span></div>`;
+}
+
+// The master's hover card, laid out like a roaming node's: title, then Wi-Fi
+// and Bluetooth rows.
+function masterHoverHtml() {
+  const label = { green: 'running', yellow: 'connected, idle', red: 'not running' };
+  const colour = { green: '#34D399', yellow: '#E8A33D', red: '#E0645A' };
+  const row = (text, ch) => {
+    const state = lastHealth[ch] === 'green' || lastHealth[ch] === 'yellow' ? lastHealth[ch] : 'red';
+    return `<div class="tt-row"><span class="tt-dot" style="background:${colour[state]}"></span>${text} — ${label[state]}</div>`;
+  };
+  const link = masterLinkState() === 'green' ? 'CONNECTED' : 'DISCONNECTED';
+  return `<div class="tt-title">${escapeHtml(masterStationName())} - ${link}</div>` +
+    row('Wi-Fi', 'wifi') + row('Bluetooth', 'bluetooth');
+}
+
+function refreshMasterMarker() {
+  if (!stationMarker) return;
+  const html = masterIconHtml();
+  if (stationMarker._nodeHtml !== html) {   // only rebuild the icon when something visible changed
+    stationMarker.setIcon(L.divIcon({ className: 'node-marker', html, iconSize: [22, 22], iconAnchor: [11, 11] }));
+    stationMarker._nodeHtml = html;
+  }
+  stationMarker.setTooltipContent(masterHoverHtml());
+}
+
+// Top-bar label and ZMQ dropdown title for the master's chip.
+function refreshMasterChip() {
+  const name = masterStationName();
+  const nameEl = document.getElementById('master-chip-name');
+  const titleEl = document.getElementById('master-chip-title');
+  if (nameEl) nameEl.textContent = name;
+  if (titleEl) titleEl.textContent = `${name} — ZMQ`;
+}
+
+// "Wi-Fi - Name" / "Bluetooth - Name" for each (station, transport) that heard a
+// drone. The feed does not report this yet, so this is empty until it does.
+const TRANSPORT_LABEL = { wifi: 'Wi-Fi', bluetooth: 'Bluetooth' };
+function sourceLabels(sources) {
+  if (!Array.isArray(sources)) return [];
+  return sources.map(src => {
+    const station = stationList.find(s => s.id === src.station_id);
+    const name = station ? station.name : src.station_id;
+    return `${TRANSPORT_LABEL[src.transport] || src.transport} - ${name}`;
+  });
 }
 
 // Haversine great-circle distance in meters — used for "distance to station".
@@ -724,12 +774,13 @@ function placeStationMarker() {
   }
   const latlng = [stationCoord.lat, stationCoord.lon];
   if (!stationMarker) {
-    stationMarker = L.marker(latlng, { icon: stationIconSvg() });
-    stationMarker.bindTooltip(masterStationName(), { direction: 'top' });
+    stationMarker = L.marker(latlng, { icon: L.divIcon({ className: 'node-marker', html: '', iconSize: [22, 22], iconAnchor: [11, 11] }) });
+    stationMarker.bindTooltip('', { direction: 'top', className: 'node-hover' });
     stationLayer.addLayer(stationMarker);
   } else {
     stationMarker.setLatLng(latlng);
   }
+  refreshMasterMarker();
 }
 
 async function loadStation() {
@@ -2187,6 +2238,7 @@ function liveRowShell(d) {
         <span class="track-op-indicator" data-f="opwrap">
           <span class="op-dot" data-f="opdot"></span><span data-f="optext"></span>
         </span>
+        <span class="track-src" data-f="srcs" hidden></span>
       </div>
     </div>`;
 }
@@ -2249,6 +2301,11 @@ function updateLiveRow(row, entry) {
   dot.style.background = hasOp ? color : '';
   dot.style.boxShadow = hasOp ? `0 0 6px ${color}` : '';
   setText(f('optext'), hasOp ? 'Operator Detected' : 'No Operator Detected');
+
+  const srcLabels = sourceLabels(d.sources);
+  const srcEl = f('srcs');
+  srcEl.hidden = srcLabels.length === 0;
+  setText(srcEl, srcLabels.join(', '));
 }
 
 // ---------------- HISTORY mode ----------------
@@ -2582,6 +2639,7 @@ async function loadHistoryList(opts = {}) {
         <div class="track-sub stats">
           <span>${fmtDuration(f.started_at, f.last_point_at)}</span>
           <span>${f.point_count} pts</span>
+          ${sourceLabels(f.sources).map(l => `<span>${escapeHtml(l)}</span>`).join('')}
           ${f.segment_count > 1 ? `<span title="Detection dropped out and the same aircraft came back within the merge window, so these were recorded as one flight">${f.segment_count} segments</span>` : ''}
           ${f.merged_count > 1 ? `<span title="Merged by hand from ${f.merged_count} separate flights">merged ×${f.merged_count}</span>` : ''}
           ${inProgress ? '<span style="color:#E8A33D">in progress</span>' : ''}
@@ -2922,6 +2980,7 @@ function setConnState(connected, label) {
 }
 
 function applyHealth(health) {
+  lastHealth = health || {};
   ['zmq', 'bluetooth', 'wifi'].forEach(ch => {
     const dot = document.getElementById(`health-${ch}-dot`);
     if (!dot) return;
@@ -2929,6 +2988,7 @@ function applyHealth(health) {
     dot.classList.toggle('health-ok', state === 'green');
     dot.classList.toggle('health-yellow', state === 'yellow');
   });
+  refreshMasterMarker();
 }
 
 // ---- other stations (multi-node) ----
@@ -2968,7 +3028,8 @@ function nodeHoverHtml(s) {
 function applyStations(list) {
   if (!Array.isArray(list)) return;
   stationList = list;
-  if (stationMarker) stationMarker.setTooltipContent(masterStationName());
+  refreshMasterChip();
+  refreshMasterMarker();
   const live = new Set();
   list.forEach(s => {
     if (s.kind === 'master') return;
