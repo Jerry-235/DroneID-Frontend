@@ -93,6 +93,7 @@
     border:2px solid #0B121A;
   }
   .node-ball .link-dot.green{ background:#34D399; }
+  .node-ball .link-dot.yellow{ background:#E8A33D; }
   .node-ball .link-dot.red{ background:#E0645A; }
   /* Hover card for a station, styled like the top-bar health cards. */
   .leaflet-tooltip.node-hover{
@@ -2936,14 +2937,22 @@ function applyHealth(health) {
 // the top bar showing its link state.
 const nodeMarkers = new Map();   // station id -> Leaflet marker
 
-function nodeIconHtml(s) {
-  const cls = ['node-ball', s.stale ? 'stale' : ''].filter(Boolean).join(' ');
-  return `<div class="${cls}">${ballSvg()}<span class="link-dot ${s.link === 'green' ? 'green' : 'red'}"></span></div>`;
+// The map dot counts the two sniffers: green when Wi-Fi and Bluetooth are both
+// running on the station, yellow when one is, red when neither is.
+function nodeLightClass(s) {
+  const running = [s.wifi, s.bluetooth].filter(c => c === 'green').length;
+  return running === 2 ? 'green' : (running === 1 ? 'yellow' : 'red');
 }
 
+function nodeIconHtml(s) {
+  const cls = ['node-ball', s.stale ? 'stale' : ''].filter(Boolean).join(' ');
+  return `<div class="${cls}">${ballSvg()}<span class="link-dot ${nodeLightClass(s)}"></span></div>`;
+}
+
+// The hover card's title: the station's name, and whether the master's ZMQ
+// link to it is up.
 function nodeTitle(s) {
-  const label = s.number !== null && s.number !== undefined ? `NODE ${s.number}` : escapeHtml(s.name);
-  return `${label} - ${s.link === 'green' ? 'CONNECTED' : 'DISCONNECTED'}`;
+  return `${escapeHtml(s.name)} - ${s.link === 'green' ? 'CONNECTED' : 'DISCONNECTED'}`;
 }
 
 // The hover card: a title, then the two sniffer lights. Green = that script is
@@ -2954,10 +2963,6 @@ function nodeHoverHtml(s) {
     `<div class="tt-row"><span class="tt-dot" style="background:${dot(c)}"></span>${label} — ${c === 'green' ? 'running' : 'not running'}</div>`;
   return `<div class="tt-title">${nodeTitle(s)}</div>` +
     row('Wi-Fi', s.wifi) + row('Bluetooth', s.bluetooth);
-}
-
-function nodeTooltipText(s) {
-  return nodeTitle(s);
 }
 
 function applyStations(list) {
@@ -2977,6 +2982,7 @@ function applyStations(list) {
     if (!marker) {
       marker = L.marker([s.lat, s.lon], { icon: L.divIcon({ className: 'node-marker', html: '', iconSize: [22, 22], iconAnchor: [11, 11] }) });
       marker.bindTooltip('', { direction: 'top', className: 'node-hover' });
+      marker.on('click', () => zoomToStation(s.id));
       stationLayer.addLayer(marker);
       nodeMarkers.set(s.id, marker);
     }
@@ -2994,14 +3000,39 @@ function applyStations(list) {
   renderNodeChips(list);
 }
 
+// One top-bar item per station: its ZMQ link to the master, green or red,
+// with the same dropdown the ZMQ item has.
+function nodeChipHtml(s) {
+  const linkCls = s.link === 'green' ? 'health-ok' : '';
+  const name = escapeHtml(s.name);
+  return `<span class="health-item" tabindex="0" data-node-id="${escapeHtml(s.id)}">` +
+    `<span class="dot ${linkCls}"></span>${name}` +
+    `<div class="health-tooltip node-chip-tip">` +
+      `<div class="tt-title">${name} — ZMQ</div>` +
+      `<div class="tt-row"><span class="tt-dot" style="background:#34D399;"></span>Green — connected to the master</div>` +
+      `<div class="tt-row"><span class="tt-dot" style="background:#E0645A;"></span>Red — not connected</div>` +
+    `</div></span>`;
+}
+
 function renderNodeChips(list) {
   const box = document.getElementById('nodes-health');
   if (!box) return;
-  box.innerHTML = list.filter(s => s.kind !== 'master').map(s => {
-    const cls = s.link === 'green' ? 'health-ok' : (s.link === 'yellow' ? 'health-yellow' : '');
-    return `<span class="health-item" title="${escapeHtml(nodeTooltipText(s))}">` +
-      `<span class="dot ${cls}"></span>${escapeHtml(s.name)}</span>`;
-  }).join('');
+  // Each chip's dropdown was moved to <body> when it was bound; remove the old
+  // ones before the chips are rebuilt, or they would pile up.
+  document.querySelectorAll('body > .node-chip-tip').forEach(t => t.remove());
+  box.innerHTML = list.filter(s => s.kind !== 'master').map(nodeChipHtml).join('');
+  box.querySelectorAll('.health-item').forEach(item => {
+    bindHealthItem(item);
+    item.addEventListener('click', () => zoomToStation(item.dataset.nodeId));
+  });
+}
+
+// Centres the map on a station at the same zoom as the start-up view. A
+// station with no position yet has nothing to centre on, so nothing happens.
+function zoomToStation(stationId) {
+  const s = stationList.find(x => x.id === stationId);
+  if (!s || s.lat === null || s.lat === undefined || s.lon === null || s.lon === undefined) return;
+  map.setView([s.lat, s.lon], 14);
 }
 
 function connectWs() {
@@ -3080,7 +3111,7 @@ setInterval(() => {
 // tooltip would flash and vanish on first tap.
 const supportsRealHover = window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches;
 
-document.querySelectorAll('.health-item').forEach(item => {
+function bindHealthItem(item) {
   const tooltip = item.querySelector('.health-tooltip');
   if (!tooltip) return;
 
@@ -3117,7 +3148,9 @@ document.querySelectorAll('.health-item').forEach(item => {
     document.querySelectorAll('.health-tooltip.show').forEach(t => t.classList.remove('show'));
     if (!alreadyOpen) show();
   });
-});
+}
+
+document.querySelectorAll('.health-item').forEach(bindHealthItem);
 
 // Tapping anywhere outside a health-item closes whatever tooltip is open —
 // mobile has no hover-away equivalent to fall back on.
