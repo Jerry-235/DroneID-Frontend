@@ -1,3 +1,3 @@
 sudo ip link set $1 down
-sudo iwconfig $1 mode monitor
+sudo iw dev $1 set type monitor
 sudo ip link set $1 up
