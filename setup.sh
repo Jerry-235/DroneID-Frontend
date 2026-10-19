@@ -14,7 +14,7 @@ python3 -m venv .venv
 sudo setcap 'cap_net_raw,cap_net_admin+eip' "$(readlink -f .venv/bin/python3)"
 
 # The Wi-Fi receiver switches the adapter with these tools (Library/utils.py).
-for tool in iw iwconfig ip rfkill; do
-    command -v "$tool" >/dev/null || echo "missing: $tool (for the Wi-Fi receiver: sudo apt install iw wireless-tools rfkill)"
+for tool in iw ip rfkill; do
+    command -v "$tool" >/dev/null || echo "missing: $tool (for the Wi-Fi receiver: sudo apt install iw rfkill)"
 done
 echo "Setup complete. Activate with: source .venv/bin/activate"
