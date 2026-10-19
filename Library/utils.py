@@ -87,7 +87,7 @@ def enable_monitor_mode(i2d, interface):
     if i2d[interface][1] != "monitor":
         print("Trying to enable monitoring mode")
         sudo(["ip", "link", "set", f"{interface}", "down"])
-        sudo(["iwconfig", f"{interface}", "mode", "monitor"])
+        sudo(["iw", "dev", f"{interface}", "set", "type", "monitor"])
         i2d = extract_wifi_if_details(interface)
         if i2d[interface][1] != "monitor":
             print("Enabling monitor mode failed :(")
@@ -103,11 +103,11 @@ def enable_managed_mode(i2d, interface):
     if i2d[interface][1] != "managed":
         print("Trying to enable managed mode")
         sudo(["ip", "link", "set", f"{interface}", "down"])
-        sudo(["iwconfig", f"{interface}", "mode", "managed"])
+        sudo(["iw", "dev", f"{interface}", "set", "type", "managed"])
         sudo(["ip", "link", "set", f"{interface}", "up"])
 
 def set_interface_channel(interface, channel):
-    return sudo(["iwconfig", interface, "channel", str(channel)])
+    return sudo(["iw", "dev", interface, "set", "channel", str(channel)])
 
 def extract_wifi_if_details(interface):
     i2d = {}
