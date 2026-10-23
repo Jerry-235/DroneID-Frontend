@@ -2,8 +2,8 @@
 
 Two sources, checked in order:
 
-1. landmarks.csv next to this file — hand-curated names ("Pad 1", "Massey's",
-   "Port Isabel"). If the point falls inside a landmark's radius, the nearest
+1. landmarks.csv next to this file — hand-curated names ("Landmark A", "Landmark B",
+   "Landmark C"). If the point falls inside a landmark's radius, the nearest
    such landmark wins. Always preferred, because OpenStreetMap doesn't use
    the site's internal names.
 2. OpenStreetMap via Nominatim reverse geocoding — used only when no landmark

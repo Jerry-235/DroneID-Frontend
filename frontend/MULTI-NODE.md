@@ -5,9 +5,9 @@ station's detections land on one map. A drone heard by two stations is one
 track, and each broadcast is stored once.
 
 ```
- Highway ──┐    decoder :4224  (tailnet)
+ Station A ──┐    decoder :4224  (tailnet)
  (fixed)   ├──► MASTER ── web UI / map / history / Discord
- Rover node┘    decoder :4224  (tailnet)
+ Station B┘    decoder :4224  (tailnet)
  (roaming)      health    :4230  (tailnet, node_agent.py)
 ```
 
@@ -50,7 +50,7 @@ python3 node_agent.py --bind 100.100.10.91:4230 --gpsd 127.0.0.1:2947
 python3 node_agent.py --bind 100.100.10.90:4230
 
 # fixed node, with a position reported to the master
-python3 node_agent.py --bind 100.100.10.90:4230 --lat 25.992678 --lon -97.176886
+python3 node_agent.py --bind 100.100.10.90:4230 --lat <latitude> --lon <longitude>
 ```
 
 Bind to the node's Tailscale address. The agent reads its sniffers on
@@ -68,7 +68,7 @@ Each station is the same ball as the master, with a link dot.
 
 - **Link dot:** green means the master is connected to that station's decoder.
   Red means it isn't.
-- **Hover:** the title (for example `Highway - CONNECTED`) and two lights:
+- **Hover:** the title (for example `Station A - CONNECTED`) and two lights:
   Wi-Fi and Bluetooth.
 - **Sniffer lights:** green means the sniffer is sending, yellow means it's
   connected but quiet for `DRONEID_HEALTH_TIMEOUT_S` (12 seconds by default), and

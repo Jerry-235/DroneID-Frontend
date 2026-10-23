@@ -276,7 +276,7 @@ gives the distance from the nearest station, whether the drone is landed or
 flying, speed, heading and whether an operator position was found:
 
 ```
-## Jerry Mini 5 Detected at Highway @drone-alerts
+## Drone-1 Detected at Station A (example)
 26,614ft From Station - Currently flying at 32mph and Heading 122° - Controller Located
 ```
 

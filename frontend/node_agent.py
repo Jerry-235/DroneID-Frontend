@@ -12,7 +12,7 @@ It sends no detections. The node's decoder sends those on its own port.
     python3 node_agent.py --bind 100.100.10.91:4230 --gpsd 127.0.0.1:2947
 
     # fixed node: report a set position, no GPS needed
-    python3 node_agent.py --bind 100.100.10.90:4230 --lat 25.992678 --lon -97.176886
+    python3 node_agent.py --bind 100.100.10.90:4230 --lat <latitude> --lon <longitude>
 
 Bind to the node's Tailscale address, not 0.0.0.0, so only your tailnet can
 reach it. Requires pyzmq.
