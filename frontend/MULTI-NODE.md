@@ -6,79 +6,82 @@ track, and each broadcast is stored once.
 
 ```
  Highway ──┐    decoder :4224  (tailnet)
- (fixed)      ├──► MASTER  ── web UI / map / history / Discord
- Rover node ──┘   decoder :4224  (tailnet)
- (roaming)        health  :4230  (tailnet, node_agent.py)
+ (fixed)   ├──► MASTER ── web UI / map / history / Discord
+ Rover node┘    decoder :4224  (tailnet)
+ (roaming)      health    :4230  (tailnet, node_agent.py)
 ```
 
-Nothing changes for a single-station setup. Without `nodes.json` the master
-behaves exactly as before.
+A single station needs none of this. Without `nodes.json` the master behaves as
+it always has.
 
 ## What each station runs
 
-**Master** (the NUC): wifi_receiver, bluetooth_receiver, zmq_decoder and the
-web UI, as now. Its decoder is the `master` station.
+**Master** (the NUC): the Bluetooth and Wi-Fi receivers, `zmq_decoder.py`, and
+the web UI from this branch. Its decoder is the `master` station.
 
-**Remote node** (e.g. the Tailscale device at 100.100.10.90): Remote ID
-receivers only, with a decoder that publishes to the tailnet. From the repo
-root on the node:
+**Remote node** (for example a Tailscale device at `100.100.10.90`): the Remote
+ID receivers and a decoder that publishes to the tailnet, plus `node_agent.py`.
+The remote node has no web UI and no database. Its setup is in the `multi-node`
+branch's README.
+
+The node's decoder must bind to its Tailscale address, not `0.0.0.0`, so that
+only devices on your tailnet can reach it:
 
 ```bash
-# sniffers, local only
-./wifi_receiver.py --interface wlan0 -z --zmqsetting 127.0.0.1:4223
-./bluetooth_receiver.py -b 2000000 -s /dev/ttyUSB1 --zmqsetting 127.0.0.1:4222
-
-# decoder, published on the tailnet address only
-./zmq_decoder.py -z --zmqsetting 100.100.10.90:4224 --zmqclients 127.0.0.1:4222,127.0.0.1:4223
+.venv/bin/python zmq_decoder.py -z --zmqsetting 100.100.10.90:4224 \
+    --zmqclients 127.0.0.1:4222,127.0.0.1:4223
 ```
 
-Bind the decoder to the node's Tailscale IP, not `0.0.0.0`. Then only devices
-on your tailnet can reach it.
+### The position and health beacon
 
-**Every remote node** also runs the position beacon, `node_agent.py`. It reports
-the node's health to the master, so the master can show the link and the
-sniffers on the map. It needs `pyzmq`, and gpsd if the node has a GPS:
+Every remote node runs `node_agent.py`. It sends two things to the master on
+`:4230`:
+
+- **Position.** A roaming node reports its GPS position through gpsd. A fixed
+  node reports a position you set, or none at all.
+- **Health.** It watches the node's own sniffers over ZMQ and reports each one as
+  green, yellow or red. The master shows those lights on the node's map icon.
 
 ```bash
-# roaming node with GPS
+# roaming node with GPS (gpsd must be running)
 python3 node_agent.py --bind 100.100.10.91:4230 --gpsd 127.0.0.1:2947
 
-# any node, health only (the usual case for a fixed station)
+# fixed node, health only (the usual case)
 python3 node_agent.py --bind 100.100.10.90:4230
+
+# fixed node, with a position reported to the master
+python3 node_agent.py --bind 100.100.10.90:4230 --lat 25.992678 --lon -97.176886
 ```
 
-A station's position is set on the master, in `nodes.json` or the admin page,
-not on the node, so a fixed node needs no position here. Bind to the node's
-Tailscale address.
-
-The agent also watches the node's own sniffers over ZMQ. It subscribes to
-`wifi_receiver.py` on `127.0.0.1:4223` and `bluetooth_receiver.py` on
-`127.0.0.1:4222`, the same ports the decoder uses. If a sniffer runs on other
-ports, pass them with `--wifi-zmq` and `--bluetooth-zmq`:
-
-```bash
-python3 node_agent.py --bind 100.100.10.90:4230 --wifi-zmq 127.0.0.1:4223 --bluetooth-zmq 127.0.0.1:4222
-```
+Bind to the node's Tailscale address. The agent reads its sniffers on
+`127.0.0.1:4223` (Wi-Fi) and `127.0.0.1:4222` (Bluetooth) by default. If a
+sniffer uses other ports, pass them with `--wifi-zmq` and `--bluetooth-zmq`.
 
 A station with no agent still works, but its sniffer lights stay red.
 
-**On the map:** each station is the same ball as the master, with a link dot.
-Green means the master is connected to its decoder; red means it isn't. Hover
-for the title (`<station name> - CONNECTED` or `DISCONNECTED`, e.g. `Node 1 - CONNECTED`) and two lights: Wi-Fi and
-Bluetooth. Each light is the same on the master and the remote nodes:
+A station's position is set on the master, in `nodes.json` or the admin page,
+not on the node. A fixed node needs no position on the node itself.
 
-- green: the sniffer is sending
-- yellow: connected to the sniffer but quiet for 12 seconds
-- red: not connected to the sniffer (or the agent has stopped reporting)
+## On the map
 
-The map dot is green when both sniffers are connected (sending or quiet), yellow
-when one is, and red when neither is.
+Each station is the same ball as the master, with a link dot.
+
+- **Link dot:** green means the master is connected to that station's decoder.
+  Red means it isn't.
+- **Hover:** the title (for example `Highway - CONNECTED`) and two lights:
+  Wi-Fi and Bluetooth.
+- **Sniffer lights:** green means the sniffer is sending, yellow means it's
+  connected but quiet for `DRONEID_HEALTH_TIMEOUT_S` (12 seconds by default), and
+  red means it isn't connected, or the agent has stopped reporting.
+
+The map dot is green when both sniffers are connected, whether sending or quiet.
+It's yellow when one is, and red when neither is.
 
 ## The master: nodes.json
 
 Copy `nodes.example.json` to `nodes.json` next to `main.py`. It lists only the
-external stations, each with an ID number and an IP. The master is not listed:
-it exists whenever the program runs.
+external stations, each with an ID number and an address. The master isn't
+listed, because it exists whenever the program runs.
 
 ```json
 {
@@ -91,75 +94,82 @@ it exists whenever the program runs.
 
 | field | meaning |
 |---|---|
-| `id` | required. A number from 1 to 999, unique. Shown on the admin page as `Node - ID: 1`. |
-| `ip` | required. The station's Tailscale address. |
-| `lat`, `lon` | optional, both together. A starting position for a fixed station. The admin page can change it. |
+| `id` | required. A number from 1 to 999, unique. Shown on the admin page as `Node - ID: 1` |
+| `ip` | required. The station's Tailscale address |
+| `lat`, `lon` | optional, both together. A starting position for a fixed station. The admin page can change it |
 
-The file sets only the ID and the address. The web UI never writes to it.
-Names, Fixed or GPS mode, and manual positions are set in the admin page and
-stored in the master's database, so a moving GPS never changes the file.
+The web UI never writes to this file. Names, Fixed or GPS mode and manual
+positions are set in the admin page and stored in the master's database, so a
+moving GPS never changes the file.
 
-Ports are fixed: the decoder publishes on `:4224` and each remote node's
-node_agent on `:4230`.
+The decoder is published on `:4224` and each remote node's agent on `:4230`.
+Those ports are fixed.
 
-The file is read at startup. Restart the server after editing it. A malformed
-file stops the server with a message naming the station and field.
+The file is read at startup, so restart the server after editing it. A malformed
+file stops the server with a message that names the station and the field.
 
 ## Tailscale
 
-- The nodes must be on the tailnet and reachable from the master. Check with
+- Nodes must be on the tailnet and reachable from the master. Check with
   `tailscale ping 100.100.10.90`.
-- Use a Tailscale ACL that lets the master reach the node's ports 4224 and
-  4230, and nothing else needs to reach them. Nothing on these ports
-  authenticates; the tailnet is what keeps other people out.
+- Use a Tailscale ACL that lets the master reach the node's ports 4224 and 4230,
+  and nothing else. Nothing on these ports authenticates. The tailnet is what
+  keeps other people out.
 
 ## How duplicates are handled
 
 Two stations hearing the same drone:
 
-- **Same drone, one track.** Both feeds use the same burst format, so the
-  track is keyed by serial number exactly as before. The track shows the
-  latest report, the station that sent it, and every station that has heard it
-  (`seen_by`).
-- **Same broadcast, stored once.** A broadcast carries its own timestamp, so
-  when a second station reports the same position and timestamp it's skipped.
-  Without a timestamp, the same position within 2 seconds counts.
-- **A station's own repeats are kept.** Drones repeat each broadcast several
-  times a second. That has always been stored, and it still is, so existing
-  flight data doesn't change shape.
+- **Same drone, one track.** Both feeds use the same burst format, so the track
+  is keyed by serial number exactly as before. The track shows the latest report,
+  the station that sent it, and every station that has heard it (`seen_by`).
+- **Same broadcast, stored once.** A broadcast carries its own timestamp. When a
+  second station reports the same position and timestamp, it's skipped. Without a
+  timestamp, the same position within 2 seconds counts.
+- **A station's own repeats are kept.** Drones repeat each broadcast several times
+  a second. Those have always been stored, and they still are, so existing flight
+  data doesn't change shape.
 
 ## Decoder update on every node
 
-`zmq_decoder.py` tags each detection with the radio that heard it (`wifi` or
-`bluetooth`). The master uses that tag for the Wi-Fi / Bluetooth lines in the
-drone panel and in History. Run the updated `zmq_decoder.py` on every remote
-node, the same as the master. A node still on the old decoder keeps working,
-but its detections show no sensor line.
+`zmq_decoder.py` tags each detection with its radio (`wifi` or `bluetooth`), its
+RSSI, and its channel. The master uses the radio tag for the Wi-Fi and Bluetooth
+lines in the drone panel, and the Radio, Channel and RSSI rows in BASIC.
+
+Run the same `zmq_decoder.py` on every remote node as on the master. A node on an
+older decoder still works, but its detections show no radio line and no channel
+or RSSI.
+
+## Flight place names
+
+Flight names are set by the master, not by each station. A new flight is named
+when it starts, from its GPS fix if it has one, and that name is stored on the
+flight. Alerts and History use the same stored name, so a drone heard by two
+stations has one name. A flight that starts without a fix stays unnamed until
+the backfill script runs. See the frontend README.
 
 ## What to check after setup
 
-1. `journalctl`/the server log should show one line per station:
+1. The server log shows one line per station:
    `Subscribed to node-1 decoder output at tcp://100.100.10.90:4224`.
-2. The top bar shows the master's ZMQ chip first, named after the master, then a
-   chip for each remote station. Each chip is green when its ZMQ link to the
-   master is up and red when it isn't. Wi-Fi and Bluetooth are shown on each
-   station's map icon: green when both sniffers run, yellow when one does, red
-   when neither does.
-3. Each remote station appears on the map. A roaming station with no GPS fix
-   stays at its last known position and fades.
-4. When both stations hear the same drone, its History points show `station_id`
-   (`master`, or `node-1`, `node-2` and so on for remote stations), and it's
-   only in there once per broadcast.
+2. The top bar shows the master's ZMQ chip first, named after the master, then one
+   chip for each remote station. Each chip is green when its ZMQ link to the master
+   is up, and red when it isn't. Each station's icon on the map shows its Wi-Fi and
+   Bluetooth lights.
+3. Each remote station appears on the map. A roaming station with no GPS fix stays
+   at its last known position and fades.
+4. When two stations hear the same drone, its History points show `station_id`
+   (`master`, or `node-1`, `node-2` and so on). The broadcast appears once.
 
 ## Limits
 
 - A Discord alert names the station nearest the drone that heard it, and gives
   the distance from that station.
-- Drone popups don't show `seen_by` yet. The data is there, and it can be
-  added as a field toggle.
-- A node whose agent has been quiet for `DRONEID_NODE_STATUS_STALE_S` (60 s by
-  default) is marked stale and fades. A roaming node with no GPS fix reports
-  that, and keeps its last known position.
-- Node clocks don't matter for duplicate detection. It compares the drone's
-  own timestamps, and falls back to the master's receive time. Keep node clocks
-  roughly right for history.
+- Drone popups don't show `seen_by` yet. The data is there, and it can be added
+  as a field toggle.
+- A node whose agent has been quiet for `DRONEID_NODE_STATUS_STALE_S` (60 seconds
+  by default) is marked stale and fades. A roaming node with no GPS fix reports
+  that and keeps its last known position.
+- Node clocks don't affect duplicate detection. It compares the drone's own
+  timestamps and falls back to the master's receive time. Keep node clocks roughly
+  right for history.
