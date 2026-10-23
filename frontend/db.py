@@ -72,13 +72,16 @@ POINT_COLUMNS = [
     # Radio that heard this point ("wifi" or "bluetooth"), as tagged by the
     # decoder. NULL for points recorded before the tag existed.
     "transport",
+    # Wi-Fi channel and signal strength (dBm) of the burst behind this point.
+    # NULL for Bluetooth and for points recorded before these existed.
+    "channel", "rssi",
 ]
 
 _REAL_POINT_COLUMNS = {
     "lat", "lon", "alt", "height_agl", "heading", "speed", "op_lat", "op_lon",
     "vert_speed", "pressure_altitude",
 }
-_INTEGER_POINT_COLUMNS = {"segment"}
+_INTEGER_POINT_COLUMNS = {"segment", "channel", "rssi"}
 
 
 def _point_col_type(col: str) -> str:
@@ -171,6 +174,11 @@ def _connect(path: str = DB_PATH) -> sqlite3.Connection:
         # this one. 1 means "never merged by hand", which is true of every
         # pre-existing row.
         conn.execute("ALTER TABLE flights ADD COLUMN merged_count INTEGER NOT NULL DEFAULT 1")
+    if "location" not in flight_cols:
+        # Place name for the flight's first GPS fix: the same name the Discord
+        # alert uses, looked up once and kept. NULL = not named yet; '' = the
+        # flight never had a GPS fix, so there was nothing to name.
+        conn.execute("ALTER TABLE flights ADD COLUMN location TEXT")
 
     drone_cols = [r[1] for r in conn.execute("PRAGMA table_info(drones)").fetchall()]
     if "protocol_version" not in drone_cols:
@@ -418,7 +426,7 @@ def _get_flights_by_ids(flight_ids):
     rows = conn.execute(
         f"""
         SELECT f.id, f.catalog_key, f.mac, f.serial, f.started_at, f.ended_at,
-               f.last_point_at, f.point_count, f.segment_count, f.merged_count,
+               f.last_point_at, f.point_count, f.segment_count, f.merged_count, f.location,
                COALESCE(d.nickname, f.serial, f.mac, f.catalog_key) AS display_name
         FROM flights f
         LEFT JOIN drones d ON d.catalog_key = f.catalog_key
@@ -525,12 +533,40 @@ def _delete_flights(flight_ids):
     return deleted
 
 
+def _flight_origin(flight_id):
+    """Lat/lon of the first real fix in a flight: where the drone was first seen,
+    the same spot the Discord alert names."""
+    conn = _require_conn()
+    row = conn.execute(
+        """
+        SELECT lat, lon FROM track_points
+         WHERE flight_id = ? AND lat IS NOT NULL AND lon IS NOT NULL
+           AND NOT (lat = 0 AND lon = 0)
+         ORDER BY ts ASC LIMIT 1
+        """,
+        (flight_id,),
+    ).fetchone()
+    return (row[0], row[1]) if row else (None, None)
+
+
+def _set_flight_location(flight_id, name):
+    conn = _require_conn()
+    conn.execute("UPDATE flights SET location = ? WHERE id = ?", (name, flight_id))
+    conn.commit()
+
+
+def _flights_without_location():
+    conn = _require_conn()
+    return [r[0] for r in conn.execute(
+        "SELECT id FROM flights WHERE location IS NULL ORDER BY started_at").fetchall()]
+
+
 def _list_flights(limit, offset):
     conn = _require_conn()
     rows = conn.execute(
         """
         SELECT f.id, f.catalog_key, f.mac, f.serial, f.started_at, f.ended_at,
-               f.last_point_at, f.point_count, f.segment_count, f.merged_count,
+               f.last_point_at, f.point_count, f.segment_count, f.merged_count, f.location,
                COALESCE(d.nickname, f.serial, f.mac, f.catalog_key) AS display_name,
                (SELECT GROUP_CONCAT(DISTINCT tp.station_id || '|' || tp.transport)
                   FROM track_points tp
@@ -562,7 +598,7 @@ def _get_flight(flight_id):
     row = conn.execute(
         """
         SELECT f.id, f.catalog_key, f.mac, f.serial, f.started_at, f.ended_at,
-               f.last_point_at, f.point_count, f.segment_count, f.merged_count,
+               f.last_point_at, f.point_count, f.segment_count, f.merged_count, f.location,
                d.ua_type, d.protocol_version, d.registration_id,
                COALESCE(d.nickname, f.serial, f.mac, f.catalog_key) AS display_name
         FROM flights f LEFT JOIN drones d ON d.catalog_key = f.catalog_key
@@ -648,6 +684,10 @@ async def count_flights():
     """How many flights exist in all, so the history list can say how many
     it hasn't shown yet."""
     return await run(_count_flights)
+
+
+async def set_flight_location(flight_id, name):
+    await run(_set_flight_location, flight_id, name)
 
 
 async def get_flight(flight_id):

@@ -73,6 +73,37 @@ def channel_hopper(interface: str, channels: tuple[int, int], dwell_times: tuple
             time.sleep(0.1)
         idx = (idx + 1) % 2
 
+min_rssi = None  # set from --min-rssi in main()
+
+# 2.4 GHz channels 1-14 and 5 GHz channels 36-165 (the ones --channel accepts).
+KNOWN_CHANNELS = set(range(1, 15)) | set(range(36, 166))
+
+def freq_to_channel(freq: int):
+    """Wi-Fi channel number for a centre frequency in MHz, or None if unknown."""
+    if freq == 2484:
+        return 14
+    if 2412 <= freq <= 2472 and (freq - 2407) % 5 == 0:
+        return (freq - 2407) // 5
+    if 5180 <= freq <= 5825 and (freq - 5000) % 5 == 0:
+        return (freq - 5000) // 5
+    return None
+
+def radio_info(packet) -> dict:
+    """RSSI (dBm), frequency and channel from the radiotap header, when the capture has one."""
+    info = {}
+    rt = packet.getlayer(RadioTap)
+    if rt is None:
+        return info
+    if getattr(rt, "dBm_AntSignal", None) is not None:
+        info["RSSI"] = int(rt.dBm_AntSignal)
+    freq = getattr(rt, "ChannelFrequency", None)
+    if freq:
+        info["freq"] = int(freq)
+        channel = freq_to_channel(int(freq))
+        if channel is not None:
+            info["channel"] = channel
+    return info
+
 def pcapng_parser(filename: str):
     """Replays the capture in a loop until Ctrl-C. A file with no packets is
     read once and then ends, rather than spinning forever."""
@@ -91,6 +122,7 @@ def filter_frames(packet: Packet) -> None:
     global socket
     global verbose
     macdb = {}
+    radio = radio_info(packet)
     pt = packet.getlayer(Dot11)
     # subtype 0x8 = Beacon, 0xD = Action (NAN Service Discovery)
     # NAN Service Discovery Frames (Action 0xD) contain DRI Info in Service Descriptor
@@ -119,7 +151,7 @@ def filter_frames(packet: Packet) -> None:
                     # frame that parsed to an empty body (DJI Wi-Fi, NAN beacon)
                     # is skipped rather than published as an empty track.
                     if isinstance(body, dict) and "AdvData" in body:
-                        macdb["DroneID"][mac] = body
+                        macdb["DroneID"][mac] = {**body, **radio}
                         parsed = True
                     break
                 # Try next vendor specific element
@@ -145,11 +177,15 @@ def filter_frames(packet: Packet) -> None:
                 if raw_payload:
                     result = parse_nan_action_frame(raw_payload)
                     if result and "AdvData" in result:
-                        macdb["DroneID"][mac] = result
+                        macdb["DroneID"][mac] = {**result, **radio}
                         parsed = True
             except Exception as e:
                 if verbose:
                     print(f"Error parsing NAN action frame: {e}")
+
+        # --min-rssi: drop frames weaker than the threshold before publishing
+        if parsed and min_rssi is not None and radio.get("RSSI", -128) < min_rssi:
+            parsed = False
 
         # Output if we parsed something
         if parsed:
@@ -161,6 +197,7 @@ def filter_frames(packet: Packet) -> None:
 def main():
     global verbose
     global socket
+    global min_rssi
     info = "Host-side receiver for OpenDrone ID wifi (c) B.Kerler 2024-2025"
     print(info)
     aparse = argparse.ArgumentParser(description=info)
@@ -184,7 +221,23 @@ def main():
         default="3,1",
         help="Dwell times in seconds for 2.4GHz and 5GHz when hopping (format: twofour,five) [default: 3,1]",
     )
+    aparse.add_argument(
+        "--channel",
+        type=int,
+        default=None,
+        help="Fix the adapter on this Wi-Fi channel (1-14 or 36-165). Turns off hopping. Default: 6, or 149 with -g",
+    )
+    aparse.add_argument(
+        "--min-rssi",
+        type=int,
+        default=None,
+        help="Only publish frames at or above this signal strength in dBm (e.g. -85). Default: no filter",
+    )
     args = aparse.parse_args()
+    min_rssi = args.min_rssi
+    if args.channel is not None and args.channel not in KNOWN_CHANNELS:
+        print(f"Unknown Wi-Fi channel {args.channel}: use 1-14 or 36-165")
+        sys.exit(1)
 
     # Runtime capability check (works with systemd AmbientCapabilities or setcap)
     if os.geteuid() != 0 and not have_raw_caps():
@@ -221,12 +274,14 @@ def main():
 
     hop_thread = None
     hop_stop_evt = None
-    hop_enabled = args.g and not args.no_hop
+    hop_enabled = args.g and not args.no_hop and args.channel is None
     # When hopping, start on 2.4GHz to favor capture there; otherwise honor -g.
     if hop_enabled:
         channel = 6
     else:
         channel = 149 if args.g else 6
+    if args.channel is not None:
+        channel = args.channel
 
     if interface is not None:
         i2d = extract_wifi_if_details(interface)

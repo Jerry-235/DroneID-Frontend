@@ -863,17 +863,20 @@ function fmtLastSeen(secondsSinceLastPoint) {
 const FIELD_DEFS = {
   'Basic': [
     { key: 'protocol_version', label: 'Protocol Version' },
-    { key: 'serial',           label: 'Serial Number' },
-    { key: 'ua_type',          label: 'UA Type' },
-    { key: 'id',               label: 'ID' },
     { key: 'mac',              label: 'MAC' },
     { key: 'status',           label: 'Status' },
+    { key: 'transport',        label: 'Radio',        formatter: fmtRadio },
+    { key: 'channel',          label: 'Channel' },
+    { key: 'rssi',             label: 'Signal',       formatter: fmtRssi },
     { key: 'tracked_time',     label: 'Tracked Time', formatter: fmtTrackedTime },
     { key: 'last_seen_elapsed', label: 'Last Seen',   formatter: fmtLastSeen },
     { key: 'tracked_by_count', label: 'Tracked By' },
     { key: 'station_distances', label: 'Stations', expandable: true },
   ],
   'Drone': [
+    { key: 'serial',           label: 'Serial Number' },
+    { key: 'ua_type',          label: 'UA Type' },
+    { key: 'id',               label: 'ID' },
     { key: 'op_status',           label: 'Op Status' },
     { key: 'height_type',         label: 'Height Type' },
     { key: 'heading',             label: 'Direction',          digits: 0, unit: '°' },
@@ -905,8 +908,9 @@ const FIELD_DEFS = {
 // Requested defaults: everything else in Basic/Drone starts OFF. Operator
 // (System Message) defaults ON.
 const FIELD_DEFAULTS = {
-  'Basic': { protocol_version: false, serial: true, ua_type: false, id: false, mac: true, status: true, tracked_time: true, last_seen_elapsed: true, tracked_by_count: true, station_distances: true },
+  'Basic': { protocol_version: false, mac: true, status: true, tracked_time: true, last_seen_elapsed: true, tracked_by_count: true, station_distances: true, transport: true, channel: true, rssi: true },
   'Drone': {
+    serial: true, ua_type: false, id: false,
     op_status: true, height_type: true, heading: true, speed: true, vert_speed: true,
     lat: true, lon: true, pressure_altitude: false, alt: true, height_agl: true,
     vertical_accuracy: false, horizontal_accuracy: false, baro_accuracy: false,
@@ -1138,6 +1142,18 @@ function fmtRemoteIdTimestamp(value) {
 // the numbers in place and leaves the comparison operators and any trailing
 // prose ("or Unknown") untouched. Whole feet/mph, per spec — these are
 // coarse accuracy buckets, not measurements.
+// Radio that heard the latest detection, as the decoder tagged it.
+const RADIO_LABEL = { wifi: 'Wi-Fi', bluetooth: 'Bluetooth' };
+function fmtRadio(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  return RADIO_LABEL[value] || String(value);
+}
+// Signal strength in dBm, as the radio reported it.
+function fmtRssi(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  return `${value} dBm`;
+}
+
 function fmtAccuracy(value) {
   if (value === null || value === undefined || value === '') return '—';
   const s = String(value);
@@ -2393,6 +2409,7 @@ function historyPointData(idx) {
     // panel showed Operator Latitude 0.0000000 and a distance of several
     // thousand km — a plausible-looking number that is pure noise.
     op_lat: hasOpFix ? p.op_lat : null, op_lon: hasOpFix ? p.op_lon : null,
+    transport: p.transport, channel: p.channel, rssi: p.rssi,
     station_id: p.station_id,
   };
 }
@@ -2680,7 +2697,7 @@ async function loadHistoryList(opts = {}) {
         <div class="track-sub stats">
           <span>${fmtDuration(f.started_at, f.last_point_at)}</span>
           <span>${f.point_count} pts</span>
-          ${sourceLabels(f.sources).map(l => `<span>${escapeHtml(l)}</span>`).join('')}
+          ${f.location ? `<span>${escapeHtml(f.location)}</span>` : ''}
           ${f.segment_count > 1 ? `<span title="Detection dropped out and the same aircraft came back within the merge window, so these were recorded as one flight">${f.segment_count} segments</span>` : ''}
           ${f.merged_count > 1 ? `<span title="Merged by hand from ${f.merged_count} separate flights">merged ×${f.merged_count}</span>` : ''}
           ${inProgress ? '<span style="color:#E8A33D">in progress</span>' : ''}

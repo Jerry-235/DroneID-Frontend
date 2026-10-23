@@ -294,6 +294,10 @@ class DroneTrack:
     # Radio ("wifi" or "bluetooth") on the latest burst, stored with its point.
     # None when the decoder didn't say (older decoders).
     transport: Optional[str] = None
+    # Wi-Fi channel and signal strength (dBm) from the latest burst. None when the
+    # decoder didn't tag them (Bluetooth bursts, older decoders).
+    channel: Optional[int] = None
+    rssi: Optional[int] = None
     # Recent points, so a second station's copy of a broadcast can be spotted.
     # Internal only — never sent to clients.
     recent_points: list = field(default_factory=list, repr=False)
@@ -338,6 +342,14 @@ def _burst_transport(messages: list) -> Optional[str]:
         t = msg.get("transport") if isinstance(msg, dict) else None
         if t in ("wifi", "bluetooth"):
             return t
+    return None
+
+
+def _burst_field(messages: list, key: str):
+    """The first value of key among the burst's messages, or None."""
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get(key) is not None:
+            return msg.get(key)
     return None
 
 
@@ -527,6 +539,8 @@ class TrackStore:
 
         transport = _burst_transport(messages)
         track.transport = transport
+        track.channel = _burst_field(messages, "channel")
+        track.rssi = _burst_field(messages, "RSSI")
         if station_id and transport:
             track.source_heard[(station_id, transport)] = time.time()
 
@@ -944,10 +958,10 @@ async def _persist_update_locked(track: DroneTrack):
     track.nickname = nickname
 
     if is_new and not resumed and key != TEST_DRONE_SERIAL:
-        # Fire-and-forget: never let a slow/unreachable webhook stall ingest.
-        # The position is passed in now, not read later, so the place name
-        # is for where the drone was first seen, not where it has flown to.
-        spawn(send_new_drone_alert(track, track.lat, track.lon), "discord-alert")
+        # Name the flight once, from where the drone was first seen, and use
+        # that same name for the Discord alert. Fire-and-forget so a slow
+        # geocoder never stalls ingest.
+        spawn(name_new_flight(active_flights[key], track, track.lat, track.lon), "new-flight")
 
 
 def zmq_ctx():
@@ -1419,12 +1433,18 @@ def _post_discord_webhook_sync(url: str, content: str) -> tuple[bool, str]:
         return False, str(e)
 
 
-async def send_new_drone_alert(track: "DroneTrack", lat: Optional[float] = None, lon: Optional[float] = None):
+async def name_new_flight(flight_id, track: "DroneTrack", lat: Optional[float] = None,
+                          lon: Optional[float] = None):
+    """Looks up the place name for a new flight's first fix, saves it on the
+    flight so History never looks it up again, and posts the Discord alert with
+    it. resolve() never raises and is bounded by its own timeout, so a slow or
+    unreachable geocoder costs the name, nothing more. If no name is found the
+    flight stays unnamed and the backfill script can try again later."""
+    place = await places.resolve(lat, lon)
+    if place:
+        await db.set_flight_location(flight_id, place.name)
     if not discord_webhook_url:
         return
-    # resolve() never raises and is bounded by its own timeout, so a slow or
-    # unreachable geocoder costs the alert its place name, nothing more.
-    place = await places.resolve(lat, lon)
     message = build_new_drone_message(track, place)
     await asyncio.to_thread(_post_discord_webhook_sync, discord_webhook_url, message)
 

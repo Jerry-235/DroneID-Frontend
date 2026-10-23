@@ -255,6 +255,20 @@ def process_decoded_data(dc, pub):
                         except json.JSONDecodeError:
                             pass
 
+                    # Radio details for the track, same fields the Wi-Fi path carries:
+                    # RSSI and the BLE channel Sniffle reported for the packet.
+                    aux = dc["AUX_ADV_IND"]
+                    radio = {k: aux[src] for k, src in (("RSSI", "rssi"), ("channel", "chan")) if src in aux}
+                    if radio:
+                        try:
+                            json_obj = json.loads(json_data)
+                            if isinstance(json_obj, list):
+                                for msg in json_obj:
+                                    msg.update(radio)
+                                json_data = json.dumps(json_obj)
+                        except json.JSONDecodeError:
+                            pass
+
                     json_data = tag_transport_json(json_data, "bluetooth")
                     if pub:
                         pub.send_string(json_data)
@@ -279,8 +293,12 @@ def process_decoded_data(dc, pub):
                     fields = decode(structhelper_io(bytes.fromhex(field["AdvData"])))
                     for field_decoded in fields:
                         field_decoded["MAC"] = mac
-                        # Add RSSI to decoded fields if available
-                        if "AUX_ADV_IND" in dc:
+                        # Wi-Fi radio info (RSSI, channel, freq) from the wifi receiver
+                        for key in ("RSSI", "channel", "freq"):
+                            if key in field:
+                                field_decoded[key] = field[key]
+                        # Add RSSI to decoded fields if available (Bluetooth)
+                        if "AUX_ADV_IND" in dc and "RSSI" not in field_decoded:
                             field_decoded["RSSI"] = dc["AUX_ADV_IND"]["rssi"]
                         merged.append(field_decoded)  # CHANGED
                 except Exception as e:
@@ -288,7 +306,10 @@ def process_decoded_data(dc, pub):
             else:
                 # CHANGED: No AdvData present — still emit a list with a minimal entry
                 entry = {"MAC": mac}
-                if "AUX_ADV_IND" in dc:
+                for key in ("RSSI", "channel", "freq"):
+                    if key in field:
+                        entry[key] = field[key]
+                if "AUX_ADV_IND" in dc and "RSSI" not in entry:
                     entry["RSSI"] = dc["AUX_ADV_IND"]["rssi"]
                 # If a pre-parsed structure is already in 'field', keep it alongside MAC/RSSI
                 # but ensure we output a list for consistency with BLE
