@@ -107,7 +107,7 @@ is set on the master.
 .venv/bin/python node_agent.py --bind <tailscale-ip>:4230
 
 # fixed node, reporting a set position (no GPS)
-.venv/bin/python node_agent.py --bind <tailscale-ip>:4230 --lat 25.992678 --lon -97.176886
+.venv/bin/python node_agent.py --bind <tailscale-ip>:4230 --lat <latitude> --lon <longitude>
 ```
 
 - The agent has no ID or name of its own. The master knows which station this is
