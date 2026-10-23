@@ -6,7 +6,6 @@ import time
 import argparse
 import json
 from pathlib import Path
-import socket as pysock
 from threading import Thread, Event
 
 from Library.utils import search_interfaces, get_iw_interfaces, extract_wifi_if_details, enable_monitor_mode, \
@@ -234,6 +233,9 @@ def main():
         help="Only publish frames at or above this signal strength in dBm (e.g. -85). Default: no filter",
     )
     args = aparse.parse_args()
+    if args.interface is not None and args.pcap is not None:
+        print("Use either --interface or --pcap, not both")
+        sys.exit(1)
     min_rssi = args.min_rssi
     if args.channel is not None and args.channel not in KNOWN_CHANNELS:
         print(f"Unknown Wi-Fi channel {args.channel}: use 1-14 or 36-165")
@@ -264,11 +266,6 @@ def main():
     else:
         print("--pcap [file.pcapng] or --interface [wifi_monitor_interface] needed")
         exit(1)
-    if args.g:
-        channel = 149
-    else:
-        channel = 6
-
     if verbose:
         print(f"[auto] selected interface: {interface}")
 
@@ -316,7 +313,6 @@ def main():
         socket = context.socket(zmq.XPUB)
         socket.setsockopt(zmq.XPUB_VERBOSE, True)
         url = f"tcp://{args.zmqsetting}"
-        socket.setsockopt(zmq.XPUB_VERBOSE, True)
         socket.bind(url)
 
         def zmq_thread(socket):

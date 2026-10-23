@@ -69,7 +69,7 @@ address, not `0.0.0.0`, so only your tailnet can reach the node.
   decoder ignores everything else.
 - `-l` uses the long-range (coded) PHY. `-e -l` is the combination used on this
   hardware.
-- `-z` publishes to ZMQ.
+- Always publishes to ZMQ. `-z` is accepted but has no effect.
 
 ### 2. Wi-Fi receiver (card in monitor mode)
 
@@ -81,7 +81,7 @@ Optional flags:
 
 - `-g` also listens on 5 GHz channel 149, and hops between 6 and 149.
 - `--channel N` fixes the card on one channel (1–14 or 36–165). It turns hopping off.
-- `--min-rssi -85` drops frames weaker than that many dBm.
+- `--min-rssi -85` drops frames weaker than that many dBm, and frames with no signal reading.
 
 ### 3. Decoder, published to the master
 

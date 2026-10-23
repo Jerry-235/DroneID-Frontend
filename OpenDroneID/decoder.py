@@ -5,7 +5,7 @@ import json
 
 from .Messages.definitions import Statuses, ProtoVersions
 from .Messages.msg_authentication import Auth
-from .Messages.msg_basicid import IdTypes, UaTypes
+from .Messages.msg_basicid import IdTypes
 from .Messages.msg_locationvector import Coord, SpeedMultipliers, EWDirectionSegments, HeightTypes
 from .Messages.msg_operatorid import OperatorIDTypes
 from .Messages.msg_selfid import SelfIDTypes
