@@ -147,7 +147,7 @@ def _osm_name(data: dict) -> Optional[str]:
     return None
 
 
-def _fetch_nominatim(lat: float, lon: float) -> dict:
+def _fetch_nominatim(lat: float, lon: float, timeout: float) -> dict:
     query = urllib.parse.urlencode({
         "lat": f"{lat:.6f}",
         "lon": f"{lon:.6f}",
@@ -159,11 +159,11 @@ def _fetch_nominatim(lat: float, lon: float) -> dict:
         f"{NOMINATIM_URL}?{query}",
         headers={"User-Agent": _user_agent(), "Accept-Language": "en"},
     )
-    with urllib.request.urlopen(req, timeout=LOOKUP_TIMEOUT_S) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
-async def _osm_lookup(lat: float, lon: float) -> Optional[str]:
+async def _osm_lookup(lat: float, lon: float, timeout: float) -> Optional[str]:
     global _last_call, _rate_lock
     if _rate_lock is None:
         _rate_lock = asyncio.Lock()
@@ -172,7 +172,7 @@ async def _osm_lookup(lat: float, lon: float) -> Optional[str]:
         if wait > 0:
             await asyncio.sleep(wait)
         try:
-            data = await asyncio.to_thread(_fetch_nominatim, lat, lon)
+            data = await asyncio.to_thread(_fetch_nominatim, lat, lon, timeout)
         finally:
             _last_call = time.monotonic()
     return _osm_name(data)
@@ -194,7 +194,8 @@ async def resolve(lat: Optional[float], lon: Optional[float],
         cached = _cache[key]
         return Place(cached) if cached else None
     try:
-        name = await asyncio.wait_for(_osm_lookup(lat, lon), timeout or LOOKUP_TIMEOUT_S)
+        limit = timeout or LOOKUP_TIMEOUT_S
+        name = await asyncio.wait_for(_osm_lookup(lat, lon, limit), limit)
     except asyncio.TimeoutError:
         log.info("Place lookup timed out for %.5f,%.5f — posting without a name", lat, lon)
         return None

@@ -112,7 +112,7 @@ MAC or a serial that hadn't decoded on the first pass. Two things follow:
 
 **Live** lists current tracks, most recent first, with altitude, speed and
 heading pills and an operator-detected indicator. The ✎ pencil renames a
-drone. The name is stored once per catalog key (serial, or MAC if no serial has
+drone (admin only). The name is stored once per catalog key (serial, or MAC if no serial has
 been seen) and joined in at display time, so every past and future flight
 relabels immediately. A copy button sits at the end of the title, but only when
 the title is the aircraft's own serial or MAC, not a name you typed.
@@ -233,8 +233,8 @@ Restart the server after either command, so new flights use the updated file.
 
 ## Admin view
 
-The admin-only endpoints (station location, Discord test, debug drone, flight
-merge and delete) are refused unless the request comes from a network in
+The admin-only endpoints (drone rename, station location, Discord test, debug drone,
+flight merge and delete) are refused unless the request comes from a network in
 `DRONEID_ADMIN_NETS`. The default is the Tailscale address ranges plus loopback,
 so anyone on your tailnet is an admin and anyone else isn't. `GET /api/access`
 reports what the server allows for the caller, along with the address it sees.
@@ -315,8 +315,8 @@ Responses over 1 KB are gzipped. A long flight's point list shrinks about 20×.
 | `POST /api/flights/merge` | `{"flight_ids": [1,2]}` returns `{"flight_id": <survivor>, "merged": n}`. 400 on fewer than two, 404 for an unknown id, 409 for a mismatch or an in-progress flight |
 | `POST /api/flights/delete` | `{"flight_ids": [1,2]}` returns `{"deleted": n}`. 409 if one is in progress |
 | `GET /api/drones/catalog` | All catalog-key-to-nickname mappings |
-| `PATCH /api/drones/{catalog_key}/name` | `{"nickname": "Drone 1"}`. An empty string clears it back to serial or MAC |
-| `GET/PUT/DELETE /api/station` | The home point, `{"lat": , "lon": }`. PUT and DELETE are admin-only |
+| `PATCH /api/drones/{catalog_key}/name` | `{"nickname": "Drone 1"}`. An empty string clears it back to serial or MAC. Admin-only |
+| `GET /api/station` | The home point, `{"lat": , "lon": }`. Set it through `station-config` |
 | `PUT /api/station-config/{station_id}` | A station's name, location mode and manual position. Admin-only for the master |
 | `GET /api/discord_webhook` | `{"configured": true\|false}`. Never the URL |
 | `POST /api/discord_webhook/test` | Sends a test alert, including the role-ping path |

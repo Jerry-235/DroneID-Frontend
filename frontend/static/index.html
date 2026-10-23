@@ -1361,7 +1361,7 @@ function renderDetailPanel() {
 
   document.getElementById('dp-name').textContent = view.name;
   document.getElementById('dp-sub').innerHTML = view.subHtml;
-  document.getElementById('dp-rename').style.display = view.renameKey ? '' : 'none';
+  document.getElementById('dp-rename').style.display = view.renameKey && isAdmin() ? '' : 'none';
 
   // Rebuilt only when what it would copy changes — not on every tick, or
   // the button would be recreated under your finger and lose its tick.
@@ -2278,7 +2278,7 @@ function liveRowShell(d) {
         <span class="status-chip" data-f="chip"></span>
         <span class="name-line" data-f="nameline"></span>
         <span class="stale-tag" data-f="stale" hidden>STALE</span>
-        <button class="pencil-btn" aria-label="Rename drone" data-f="pencil" data-rename="${key}" data-name="">✎</button>
+        <button class="pencil-btn" aria-label="Rename drone" data-f="pencil" data-rename="${key}" data-name=""${isAdmin() ? '' : ' hidden'}>✎</button>
       </div>
       <div class="track-sub">
         <span data-f="mac"></span>

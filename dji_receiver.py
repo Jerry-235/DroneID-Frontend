@@ -72,10 +72,6 @@ def setup_logging(debug: bool):
     )
 
 
-def iso_timestamp_now() -> str:
-    """Return current UTC time as an ISO8601 string with 'Z' suffix."""
-    return time.strftime("%Y-%m-%dT%H:%M:%S.%fZ", time.gmtime())
-
 
 def split_frames(buf: bytearray) -> list:
     """Remove and return every complete frame at the front of buf.

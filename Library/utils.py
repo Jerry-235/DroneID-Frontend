@@ -98,7 +98,7 @@ def enable_monitor_mode(i2d, interface):
 def enable_managed_mode(i2d, interface):
     info = cexec(["iw", i2d[interface][0], "info"])
     if "* managed" not in info:
-        print(f"Interface {interface} doesn't support monitoring mode :(")
+        print(f"Interface {interface} doesn't support managed mode :(")
         exit(1)
     if i2d[interface][1] != "managed":
         print("Trying to enable managed mode")
@@ -133,8 +133,8 @@ def get_iw_interfaces(interfaces):
     print("Found interfaces:\n-----------------")
     for i in range(len(interfaces)):
         print(f"{i}:{interfaces[i]}")
-    x = input("Enter interface number:")
-    if int(x) < len(interfaces):
+    x = input("Enter interface number:").strip()
+    if x.isdigit() and int(x) < len(interfaces):
         interface = interfaces[int(x)]
     else:
         print("Invalid interface chosen.")

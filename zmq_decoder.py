@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # (c) 2024 B.Kerler
-# add jerry pike
 import json
 import sys
 import time
@@ -230,7 +229,7 @@ def tag_transport_json(json_data, transport):
 
 def process_decoded_data(dc, pub):
     """Processes and forwards the decoded Bluetooth/Wi-Fi data."""
-    # --- BLE path (unchanged behavior) ---
+    # --- BLE path ---
     if "AUX_ADV_IND" in dc and "aa" in dc["AUX_ADV_IND"] and dc["AUX_ADV_IND"]["aa"] == 0x8e89bed6:
         if "AdvData" in dc:
             try:
@@ -249,8 +248,6 @@ def process_decoded_data(dc, pub):
                                     if "Basic ID" in msg:
                                         adv_a = dc["aext"]["AdvA"].split()[0]
                                         msg["Basic ID"]["MAC"] = adv_a
-                                        # Add RSSI from AUX_ADV_IND
-                                        msg["Basic ID"]["RSSI"] = dc["AUX_ADV_IND"]["rssi"]
                             json_data = json.dumps(json_obj)
                         except json.JSONDecodeError:
                             pass
@@ -279,13 +276,13 @@ def process_decoded_data(dc, pub):
             except ValueError as e:
                 log("AdvData Decode Error:", e)
 
-    # --- Wi-Fi path (CHANGED: always publish a list like BLE) ---
+    # --- Wi-Fi path ---
     elif "DroneID" in dc:
         for mac, field in dc["DroneID"].items():
             if verbose:
                 print("Open Drone ID WIFI\n-------------------------\n")
 
-            merged = []  # CHANGED: accumulate decoded messages to publish as a list
+            merged = []  # decoded messages, published as one list
 
             # If we have raw AdvData, decode into multiple messages
             if "AdvData" in field:
@@ -300,11 +297,11 @@ def process_decoded_data(dc, pub):
                         # Add RSSI to decoded fields if available (Bluetooth)
                         if "AUX_ADV_IND" in dc and "RSSI" not in field_decoded:
                             field_decoded["RSSI"] = dc["AUX_ADV_IND"]["rssi"]
-                        merged.append(field_decoded)  # CHANGED
+                        merged.append(field_decoded)
                 except Exception as e:
                     log("Decoding Error:", e)
             else:
-                # CHANGED: No AdvData present — still emit a list with a minimal entry
+                # No AdvData: still emit a list with a minimal entry
                 entry = {"MAC": mac}
                 for key in ("RSSI", "channel", "freq"):
                     if key in field:
@@ -326,7 +323,7 @@ def process_decoded_data(dc, pub):
                 else:
                     merged.append(entry)
 
-            # CHANGED: Publish once as a JSON array (BLE-style)
+            # Publish once as a JSON array
             if merged:
                 json_data = json.dumps(tag_transport(merged, "wifi"))
                 if pub:

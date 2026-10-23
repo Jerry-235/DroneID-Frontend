@@ -20,7 +20,7 @@ persists every sample to SQLite through db.py, and serves:
 
   catalog / config
   - PATCH /api/drones/{key}/name      rename (applies retroactively)
-  - GET/PUT/DELETE /api/station       the station ("home point") location
+  - GET /api/station                  the station ("home point") location
   - GET  /api/discord_webhook         whether an alert webhook is configured
   - POST /api/discord_webhook/test    send a test alert
 
@@ -1161,7 +1161,7 @@ if DISCORD_ROLE_ID and not DISCORD_ROLE_ID.isdigit():
     )
 
 # Cached separately from the DB so building an alert never needs a DB round
-# trip on the hot path; kept in sync with /api/station's PUT/DELETE.
+# trip on the hot path; kept in sync with /api/station's GET.
 station_cache: Optional[dict] = None
 
 
@@ -1433,6 +1433,35 @@ def _post_discord_webhook_sync(url: str, content: str) -> tuple[bool, str]:
         return False, str(e)
 
 
+# ---- Discord alert queue ----
+# Every alert goes through one worker that posts at most one per ALERT_INTERVAL_S,
+# so a burst of new drones can't trip Discord's rate limit. Place lookups still
+# run in parallel per flight; only the posting is serialised.
+ALERT_INTERVAL_S = 1.0
+ALERT_MAX_TRIES = 3
+_alert_queue: Optional[asyncio.Queue] = None
+
+
+async def enqueue_alert(message: str):
+    if _alert_queue is not None:
+        await _alert_queue.put(message)
+
+
+async def alert_worker():
+    while True:
+        message = await _alert_queue.get()
+        for attempt in range(1, ALERT_MAX_TRIES + 1):
+            ok, detail = await asyncio.to_thread(_post_discord_webhook_sync, discord_webhook_url, message)
+            if ok:
+                break
+            if "HTTP 429" not in detail or attempt == ALERT_MAX_TRIES:
+                log.warning("Discord alert not sent: %s", detail)
+                break
+            log.warning("Discord rate limit hit, retrying alert (%d/%d)", attempt, ALERT_MAX_TRIES)
+            await asyncio.sleep(ALERT_INTERVAL_S)
+        await asyncio.sleep(ALERT_INTERVAL_S)
+
+
 async def name_new_flight(flight_id, track: "DroneTrack", lat: Optional[float] = None,
                           lon: Optional[float] = None):
     """Looks up the place name for a new flight's first fix, saves it on the
@@ -1446,7 +1475,7 @@ async def name_new_flight(flight_id, track: "DroneTrack", lat: Optional[float] =
     if not discord_webhook_url:
         return
     message = build_new_drone_message(track, place)
-    await asyncio.to_thread(_post_discord_webhook_sync, discord_webhook_url, message)
+    await enqueue_alert(message)
 
 
 # ---- synthetic test drone, for exercising the real pipeline without RF hardware ----
@@ -1692,21 +1721,15 @@ def is_admin_request(conn) -> bool:
 # rather than a decorator per route so there's a single place to audit, and so
 # an endpoint can't quietly end up ungated because its decorator was missed.
 ADMIN_ONLY_ROUTES = {
-    ("PUT", "/api/station"),
-    ("DELETE", "/api/station"),
     ("POST", "/api/discord_webhook/test"),
     ("POST", "/api/test/drone/start"),
     ("POST", "/api/test/drone/stop"),
     ("POST", "/api/flights/merge"),
     ("POST", "/api/flights/delete"),
-    # Renaming is deliberately NOT here: the pencil shows for everyone, as it
-    # always has, and a wrong name is trivially fixable. To lock it down, add
-    # ("PATCH", "/api/drones/") to ADMIN_ONLY_PREFIXES below. Prefixes are
-    # matched with startswith(), so a literal "<key>" placeholder would never match.
 }
 # Same idea for paths carrying a parameter — matched on the method plus a
 # path prefix instead of the whole path.
-ADMIN_ONLY_PREFIXES: set = {("PUT", "/api/station-config/")}
+ADMIN_ONLY_PREFIXES: set = {("PUT", "/api/station-config/"), ("PATCH", "/api/drones/")}
 
 
 def route_needs_admin(method: str, path: str) -> bool:
@@ -1723,7 +1746,7 @@ async def lifespan(_app: "FastAPI"):
     has deprecated. Nothing is torn down on the way out: the process exits
     immediately afterwards, the listener tasks die with the loop, and SQLite in
     WAL mode needs no explicit close to stay consistent."""
-    global station_cache, station_config, fleet
+    global station_cache, station_config, fleet, _alert_queue
     db.init(os.environ.get("DRONEID_DB_PATH", os.path.join(os.path.dirname(__file__), "droneid.db")))
     catalog_nicknames.update(await db.get_catalog())
     station_cache = parse_station(await db.get_setting("station"))
@@ -1737,6 +1760,9 @@ async def lifespan(_app: "FastAPI"):
             spawn(status_listener(node), f"status-{node.id}")
     spawn(sniffer_health_listener(BT_ZMQ_ADDR, "bluetooth"), "bt-health")
     spawn(sniffer_health_listener(WIFI_ZMQ_ADDR, "wifi"), "wifi-health")
+    if discord_webhook_url:
+        _alert_queue = asyncio.Queue()
+        spawn(alert_worker(), "discord-alerts")
     spawn(health_broadcaster(), "health-broadcast")
     spawn(station_broadcaster(), "station-broadcast")
     spawn(stale_sweeper(), "stale-sweeper")
@@ -1786,11 +1812,6 @@ class RenameBody(BaseModel):
     nickname: str
 
 
-class StationBody(BaseModel):
-    lat: float
-    lon: float
-
-
 @app.get("/api/access")
 async def api_access(request: Request):
     """What this client is allowed to do, so the UI can match what the server
@@ -1807,24 +1828,6 @@ async def api_get_station():
     fields if it hasn't been set yet."""
     station = parse_station(await db.get_setting("station"))
     return station or {"lat": None, "lon": None}
-
-
-@app.put("/api/station")
-async def api_set_station(body: StationBody):
-    if not (-90 <= body.lat <= 90) or not (-180 <= body.lon <= 180):
-        return JSONResponse({"error": "lat/lon out of range"}, status_code=400)
-    global station_cache
-    await db.set_setting("station", json.dumps({"lat": body.lat, "lon": body.lon}))
-    station_cache = {"lat": body.lat, "lon": body.lon}
-    return {"ok": True, "lat": body.lat, "lon": body.lon}
-
-
-@app.delete("/api/station")
-async def api_delete_station():
-    global station_cache
-    await db.delete_setting("station")
-    station_cache = None
-    return {"ok": True}
 
 
 class StationConfigBody(BaseModel):

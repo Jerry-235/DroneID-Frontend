@@ -94,7 +94,7 @@ The frontend needs its own packages. Install them into the same venv:
   the decoder ignores anything else, so without `-e` nothing is decoded.
 - `-l` uses the long-range (coded) PHY. `-e -l` is the combination used on
   this hardware.
-- `-z` publishes to ZMQ. Without it the receiver only prints.
+- The receiver always publishes to ZMQ. `-z` is accepted but has no effect.
 
 ## Wi-Fi Remote ID
 
@@ -129,7 +129,7 @@ cover them:
 | `--hop-cycle 3,1` | Seconds to dwell on 2.4 GHz and on 5 GHz while hopping |
 | `--no-hop` | With `-g`, stay on 5 GHz only |
 | `--channel N` | Fix the card on one channel, 1–14 or 36–165. Turns hopping off |
-| `--min-rssi -85` | Drop frames weaker than this many dBm before publishing |
+| `--min-rssi -85` | Drop frames weaker than this many dBm, and frames with no signal reading, before publishing |
 | `-v` | Print every decoded message |
 
 Every Wi-Fi detection carries the channel and signal strength it was heard on.
