@@ -47,6 +47,7 @@ win over `.env`. Everything is read at startup, so changes need a restart.
 | `DRONEID_NODES_PATH` | `nodes.json` beside `main.py` | Remote stations file (see `MULTI-NODE.md`) |
 | `DRONEID_NODE_STATUS_STALE_S` | `60` | Silence from a station's `node_agent` before its status counts as old |
 | `DRONEID_ADMIN_NETS` | Tailscale ranges and loopback | Networks allowed to use admin-only endpoints |
+| `DRONEID_MASTER_GPSD` | off | `host:port` of a gpsd that reads a GPS receiver on this machine, e.g. `127.0.0.1:2947` |
 | `DRONEID_TRUST_FORWARDED_FOR` | off | Read the client address from `X-Forwarded-For`. Only behind a proxy that overwrites that header |
 | `DRONEID_DISCORD_WEBHOOK` | none | Enables alerts (see *Discord alerts*) |
 | `DRONEID_DISCORD_ROLE_ID` | none | Numeric role ID to ping on each alert |
@@ -231,6 +232,31 @@ names it gave, because those names are stored.
 
 Restart the server after either command, so new flights use the updated file.
 
+## Master GPS
+
+The master can take its own position from a GPS receiver plugged into the
+machine, such as a USB GPS stick. The receiver is read through gpsd:
+
+```bash
+sudo apt install gpsd gpsd-clients
+ls /dev/ttyACM* /dev/ttyUSB*                       # the stick's serial device
+sudo gpsd /dev/ttyACM0 -F /var/run/gpsd.sock -n   # use the device you found
+cgps -s                                            # wait for a 3D fix
+DRONEID_MASTER_GPSD=127.0.0.1:2947 .venv/bin/python main.py
+```
+
+Then set the master to GPS on the Station settings page. Its icon follows the
+fix, and distances use it. Switching back to Manual returns it to the saved home
+point. Remote nodes already work the same way, through their own node_agent.
+
+GPS state shows on each icon's hover card and on the station's top-bar name:
+
+| Time without a fix | State | Icon |
+|---|---|---|
+| under 2 min | Live | Drawn at the live fix |
+| 2 to 5 min | Stale | Drawn at its last fix, faded |
+| 5 min, or never had one | Disconnected | Drawn at its last fix, greyed, only while the station is still connected (ZMQ up and at least one sniffer running). Otherwise it is taken off the map |
+
 ## Admin view
 
 The admin-only endpoints (drone rename, station location, Discord test, debug drone,
@@ -317,7 +343,7 @@ Responses over 1 KB are gzipped. A long flight's point list shrinks about 20×.
 | `GET /api/drones/catalog` | All catalog-key-to-nickname mappings |
 | `PATCH /api/drones/{catalog_key}/name` | `{"nickname": "Drone 1"}`. An empty string clears it back to serial or MAC. Admin-only |
 | `GET /api/station` | The home point, `{"lat": , "lon": }`. Set it through `station-config` |
-| `PUT /api/station-config/{station_id}` | A station's name, location mode and manual position. Admin-only for the master |
+| `PUT /api/station-config/{station_id}` | A station's name, location mode, manual position and map icon (`ball`, `ring`, `hex`, `radio`, `car`). Admin-only |
 | `GET /api/discord_webhook` | `{"configured": true\|false}`. Never the URL |
 | `POST /api/discord_webhook/test` | Sends a test alert, including the role-ping path |
 | `POST /api/test/drone/start`, `/stop`, `GET /status` | The synthetic test drone |

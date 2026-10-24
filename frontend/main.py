@@ -70,6 +70,7 @@ except ImportError:
 import db
 import places
 import nodes as node_cfg
+from node_agent import GpsdClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("droneid-frontend")
@@ -103,6 +104,9 @@ ZMQ_ADDR = os.environ.get("DRONEID_ZMQ_ADDR", "tcp://127.0.0.1:4224")
 # the only source used for actual drone data.
 BT_ZMQ_ADDR = os.environ.get("DRONEID_BT_ZMQ_ADDR", "tcp://127.0.0.1:4222")
 WIFI_ZMQ_ADDR = os.environ.get("DRONEID_WIFI_ZMQ_ADDR", "tcp://127.0.0.1:4223")
+# Optional GPS for the master itself: a GPS receiver on this machine, read through
+# its gpsd. Empty means no master GPS feed. Format: host:port, e.g. 127.0.0.1:2947.
+MASTER_GPSD = os.environ.get("DRONEID_MASTER_GPSD", "").strip()
 # Every station this server ingests from. Missing file = just this master,
 # exactly as before multi-node support. See MULTI-NODE.md.
 NODES_PATH = os.environ.get("DRONEID_NODES_PATH") or os.path.join(
@@ -994,12 +998,29 @@ async def watch_connection_state(monitor, channel: str):
             await asyncio.sleep(1)
 
 
+# A station's ZMQ connection can die with no TCP close (a power cut, a pulled
+# cable). Without heartbeats nothing tells the master, the socket stays
+# "connected", and the link never goes red. Heartbeats make ZMQ notice within
+# about 8 seconds, which fires the monitor's DISCONNECTED event.
+ZMQ_HEARTBEAT_IVL_MS = 2000
+ZMQ_HEARTBEAT_TIMEOUT_MS = 6000
+
+
+def set_heartbeat(sock) -> None:
+    sock.setsockopt(zmq.HEARTBEAT_IVL, ZMQ_HEARTBEAT_IVL_MS)
+    sock.setsockopt(zmq.HEARTBEAT_TIMEOUT, ZMQ_HEARTBEAT_TIMEOUT_MS)
+
+
 def attach_connection_monitor(sock, channel: str):
     """Call before sock.connect() so the monitor is guaranteed in place in
     time to catch the first CONNECTED event. If this fails for any reason,
     the channel just stays "disconnected"/red rather than crashing the app —
     worth checking the logs if that happens, since it means this signal
     isn't available on this pyzmq/platform."""
+    try:
+        set_heartbeat(sock)
+    except Exception:
+        log.exception("Could not set ZMQ heartbeats for %s", channel)
     try:
         monitor = sock.get_monitor_socket()
     except Exception:
@@ -1069,10 +1090,17 @@ async def status_listener(node):
 
 
 def _node_link(node_id: str, now: float) -> str:
-    """Green while the master's socket to the station is connected, red when it
-    isn't. Only the connection is judged, not traffic, so an idle station still
-    reads as connected."""
-    return "green" if connection_state.get(f"node:{node_id}") == CONNECTED else "red"
+    """Green while the master's socket to the station is connected and the
+    station's node_agent has reported lately, red otherwise. The socket alone
+    can read connected for a while after the station is gone, so the report's
+    age is checked too. An idle but running station still reads as connected."""
+    if connection_state.get(f"node:{node_id}") != CONNECTED:
+        return "red"
+    st = fleet.state.get(node_id)
+    last = st.last_status_at if st else None
+    if last is None or now - last > node_cfg.STATUS_STALE_S:
+        return "red"
+    return "green"
 
 
 def stations_snapshot(now: Optional[float] = None) -> list[dict]:
@@ -1223,6 +1251,10 @@ def _alert_altitude(track: "DroneTrack") -> Optional[tuple[float, str]]:
 STATION_CONFIG_KEY = "station_config"
 station_config: dict = {}
 STATION_NAME_MAX = 40
+# Map icons a station can be drawn with, chosen in the admin Station card.
+# The keys match STATION_ICON_SVG in static/index.html.
+STATION_ICONS = ("ball", "ring", "hex", "radio", "car")
+STATION_ICON_DEFAULT = "ball"
 
 
 def parse_station_config(raw: Optional[str]) -> dict:
@@ -1266,8 +1298,10 @@ def station_manual_position(station_id: str) -> Optional[tuple[float, float]]:
             return station_cache["lat"], station_cache["lon"]
         return None
     entry = station_entry(station_id)
-    if entry.get("lat") is not None and entry.get("lon") is not None:
-        return entry["lat"], entry["lon"]
+    if "lat" in entry:
+        # Set or cleared from the admin card. A cleared location stays empty
+        # rather than falling back to the coordinates in nodes.json.
+        return (entry["lat"], entry["lon"]) if entry["lat"] is not None else None
     cfg = fleet.config[station_id]
     if cfg.lat is not None and cfg.lon is not None:
         return cfg.lat, cfg.lon
@@ -1283,28 +1317,104 @@ def station_location_mode(station_id: str) -> str:
     return "manual" if fleet.config[station_id].lat is not None else "gps"
 
 
+# The master's own GPS fix (see DRONEID_MASTER_GPSD). None when there is no
+# fresh fix, so the master's icon and distances never use a stale position.
+master_fix: Optional[dict] = None
+master_sats: Optional[int] = None
+# When the master last had a fix. Kept after the fix is lost, so the GPS state
+# can tell stale from disconnected.
+master_last_fix_at: Optional[float] = None
+master_last_pos: Optional[tuple[float, float]] = None   # kept after the fix is lost
+
+
+async def master_gps_listener(host: str, port: int):
+    """Keeps the master's latest GPS fix from its gpsd. The poll blocks, so it
+    runs in a thread. A lost fix clears the position rather than leaving the
+    last one on the map."""
+    global master_fix, master_sats, master_last_fix_at, master_last_pos
+    client = GpsdClient(host, port)
+    while True:
+        rec, sats = await asyncio.to_thread(client.poll, 1.0)
+        master_sats = sats
+        if rec is not None and rec.get("fix"):
+            master_fix = {"lat": rec["lat"], "lon": rec["lon"], "at": time.time()}
+            master_last_fix_at = master_fix["at"]
+            master_last_pos = (rec["lat"], rec["lon"])
+        else:
+            master_fix = None
+        await asyncio.sleep(0.5)
+
+
+def station_known_position(station_id: str) -> Optional[tuple[float, float]]:
+    """Where a station's icon is drawn. In GPS mode that's its last real fix, even
+    once the fix has gone stale or disconnected, so the icon can fade in place.
+    Manual stations use their set position. The live position for distances is
+    station_position(), which still needs a current fix."""
+    if station_location_mode(station_id) == "manual":
+        return station_manual_position(station_id)
+    if station_id == node_cfg.MASTER_ID:
+        return master_last_pos
+    return fleet.last_gps_fix(station_id)
+
+
+def master_gps_position() -> Optional[tuple[float, float]]:
+    if master_fix is None:
+        return None
+    return master_fix["lat"], master_fix["lon"]
+
+
+# How long a GPS-mode station can go without a fix before its state changes.
+GPS_STALE_AFTER_S = 120
+GPS_DISCONNECTED_AFTER_S = 300
+
+
+def gps_state(station_id: str, now: float) -> Optional[str]:
+    """For a station in GPS mode: "live" (fix within 2 minutes), "stale" (2 to 5
+    minutes without one), or "disconnected" (5 minutes without one, or never
+    had one). None when the station isn't in GPS mode."""
+    if station_location_mode(station_id) != "gps":
+        return None
+    if station_id == node_cfg.MASTER_ID:
+        last = master_last_fix_at
+    else:
+        last = fleet.state[station_id].last_fix_at
+    if last is None:
+        return "disconnected"
+    age = now - last
+    if age <= GPS_STALE_AFTER_S:
+        return "live"
+    if age <= GPS_DISCONNECTED_AFTER_S:
+        return "stale"
+    return "disconnected"
+
+
 def station_position(station_id: str) -> Optional[tuple[float, float]]:
     """Where a station is right now, or None if it has no fix. Uses its manual
     location or its GPS fix, whichever its mode selects."""
     if station_location_mode(station_id) == "manual":
         return station_manual_position(station_id)
+    if station_id == node_cfg.MASTER_ID:
+        return master_gps_position()
     return fleet.gps_fix(station_id)
 
 
 def _station_row(station_id: str, now: float, link: str) -> dict:
     row = fleet.describe(station_id, now, link)
     pos = station_position(station_id)
+    shown = station_known_position(station_id)
     manual = station_manual_position(station_id)
     cfg = fleet.config[station_id]
     row.update({
         "name": station_display_name(station_id),
         "device": station_device_label(station_id),
         "location_mode": station_location_mode(station_id),
-        "lat": pos[0] if pos else None,
-        "lon": pos[1] if pos else None,
+        "lat": shown[0] if shown else None,
+        "lon": shown[1] if shown else None,
         "fix": pos is not None,
         "manual": {"lat": manual[0], "lon": manual[1]} if manual else None,
-        "gps_feed": cfg.kind == "roaming",
+        "gps_feed": cfg.kind == "roaming" or (cfg.kind == "master" and bool(MASTER_GPSD)),
+        "gps_state": gps_state(station_id, now),
+        "icon": station_entry(station_id).get("icon") or STATION_ICON_DEFAULT,
     })
     return row
 
@@ -1763,6 +1873,13 @@ async def lifespan(_app: "FastAPI"):
     if discord_webhook_url:
         _alert_queue = asyncio.Queue()
         spawn(alert_worker(), "discord-alerts")
+    if MASTER_GPSD:
+        host, _, port = MASTER_GPSD.rpartition(":")
+        try:
+            port_no = int(port)
+        except ValueError:
+            raise ValueError(f"DRONEID_MASTER_GPSD must be host:port, got {MASTER_GPSD!r}")
+        spawn(master_gps_listener(host or "127.0.0.1", port_no), "master-gps")
     spawn(health_broadcaster(), "health-broadcast")
     spawn(station_broadcaster(), "station-broadcast")
     spawn(stale_sweeper(), "stale-sweeper")
@@ -1835,12 +1952,14 @@ class StationConfigBody(BaseModel):
     location: Optional[str] = None
     lat: Optional[float] = None
     lon: Optional[float] = None
+    icon: Optional[str] = None
+    clear_location: Optional[bool] = None
 
 
 @app.put("/api/station-config/{station_id}")
 async def api_put_station_config(station_id: str, body: StationConfigBody):
     """Admin only (see ADMIN_ONLY_PREFIXES). Renames a station, switches its
-    location mode, or sets its manual location. An empty name resets to the
+    location mode, sets or clears its manual location, or picks its map icon. An empty name resets to the
     default. Lat and lon must be sent together. Everything is saved in the
     database; nodes.json is never written by the web UI."""
     global station_cache, station_config
@@ -1853,6 +1972,10 @@ async def api_put_station_config(station_id: str, body: StationConfigBody):
         return JSONResponse({"error": "Send latitude and longitude together."}, status_code=400)
     if body.lat is not None and not (-90 <= body.lat <= 90 and -180 <= body.lon <= 180):
         return JSONResponse({"error": "lat/lon out of range"}, status_code=400)
+    if body.clear_location and (body.lat is not None or body.lon is not None):
+        return JSONResponse({"error": "Clear location can't be sent with coordinates."}, status_code=400)
+    if body.icon is not None and body.icon not in STATION_ICONS:
+        return JSONResponse({"error": f"icon must be one of {', '.join(STATION_ICONS)}."}, status_code=400)
 
     entry = dict(station_entry(station_id))
     if body.name is not None:
@@ -1863,12 +1986,21 @@ async def api_put_station_config(station_id: str, body: StationConfigBody):
             entry.pop("name", None)
     if body.location is not None:
         entry["location"] = body.location
+    if body.icon is not None:
+        entry["icon"] = body.icon
     if body.lat is not None:
         if station_id == node_cfg.MASTER_ID:
             await db.set_setting("station", json.dumps({"lat": body.lat, "lon": body.lon}))
             station_cache = {"lat": body.lat, "lon": body.lon}
         else:
             entry["lat"], entry["lon"] = body.lat, body.lon
+    if body.clear_location:
+        # Stored as explicit nulls, so the position is empty even when nodes.json has one.
+        if station_id == node_cfg.MASTER_ID:
+            await db.set_setting("station", json.dumps({"lat": None, "lon": None}))
+            station_cache = None
+        else:
+            entry["lat"], entry["lon"] = None, None
     if entry:
         station_config[station_id] = entry
     else:

@@ -94,6 +94,8 @@
   .node-ball{ position:relative; width:22px; height:22px; }
   .node-ball svg{ display:block; }
   .node-ball.stale{ opacity:0.5; }
+  .node-ball.gps-stale{ opacity:0.6; }
+  .node-ball.gps-disconnected{ opacity:0.3; filter:grayscale(1); }
   .node-ball .link-dot{
     position:absolute; right:-3px; top:-3px; width:9px; height:9px; border-radius:50%;
     border:2px solid #0B121A;
@@ -308,6 +310,7 @@
   }
   .station-form input:focus, .station-card-head input:focus{ outline:none; border-color:var(--amber); }
   .station-form-buttons{ display:flex; gap:8px; }
+  .station-form-buttons .bulk-btn{ flex:1 1 auto; }
   .settings-btn{
     flex:1 1 auto; background:var(--amber); color:#0B121A; border:none;
     font-family:'Inter',sans-serif; font-size:12px; font-weight:600;
@@ -444,6 +447,14 @@
   .station-name{ flex:1 1 auto; min-width:0; }
   .station-type{ font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace; }
   .station-mode-row{ display:flex; gap:6px; }
+  .station-icon-row{ display:flex; gap:6px; flex-wrap:wrap; }
+  .station-icon-btn{
+    background:var(--bg); border:1px solid var(--hairline); border-radius:var(--radius);
+    padding:5px; cursor:pointer; line-height:0;
+  }
+  .station-icon-btn svg{ display:block; }
+  .station-icon-btn:hover{ border-color:var(--text-muted); }
+  .station-icon-btn.active{ border-color:var(--amber); }
   .station-error{ color:var(--amber); }
   .dp-note{ padding:10px 14px; font-size:11px; color:var(--text-muted); line-height:1.5; }
   .dp-section-head .popup-badge-row{ margin:0; }
@@ -497,6 +508,7 @@
       <span class="dot" id="health-zmq-dot"></span><span id="master-chip-name">Station</span>
       <div class="health-tooltip">
         <div class="tt-title" id="master-chip-title">Station — ZMQ</div>
+        <div id="master-chip-gps"></div>
         <div class="tt-row"><span class="tt-dot" style="background:#34D399;"></span>Green — connected, receiving data</div>
         <div class="tt-row"><span class="tt-dot" style="background:#E0645A;"></span>Red — not connected to zmq_decoder.py</div>
       </div>
@@ -571,7 +583,8 @@ let mode = 'live';               // 'live' | 'history'
 const droneMarkers = new Map();  // key -> {marker, opMarker, link, pathLine, path, flightId, flightLoading, pairColor, data}
 let selectedKey = null;
 let selectedTarget = null; // 'drone' | 'operator' — which marker of the pair is focused
-let stationCoord = null;         // { lat, lon } — server-side "home point", null until set in Settings
+let stationCoord = null;         // { lat, lon } — where the master's icon is drawn now
+let homeCoord = null;            // { lat, lon } — the saved home point (the master's manual position)
 let stationList = [];            // every station from the stations feed, master included
 let stationMarker = null;
 
@@ -658,11 +671,26 @@ function opIconSvg(color) {
   });
 }
 
-function ballSvg() {
-  return `<svg width="22" height="22" viewBox="0 0 22 22">
-      <circle cx="11" cy="11" r="9" fill="#1C2A38" stroke="#E6EDF3" stroke-width="2"/>
-      <circle cx="11" cy="11" r="3" fill="#E6EDF3"/>
-    </svg>`;
+// The map icon artwork, keyed as STATION_ICONS in main.py. "ball" is the default.
+const STATION_ICON_SVG = {
+  ball: '<circle cx="11" cy="11" r="9" fill="#1C2A38" stroke="#E6EDF3" stroke-width="2"/><circle cx="11" cy="11" r="3" fill="#E6EDF3"/>',
+  ring: '<circle cx="11" cy="11" r="7.5" fill="#1C2A38" stroke="#E6EDF3" stroke-width="2"/><path d="M11 0.5v4M11 17.5v4M0.5 11h4M17.5 11h4" stroke="#E6EDF3" stroke-width="2" stroke-linecap="round"/><circle cx="11" cy="11" r="2.2" fill="#E6EDF3"/>',
+  hex: '<polygon points="11,1.5 19.3,6.25 19.3,15.75 11,20.5 2.7,15.75 2.7,6.25" fill="#1C2A38" stroke="#E6EDF3" stroke-width="2" stroke-linejoin="round"/><circle cx="11" cy="11" r="2.6" fill="#E6EDF3"/>',
+  radio: '<rect x="6.5" y="7" width="9" height="13" rx="2.2" fill="#1C2A38" stroke="#E6EDF3" stroke-width="2"/><rect x="10" y="1.5" width="2" height="6" rx="1" fill="#E6EDF3"/><rect x="8" y="9" width="6" height="4.5" rx="0.8" fill="#E6EDF3"/><circle cx="9.3" cy="14.8" r="0.9" fill="#E6EDF3"/><circle cx="12.7" cy="14.8" r="0.9" fill="#E6EDF3"/><circle cx="9.3" cy="17" r="0.9" fill="#E6EDF3"/><circle cx="12.7" cy="17" r="0.9" fill="#E6EDF3"/>',
+  car: '<path d="M2 14Q2 11 4 10.4L7 9.6Q8.6 9.3 9.3 7.8L10.8 5.2Q11.3 4.3 12.4 4.3H15.2Q16.2 4.3 16.7 5.2L18.4 8.8L19.8 9.4V14.8Q19.8 16.4 18.2 16.4H3.6Q2 16.4 2 14.8Z" fill="#E6EDF3"/><polygon points="9.4,9.3 10.4,6.8 15.6,6.8 16.6,9.3" fill="#0B121A"/><circle cx="6" cy="16.5" r="4" fill="#0B121A"/><circle cx="16" cy="16.5" r="4" fill="#0B121A"/><circle cx="6" cy="16.5" r="2.8" fill="#E6EDF3"/><circle cx="16" cy="16.5" r="2.8" fill="#E6EDF3"/><circle cx="6" cy="16.5" r="1.1" fill="#0B121A"/><circle cx="16" cy="16.5" r="1.1" fill="#0B121A"/>',
+};
+const STATION_ICON_CHOICES = [
+  { key: 'ball', label: 'A · Circle' },
+  { key: 'ring', label: 'B · Locator ring' },
+  { key: 'hex', label: 'E · Hexagon' },
+  { key: 'radio', label: 'Handheld radio' },
+  { key: 'car', label: 'Car' },
+];
+
+// A station's map icon at 22 px. An unknown or missing key draws the default.
+function stationIconSvg(key) {
+  const inner = STATION_ICON_SVG[key] || STATION_ICON_SVG.ball;
+  return `<svg width="22" height="22" viewBox="0 0 22 22">${inner}</svg>`;
 }
 
 // The master's map icon is built the same way as a roaming node's: the ball
@@ -682,7 +710,49 @@ function masterLightClass() {
 }
 
 function masterIconHtml() {
-  return `<div class="node-ball">${ballSvg()}<span class="link-dot ${masterLightClass()}"></span></div>`;
+  const cls = ['node-ball', gpsIconClass(masterRow())].filter(Boolean).join(' ');
+  const row = masterRow();
+  return `<div class="${cls}">${stationIconSvg(row && row.icon)}<span class="link-dot ${masterLightClass()}"></span></div>`;
+}
+
+// The master's row from the stations feed, or undefined before it loads.
+function masterRow() {
+  return stationList.find(s => s.kind === 'master');
+}
+
+// Whether a station's icon stays on the map. A station not in GPS mode, or
+// whose GPS is live or stale, always keeps it. One whose GPS is disconnected
+// (no fix for 5 minutes, or never) keeps it only while it is still connected:
+// ZMQ up and at least one sniffer running. Otherwise the icon comes off the map.
+function iconKept(s, connected) {
+  return !s || s.gps_state !== 'disconnected' || connected;
+}
+
+function nodeConnected(s) {
+  const up = c => c === 'green' || c === 'yellow';
+  return s.link === 'green' && (up(s.wifi) || up(s.bluetooth));
+}
+
+function masterConnected() {
+  return masterLinkState() === 'green' && masterLightClass() !== 'red';
+}
+
+// GPS state for a station in GPS mode, shown on its hover card and icon.
+// Live (fix within 2 minutes) shows nothing extra; stale and disconnected do.
+const GPS_STATE_TEXT = { live: 'Live', stale: 'Stale', disconnected: 'Disconnected' };
+const GPS_STATE_COLOUR = { live: '#34D399', stale: '#E8A33D', disconnected: '#E0645A' };
+
+function gpsLineHtml(s) {
+  const state = s && s.gps_state;
+  if (!state) return '';
+  return `<div class="tt-row"><span class="tt-dot" style="background:${GPS_STATE_COLOUR[state]}"></span>GPS: ${GPS_STATE_TEXT[state]}</div>`;
+}
+
+function gpsIconClass(s) {
+  const state = s && s.gps_state;
+  if (state === 'stale') return 'gps-stale';
+  if (state === 'disconnected') return 'gps-disconnected';
+  return '';
 }
 
 // The master's hover card, laid out like a roaming node's: title, then Wi-Fi
@@ -690,6 +760,7 @@ function masterIconHtml() {
 function masterHoverHtml() {
   const link = masterLinkState() === 'green' ? 'CONNECTED' : 'DISCONNECTED';
   return `<div class="tt-title">${escapeHtml(masterStationName())} - ${link}</div>` +
+    gpsLineHtml(masterRow()) +
     sniffRowHtml('Wi-Fi', lastHealth.wifi) + sniffRowHtml('Bluetooth', lastHealth.bluetooth);
 }
 
@@ -719,6 +790,8 @@ function refreshMasterChip() {
   const titleEl = document.getElementById('master-chip-title');
   if (nameEl) nameEl.textContent = name;
   if (titleEl) titleEl.textContent = `${name} — ZMQ`;
+  const gpsEl = document.getElementById('master-chip-gps');
+  if (gpsEl) gpsEl.innerHTML = gpsLineHtml(masterRow());
 }
 
 // "Wi-Fi - Name" / "Bluetooth - Name" for each (station, transport) that heard a
@@ -777,6 +850,22 @@ function masterStationName() {
   return (master && master.name) || 'Station';
 }
 
+// The master's icon follows its GPS fix in GPS mode, and its home point in
+// Manual mode. In GPS mode with no fix, it stays where it last was.
+function applyMasterPosition(master) {
+  if (!master) return;
+  if (master.location_mode === 'gps') {
+    const shown = master.lat != null && master.lon != null && iconKept(master, masterConnected());
+    stationCoord = shown ? { lat: master.lat, lon: master.lon } : null;
+    placeStationMarker();
+    return;
+  }
+  if (stationCoord !== homeCoord) {
+    stationCoord = homeCoord;
+    placeStationMarker();
+  }
+}
+
 function placeStationMarker() {
   if (!stationCoord) {
     if (stationMarker) { stationLayer.removeLayer(stationMarker); stationMarker = null; }
@@ -799,7 +888,7 @@ async function loadStation() {
     const res = await fetch('/api/station');
     const data = await res.json();
     if (data && data.lat !== null && data.lat !== undefined && data.lon !== null && data.lon !== undefined) {
-      stationCoord = { lat: data.lat, lon: data.lon };
+      stationCoord = homeCoord = { lat: data.lat, lon: data.lon };
       placeStationMarker();
       // Station is the home point the map loads to — take priority over the
       // "auto-center on first drone seen" fallback.
@@ -1556,7 +1645,7 @@ function stationCardHtml(s) {
   const esc = escapeHtml;
   const gpsLine = s.gps_feed
     ? (s.fix ? `GPS fix · ${s.lat.toFixed(6)}, ${s.lon.toFixed(6)}` : 'No GPS fix yet')
-    : 'No GPS feed yet';
+    : 'No GPS Feed Found';
   const manual = s.manual;
   const body = s.location_mode === 'gps'
     ? `<div class="settings-note">${esc(gpsLine)}</div>`
@@ -1567,6 +1656,9 @@ function stationCardHtml(s) {
                 value="${manual ? manual.lon : ''}">
          <div class="station-form-buttons">
            <button class="settings-btn station-manual-save" type="button">Save location</button>
+         </div>
+         <div class="station-form-buttons">
+           <button class="bulk-btn danger station-manual-clear" type="button">Clear location</button>
          </div>
          <div class="settings-note">${manual
            ? `Set: ${manual.lat.toFixed(6)}, ${manual.lon.toFixed(6)}`
@@ -1579,6 +1671,13 @@ function stationCardHtml(s) {
         <button class="settings-btn settings-btn-ghost station-rename" type="button">Rename</button>
       </div>
       <div class="station-type">${esc(s.device)}</div>
+      <div class="station-icon-row" role="group" aria-label="Map icon">
+        ${STATION_ICON_CHOICES.map(c => {
+          const on = (s.icon || 'ball') === c.key;
+          return `<button class="station-icon-btn${on ? ' active' : ''}" type="button" data-icon="${c.key}"
+            title="${esc(c.label)}" aria-label="${esc(c.label)}" aria-pressed="${on}">${stationIconSvg(c.key)}</button>`;
+        }).join('')}
+      </div>
       <div class="station-mode-row">
         <button class="mode-btn station-mode-btn${s.location_mode === 'gps' ? ' active' : ''}" type="button" data-mode="gps">GPS</button>
         <button class="mode-btn station-mode-btn${s.location_mode === 'manual' ? ' active' : ''}" type="button" data-mode="manual">Manual</button>
@@ -1610,8 +1709,12 @@ async function saveStationConfig(sid, body, card) {
       return;
     }
     if (sid === 'master' && body.lat !== undefined) {
-      stationCoord = { lat: body.lat, lon: body.lon };
+      stationCoord = homeCoord = { lat: body.lat, lon: body.lon };
       placeStationMarker();
+    }
+    if (sid === 'master' && body.clear_location) {
+      stationCoord = homeCoord = null;
+      placeStationMarker();   // removes the master's icon until a position is set
     }
     await refreshStations();
   } catch (e) {
@@ -1765,6 +1868,17 @@ function renderSettingsPanel() {
     card.querySelector('.station-rename').addEventListener('click', () => {
       saveStationConfig(sid, { name: card.querySelector('.station-name').value }, card);
     });
+    card.querySelectorAll('.station-icon-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (btn.dataset.icon === (current().icon || 'ball')) return;
+        card.querySelectorAll('.station-icon-btn').forEach(b => {
+          const on = b === btn;
+          b.classList.toggle('active', on);
+          b.setAttribute('aria-pressed', String(on));
+        });
+        saveStationConfig(sid, { icon: btn.dataset.icon }, card);
+      });
+    });
     card.querySelectorAll('.station-mode-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         if (btn.dataset.mode === current().location_mode) return;
@@ -1785,6 +1899,10 @@ function renderSettingsPanel() {
         }
         saveStationConfig(sid, { lat, lon, location: 'manual' }, card);
       });
+    }
+    const clearBtn = card.querySelector('.station-manual-clear');
+    if (clearBtn) {
+      clearBtn.addEventListener('click', () => saveStationConfig(sid, { clear_location: true }, card));
     }
   });
 
@@ -2689,7 +2807,7 @@ async function loadHistoryList(opts = {}) {
         <div class="row-top">
           <span class="status-chip" style="${inProgress ? '' : 'background:#3A4A5A'}"></span>
           ${nameLineHtml(f.display_name, historyRawIdLabel(f))}
-          <button class="pencil-btn" aria-label="Rename flight" data-rename="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">✎</button>
+          ${isAdmin() ? `<button class="pencil-btn" aria-label="Rename flight" data-rename="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">✎</button>` : ''}
         </div>
         <div class="track-sub">
           <span class="track-date">${fmtDateTime(f.started_at)}</span>
@@ -3041,6 +3159,7 @@ function setConnState(connected, label) {
 
 function applyHealth(health) {
   lastHealth = health || {};
+  applyMasterPosition(masterRow());   // the master's icon depends on its link state too
   ['zmq'].forEach(ch => {
     const dot = document.getElementById(`health-${ch}-dot`);
     if (!dot) return;
@@ -3065,8 +3184,8 @@ function nodeLightClass(s) {
 }
 
 function nodeIconHtml(s) {
-  const cls = ['node-ball', s.stale ? 'stale' : ''].filter(Boolean).join(' ');
-  return `<div class="${cls}">${ballSvg()}<span class="link-dot ${nodeLightClass(s)}"></span></div>`;
+  const cls = ['node-ball', s.stale ? 'stale' : '', gpsIconClass(s)].filter(Boolean).join(' ');
+  return `<div class="${cls}">${stationIconSvg(s.icon)}<span class="link-dot ${nodeLightClass(s)}"></span></div>`;
 }
 
 // The hover card's title: the station's name, and whether the master's ZMQ
@@ -3079,6 +3198,7 @@ function nodeTitle(s) {
 // running on the station, red = it isn't (or the agent has gone quiet).
 function nodeHoverHtml(s) {
   return `<div class="tt-title">${nodeTitle(s)}</div>` +
+    gpsLineHtml(s) +
     sniffRowHtml('Wi-Fi', s.wifi) + sniffRowHtml('Bluetooth', s.bluetooth);
 }
 
@@ -3086,6 +3206,7 @@ function applyStations(list) {
   if (!Array.isArray(list)) return;
   stationList = list;
   refreshMasterChip();
+  applyMasterPosition(list.find(s => s.kind === 'master'));
   refreshMasterMarker();
   const live = new Set();
   list.forEach(s => {
@@ -3093,7 +3214,7 @@ function applyStations(list) {
     live.add(s.id);
     const hasPos = s.lat !== null && s.lat !== undefined && s.lon !== null && s.lon !== undefined;
     let marker = nodeMarkers.get(s.id);
-    if (!hasPos) {
+    if (!hasPos || !iconKept(s, nodeConnected(s))) {
       if (marker) { stationLayer.removeLayer(marker); nodeMarkers.delete(s.id); }
       return;
     }
@@ -3127,8 +3248,9 @@ function nodeChipHtml(s) {
     `<span class="dot ${linkCls}"></span>${name}` +
     `<div class="health-tooltip node-chip-tip">` +
       `<div class="tt-title">${name} — ZMQ</div>` +
-      `<div class="tt-row"><span class="tt-dot" style="background:#34D399;"></span>Green — connected to the master</div>` +
-      `<div class="tt-row"><span class="tt-dot" style="background:#E0645A;"></span>Red — not connected</div>` +
+      gpsLineHtml(s) +
+      `<div class="tt-row"><span class="tt-dot" style="background:#34D399;"></span>Green — connected, receiving data</div>` +
+      `<div class="tt-row"><span class="tt-dot" style="background:#E0645A;"></span>Red — not connected to the master</div>` +
     `</div></span>`;
 }
 

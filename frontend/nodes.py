@@ -240,6 +240,7 @@ class _NodeState:
     sats: Optional[int] = None
     health: Optional[dict] = None    # {"wifi": "green"|"yellow"|"red", "bluetooth": ...} from node_agent
     last_health_at: Optional[float] = None
+    last_fix_at: Optional[float] = None   # roaming: when a real fix last arrived
 
 
 class NodeRegistry:
@@ -278,6 +279,7 @@ class NodeRegistry:
         st.fix = status["fix"]
         if status["fix"]:
             st.lat, st.lon = status["lat"], status["lon"]
+            st.last_fix_at = now
         st.alt, st.speed, st.track, st.sats = status["alt"], status["speed"], status["track"], status["sats"]
         return True
 
@@ -304,6 +306,17 @@ class NodeRegistry:
             return None
         st = self.state[node_id]
         if st.fix and st.lat is not None and st.lon is not None:
+            return st.lat, st.lon
+        return None
+
+    def last_gps_fix(self, node_id: str) -> Optional[tuple[float, float]]:
+        """The last real GPS fix of a roaming station, kept after it goes stale or
+        disconnected, so its icon can stay where it was last seen."""
+        cfg = self.config.get(node_id)
+        if cfg is None or cfg.kind != "roaming":
+            return None
+        st = self.state[node_id]
+        if st.lat is not None and st.lon is not None:
             return st.lat, st.lon
         return None
 
