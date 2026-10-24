@@ -164,12 +164,14 @@ def sniffer_health(watches: dict, now: Optional[float] = None) -> dict:
 def build_status(*, fix: Optional[dict] = None,
                  static: Optional[tuple[float, float]] = None,
                  sats: Optional[int] = None, now: Optional[float] = None,
-                 health: Optional[dict] = None) -> dict:
+                 health: Optional[dict] = None, gps_feed: Optional[bool] = None) -> dict:
     """The report the master expects. A fixed node always reports its set
     position; a roaming node reports its GPS fix, or no position at all when
     it has none (the master then keeps the last known one)."""
     base = {"type": "node_status", "health": health,
             "ts": now if now is not None else time.time(), "sats": sats}
+    if gps_feed is not None:
+        base["gps_feed"] = gps_feed   # whether gpsd answers: tells no feed apart from no fix
     if static is not None:
         return base | {"fix": True, "lat": static[0], "lon": static[1],
                        "alt": None, "speed": None, "track": None, "source": "static"}
@@ -197,6 +199,7 @@ class GpsdClient:
         self._latest: Optional[dict] = None
         self._latest_at: float = 0.0
         self._warned_down = False  # one warning per outage, not one per poll
+        self.feed_up = False       # True while gpsd answers; reported in each status
 
     def _connect(self):
         self.close()
@@ -249,6 +252,7 @@ class GpsdClient:
             self._latest = None
         if self._latest is not None and time.monotonic() - self._latest_at > FIX_MAX_AGE_S:
             self._latest = None   # the receiver has gone quiet; don't report where it was
+        self.feed_up = self._file is not None   # gpsd answered this round
         return self._latest, self._sats
 
 
@@ -301,7 +305,8 @@ def main(argv=None) -> int:
             if gps is None:
                 time.sleep(args.interval)
             pub.send_string(json.dumps(build_status(fix=fix, static=static, sats=sats,
-                                                    health=sniffer_health(watches))))
+                                                    health=sniffer_health(watches),
+                                                    gps_feed=gps.feed_up if gps else None)))
     except KeyboardInterrupt:
         return 0
 

@@ -1325,17 +1325,19 @@ master_sats: Optional[int] = None
 # can tell stale from disconnected.
 master_last_fix_at: Optional[float] = None
 master_last_pos: Optional[tuple[float, float]] = None   # kept after the fix is lost
+master_feed_up: bool = False   # whether the master's gpsd answers
 
 
 async def master_gps_listener(host: str, port: int):
     """Keeps the master's latest GPS fix from its gpsd. The poll blocks, so it
     runs in a thread. A lost fix clears the position rather than leaving the
     last one on the map."""
-    global master_fix, master_sats, master_last_fix_at, master_last_pos
+    global master_fix, master_sats, master_last_fix_at, master_last_pos, master_feed_up
     client = GpsdClient(host, port)
     while True:
         rec, sats = await asyncio.to_thread(client.poll, 1.0)
         master_sats = sats
+        master_feed_up = client.feed_up
         if rec is not None and rec.get("fix"):
             master_fix = {"lat": rec["lat"], "lon": rec["lon"], "at": time.time()}
             master_last_fix_at = master_fix["at"]
@@ -1343,6 +1345,18 @@ async def master_gps_listener(host: str, port: int):
         else:
             master_fix = None
         await asyncio.sleep(0.5)
+
+
+def gps_feed_found(station_id: str, now: float) -> bool:
+    """Whether a station's GPS feed is up. Distinct from having a fix: a feed
+    that is up but has no fix is "No GPS fix yet", and a feed that is down
+    (gpsd not answering, or the node offline) is "No GPS Feed Found"."""
+    cfg = fleet.config[station_id]
+    if cfg.kind == "roaming":
+        return fleet.gps_feed_found(station_id, now)
+    if cfg.kind == "master":
+        return bool(MASTER_GPSD) and master_feed_up
+    return False
 
 
 def station_known_position(station_id: str) -> Optional[tuple[float, float]]:
@@ -1412,7 +1426,7 @@ def _station_row(station_id: str, now: float, link: str) -> dict:
         "lon": shown[1] if shown else None,
         "fix": pos is not None,
         "manual": {"lat": manual[0], "lon": manual[1]} if manual else None,
-        "gps_feed": cfg.kind == "roaming" or (cfg.kind == "master" and bool(MASTER_GPSD)),
+        "gps_feed": gps_feed_found(station_id, now),
         "gps_state": gps_state(station_id, now),
         "icon": station_entry(station_id).get("icon") or STATION_ICON_DEFAULT,
     })

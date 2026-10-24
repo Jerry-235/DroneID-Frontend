@@ -1664,8 +1664,8 @@ function stationsSectionHtml() {
 function stationCardHtml(s) {
   const esc = escapeHtml;
   const gpsLine = s.gps_feed
-    ? (s.fix ? `GPS fix · ${s.lat.toFixed(6)}, ${s.lon.toFixed(6)}` : 'No GPS fix yet')
-    : 'No GPS Feed Found';
+    ? (s.fix ? `GPS fix · ${s.lat.toFixed(6)}, ${s.lon.toFixed(6)}` : 'No GPS Fix')
+    : 'No GPS Feed';
   const manual = s.manual;
   const body = s.location_mode === 'gps'
     ? `<div class="settings-note">${esc(gpsLine)}</div>`

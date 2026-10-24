@@ -209,6 +209,7 @@ def parse_status(raw) -> Optional[dict]:
         "speed": _float_or_none(raw.get("speed")),
         "track": _float_or_none(raw.get("track")),
         "sats": _int_or_none(raw.get("sats")),
+        "gps_feed": raw["gps_feed"] if isinstance(raw.get("gps_feed"), bool) else None,
     }
 
 
@@ -232,6 +233,7 @@ class _NodeState:
     last_burst_at: Optional[float] = None
     last_status_at: Optional[float] = None
     fix: bool = False
+    gps_feed: Optional[bool] = None     # roaming: whether the agent's gpsd answers (None = not said)
     lat: Optional[float] = None      # roaming: last reported fix
     lon: Optional[float] = None
     alt: Optional[float] = None
@@ -277,6 +279,7 @@ class NodeRegistry:
         if cfg.kind != "roaming":
             return True
         st.fix = status["fix"]
+        st.gps_feed = status.get("gps_feed")
         if status["fix"]:
             st.lat, st.lon = status["lat"], status["lon"]
             st.last_fix_at = now
@@ -308,6 +311,15 @@ class NodeRegistry:
         if st.fix and st.lat is not None and st.lon is not None:
             return st.lat, st.lon
         return None
+
+    def gps_feed_found(self, node_id: str, now: float) -> bool:
+        """Whether a roaming station's GPS feed is up: its node_agent has reported
+        lately and that agent says gpsd answers. An agent too old to say is taken
+        to have a feed, as before."""
+        st = self.state.get(node_id)
+        if st is None or st.last_status_at is None or now - st.last_status_at > STATUS_STALE_S:
+            return False
+        return st.gps_feed is not False
 
     def last_gps_fix(self, node_id: str) -> Optional[tuple[float, float]]:
         """The last real GPS fix of a roaming station, kept after it goes stale or
