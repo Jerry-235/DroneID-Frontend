@@ -199,7 +199,8 @@ class GpsdClient:
         self._latest: Optional[dict] = None
         self._latest_at: float = 0.0
         self._warned_down = False  # one warning per outage, not one per poll
-        self.feed_up = False       # True while gpsd answers; reported in each status
+        self.feed_up = False       # True while the receiver is delivering; reported in each status
+        self._tpv_at = float("-inf")   # when gpsd last sent a position record of any mode
 
     def _connect(self):
         self.close()
@@ -242,6 +243,7 @@ class GpsdClient:
                 if rec["kind"] == "TPV":
                     self._latest = rec
                     self._latest_at = time.monotonic()
+                    self._tpv_at = self._latest_at
                 elif rec["kind"] == "SKY" and rec["sats"] is not None:
                     self._sats = rec["sats"]
         except OSError as e:
@@ -252,7 +254,11 @@ class GpsdClient:
             self._latest = None
         if self._latest is not None and time.monotonic() - self._latest_at > FIX_MAX_AGE_S:
             self._latest = None   # the receiver has gone quiet; don't report where it was
-        self.feed_up = self._file is not None   # gpsd answered this round
+        # The feed is up when the receiver is delivering position records, even
+        # with no fix. gpsd answers on its socket even with no receiver behind
+        # it, so a connection alone doesn't prove the feed.
+        self.feed_up = (self._file is not None
+                        and time.monotonic() - self._tpv_at <= FIX_MAX_AGE_S)
         return self._latest, self._sats
 
 
