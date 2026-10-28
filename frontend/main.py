@@ -38,6 +38,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -121,6 +122,9 @@ fleet = node_cfg.NodeRegistry(node_cfg.parse_nodes({"stations": []}, ZMQ_ADDR))
 # i.e. 45s to go gray, then a further 60s parked before it disappears.
 STALE_AFTER_S = float(os.environ.get("DRONEID_STALE_AFTER_S", "45"))
 DROP_AFTER_S = float(os.environ.get("DRONEID_DROP_AFTER_S", "105"))
+# The most a location stamp may move forward and still count as newer (see
+# TrackStore._loc_is_newer). Well above the gap between live reports.
+LOC_NEWER_WINDOW_S = 300.0
 # How long after an aircraft disappears from the map it can come back and
 # still count as the same flight rather than a new one. Measured from the
 # drop (the moment the icon left the map), not from the last packet — so
@@ -237,7 +241,7 @@ def parse_latlon(value) -> Optional[float]:
     return v
 
 
-_TRACK_INTERNAL_FIELDS = frozenset({"station_heard", "source_heard", "recent_points"})
+_TRACK_INTERNAL_FIELDS = frozenset({"station_heard", "source_heard", "recent_points", "loc_seconds"})
 
 
 @dataclass
@@ -273,6 +277,7 @@ class DroneTrack:
     op_status: Optional[str] = None
     height_type: Optional[str] = None
     loc_timestamp: Optional[object] = None  # raw value, string or number depending on source
+    loc_seconds: Optional[float] = None     # the same stamp as seconds into the hour, for ordering
     op_location_type: Optional[str] = None
     op_classification_type: Optional[str] = None
 
@@ -347,6 +352,31 @@ def _burst_transport(messages: list) -> Optional[str]:
         if t in ("wifi", "bluetooth"):
             return t
     return None
+
+
+_DECODED_TIMESTAMP = re.compile(r"^(?:(\d+)\s*h\s+)?(\d+)\s*min\s+([\d.]+)\s*s$")
+
+
+def _timestamp_seconds(raw) -> Optional[float]:
+    """A Remote ID location timestamp as seconds into the hour. The decoder
+    gives it as text such as "3 min 12.4 s" (or "Unknown"); plain numbers are
+    taken as seconds already. None when it can't be read."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw) if math.isfinite(raw) else None
+    match = _DECODED_TIMESTAMP.match(str(raw).strip())
+    if not match:
+        return None
+    hours, minutes, seconds = match.groups()
+    return (int(hours or 0) * 3600) + (int(minutes) * 60) + float(seconds)
+
+
+def detecting_station_ids(track: "DroneTrack", now: Optional[float] = None) -> list[str]:
+    """The stations that have heard this drone within the stale window, so a
+    station that has lost it no longer counts."""
+    now = now if now is not None else time.time()
+    return sorted(s for s, t in track.station_heard.items() if now - t <= STALE_AFTER_S)
 
 
 def _burst_field(messages: list, key: str):
@@ -492,6 +522,22 @@ class TrackStore:
                 return block
         return None
 
+    @staticmethod
+    def _loc_is_newer(raw_timestamp, track: "DroneTrack") -> bool:
+        """True if a location's timestamp is newer than the one on the map. The
+        stamp wraps every hour, so the gap is measured forward around the hour.
+        A live track gets a report every second or so and is dropped after
+        DROP_AFTER_S of silence, so a gap of more than LOC_NEWER_WINDOW_S can't
+        be a fresh report; it is an older one from a station that is behind.
+        Equal or behind does not count. When either stamp can't be read, the
+        position is accepted as before."""
+        new = _timestamp_seconds(raw_timestamp)
+        cur = track.loc_seconds
+        if new is None or cur is None:
+            return True
+        gap = (new - cur) % 3600.0
+        return 0 < gap <= LOC_NEWER_WINDOW_S
+
     def apply_burst(self, mac: Optional[str], messages: list[dict],
                     station_id: Optional[str] = None) -> Optional[DroneTrack]:
         """Fold one aircraft's burst into its track, returning it — or None if
@@ -569,6 +615,10 @@ class TrackStore:
                 track.description = self_id
 
             loc, loc_nested = self._get_loc(msg)
+            if loc and not self._loc_is_newer(loc.get("timestamp"), track):
+                # Older than (or the same as) the position already on the map,
+                # whichever station it came from. Keep what is shown.
+                loc = None
             if loc:
                 lat = parse_latlon(loc.get("latitude"))
                 lon = parse_latlon(loc.get("longitude"))
@@ -619,6 +669,7 @@ class TrackStore:
                     track.height_type = loc.get("height_type")
                 if loc.get("timestamp") is not None:
                     track.loc_timestamp = loc.get("timestamp")
+                    track.loc_seconds = _timestamp_seconds(loc.get("timestamp"))
 
             sysm = self._get_system(msg)
             if sysm:
@@ -1236,7 +1287,7 @@ def _alert_altitude(track: "DroneTrack") -> Optional[tuple[float, str]]:
     at the alert can't read it as height overhead."""
     if track.height_agl is not None:
         feet = meters_to_feet(track.height_agl)
-        return feet, f"{feet:,.0f}ft"
+        return feet, f"{feet:,.0f}ft AGL"
     if track.alt is not None:
         feet = meters_to_feet(track.alt)
         return feet, f"{feet:,.0f}ft MSL"
@@ -1439,7 +1490,7 @@ def nearest_station_to(track: "DroneTrack") -> Optional[tuple[str, float]]:
     Falls back to the master's home point when no heard station has a fix."""
     if track.lat is None or track.lon is None:
         return None
-    heard = list(track.station_heard) or ([track.station_id] if track.station_id else [])
+    heard = detecting_station_ids(track) or ([track.station_id] if track.station_id else [])
     best = None
     for sid in heard:
         pos = station_position(sid)
@@ -1456,6 +1507,19 @@ def nearest_station_to(track: "DroneTrack") -> Optional[tuple[str, float]]:
     return best
 
 
+def _detection_source_text(track: "DroneTrack") -> Optional[str]:
+    """Which station(s) heard the drone, for alerts with no location: the one
+    station's name, "multiple stations", or nothing."""
+    ids = detecting_station_ids(track)
+    if not ids and track.station_id:
+        ids = [track.station_id]
+    if not ids:
+        return None
+    if len(ids) > 1:
+        return "multiple stations"
+    return station_display_name(ids[0])
+
+
 def build_new_drone_message(track: "DroneTrack", place: "Optional[places.Place]" = None) -> str:
     """Builds the alert text for a brand-new (non-test) detection. Uses
     imperial units throughout (feet/mph). Formatted as a Discord ## heading
@@ -1468,7 +1532,11 @@ def build_new_drone_message(track: "DroneTrack", place: "Optional[places.Place]"
 
     has_pos = track.lat is not None and track.lon is not None
     if not has_pos:
-        return f"{header}\n```No location information available```"
+        source = _detection_source_text(track)
+        detail = "No location information available"
+        if source:
+            detail += f" - From {source}"   # same " - " joining as the located message
+        return f"{header}\n```{detail}```"
 
     parts = []
     nearest = nearest_station_to(track)
