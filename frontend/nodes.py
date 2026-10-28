@@ -29,7 +29,7 @@ MASTER_ID = "master"
 
 # A remote node's position report older than this is shown as last known
 # rather than current.
-STATUS_STALE_S = float(os.environ.get("DRONEID_NODE_STATUS_STALE_S", "60"))
+STATUS_STALE_S = float(os.environ.get("DRONEID_NODE_STATUS_STALE_S", "15"))
 # Two points from different stations with no Remote ID timestamp of their
 # own count as the same broadcast if they're this close in time.
 UNSTAMPED_DUPLICATE_WINDOW_S = 2.0

@@ -45,7 +45,7 @@ win over `.env`. Everything is read at startup, so changes need a restart.
 | `DRONEID_SOURCE_RECENT_S` | `15` | How recently a radio must have heard a drone to show as a source |
 | `DRONEID_BROADCAST_TIMEOUT_S` | `5` | Send timeout for a WebSocket client that has stopped reading |
 | `DRONEID_NODES_PATH` | `nodes.json` beside `main.py` | Remote stations file (see `MULTI-NODE.md`) |
-| `DRONEID_NODE_STATUS_STALE_S` | `60` | Silence from a station's `node_agent` before its status counts as old |
+| `DRONEID_NODE_STATUS_STALE_S` | `15` | Silence from a station's `node_agent` before its status counts as old (its link light goes red) |
 | `DRONEID_ADMIN_NETS` | Tailscale ranges and loopback | Networks allowed to use admin-only endpoints |
 | `DRONEID_MASTER_GPSD` | off | `host:port` of a gpsd that reads a GPS receiver on this machine, e.g. `127.0.0.1:2947` |
 | `DRONEID_TRUST_FORWARDED_FOR` | off | Read the client address from `X-Forwarded-For`. Only behind a proxy that overwrites that header |

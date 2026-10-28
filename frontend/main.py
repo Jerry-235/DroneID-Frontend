@@ -1054,6 +1054,8 @@ async def watch_connection_state(monitor, channel: str):
                 connection_state[channel] = CONNECTED
             elif ev in (zmq.EVENT_DISCONNECTED, zmq.EVENT_CLOSED, zmq.EVENT_CONNECT_RETRIED):
                 connection_state[channel] = DISCONNECTED
+        except zmq.ZMQError:
+            return   # the socket was closed; its replacement has its own monitor
         except Exception:
             log.exception("Error reading connection-monitor events for %s", channel)
             await asyncio.sleep(1)
@@ -1074,10 +1076,10 @@ def set_heartbeat(sock) -> None:
 
 def attach_connection_monitor(sock, channel: str):
     """Call before sock.connect() so the monitor is guaranteed in place in
-    time to catch the first CONNECTED event. If this fails for any reason,
-    the channel just stays "disconnected"/red rather than crashing the app —
-    worth checking the logs if that happens, since it means this signal
-    isn't available on this pyzmq/platform."""
+    time to catch the first CONNECTED event. Returns the monitor socket, or
+    None if one could not be attached. If this fails for any reason, the
+    channel just stays "disconnected"/red rather than crashing the app, so
+    check the logs if that happens."""
     try:
         set_heartbeat(sock)
     except Exception:
@@ -1086,8 +1088,9 @@ def attach_connection_monitor(sock, channel: str):
         monitor = sock.get_monitor_socket()
     except Exception:
         log.exception("Could not attach connection monitor for %s — its health dot will stay red", channel)
-        return
+        return None
     spawn(watch_connection_state(monitor, channel), f"monitor-{channel}")
+    return monitor
 
 
 def health_channel(node) -> str:
@@ -1096,37 +1099,79 @@ def health_channel(node) -> str:
     return "zmq" if node.kind == "master" else f"node:{node.id}"
 
 
+# How long a station's decoder link may stay not-connected before the master
+# throws its socket away and opens a fresh one. A new socket always gets its own
+# connection events, so this recovers a link whose events have gone stale,
+# without a restart of main.py.
+DECODER_RECONNECT_S = 15.0
+
+
+def _open_burst_socket(node, channel: str):
+    """A new SUB socket to one station's decoder output, with heartbeats and a
+    connection monitor. Returns (socket, monitor)."""
+    sock = zmq_ctx().socket(zmq.SUB)
+    sock.setsockopt(zmq.IPV6, 1)  # station addresses may be IPv6 (Tailscale)
+    sock.setsockopt(zmq.LINGER, 0)
+    monitor = attach_connection_monitor(sock, channel)
+    sock.connect(node.bursts)
+    sock.setsockopt(zmq.SUBSCRIBE, b"")
+    connection_state[channel] = DISCONNECTED
+    return sock, monitor
+
+
 async def burst_listener(node):
     """Subscribes to one station's decoder output and folds its bursts into
     the shared track store. Every station goes through here, so a drone seen
     by two of them merges into one track by its serial, as it always has for
-    one."""
+    one.
+
+    The connection state comes from ZMQ's connection events. Those can stop
+    reporting after a long offline spell, so a link that stays down for
+    DECODER_RECONNECT_S is rebuilt on a fresh socket. A quiet decoder (no
+    drones in range) is not a fault: the link state decides, not the traffic."""
     channel = health_channel(node)
     connection_state.setdefault(channel, DISCONNECTED)
-    sock = zmq_ctx().socket(zmq.SUB)
-    sock.setsockopt(zmq.IPV6, 1)  # station addresses may be IPv6 (Tailscale)
-    attach_connection_monitor(sock, channel)
-    sock.connect(node.bursts)
-    sock.setsockopt(zmq.SUBSCRIBE, b"")
-    log.info("Subscribed to %s decoder output at %s", node.id, node.bursts)
     while True:
+        sock, monitor = _open_burst_socket(node, channel)
+        log.info("Subscribed to %s decoder output at %s", node.id, node.bursts)
+        down_since = time.monotonic()
         try:
-            raw = await sock.recv()
-            now = time.time()
-            last_message_at[channel] = now
-            fleet.note_burst(node.id, now)
-            data = parse_message_payload(raw)
-            if data is None:
-                continue
-            for mac, messages in extract_bursts(data):
-                track = store.apply_burst(mac, messages, station_id=node.id)
-                if track is None:
-                    continue   # a MAC with no Remote ID content — not a detection
-                await persist_update(track)
-                await manager.broadcast({"type": "update", "drone": track.to_dict()})
+            while True:
+                try:
+                    raw = await asyncio.wait_for(sock.recv(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    if connection_state.get(channel) == CONNECTED:
+                        down_since = None
+                    elif down_since is None:
+                        down_since = time.monotonic()
+                    elif time.monotonic() - down_since > DECODER_RECONNECT_S:
+                        log.info("%s decoder link down for %.0fs; reopening it",
+                                 node.id, DECODER_RECONNECT_S)
+                        break
+                    continue
+                try:
+                    now = time.time()
+                    last_message_at[channel] = now
+                    fleet.note_burst(node.id, now)
+                    data = parse_message_payload(raw)
+                    if data is None:
+                        continue
+                    for mac, messages in extract_bursts(data):
+                        track = store.apply_burst(mac, messages, station_id=node.id)
+                        if track is None:
+                            continue   # a MAC with no Remote ID content — not a detection
+                        await persist_update(track)
+                        await manager.broadcast({"type": "update", "drone": track.to_dict()})
+                except Exception:
+                    log.exception("Error in %s burst listener", node.id)
         except Exception:
-            log.exception("Error in %s burst listener", node.id)
-            await asyncio.sleep(1)
+            log.exception("%s burst socket failed; reopening it", node.id)
+        finally:
+            connection_state[channel] = DISCONNECTED
+            if monitor is not None:
+                monitor.close(linger=0)
+            sock.close(linger=0)
+        await asyncio.sleep(1)
 
 
 async def status_listener(node):
@@ -1151,17 +1196,10 @@ async def status_listener(node):
 
 
 def _node_link(node_id: str, now: float) -> str:
-    """Green while the master's socket to the station is connected and the
-    station's node_agent has reported lately, red otherwise. The socket alone
-    can read connected for a while after the station is gone, so the report's
-    age is checked too. An idle but running station still reads as connected."""
-    if connection_state.get(f"node:{node_id}") != CONNECTED:
-        return "red"
-    st = fleet.state.get(node_id)
-    last = st.last_status_at if st else None
-    if last is None or now - last > node_cfg.STATUS_STALE_S:
-        return "red"
-    return "green"
+    """Green while the master's ZMQ connection to the station's decoder is up,
+    red otherwise. This is the top-bar light and the hover card's title. The
+    map icon's lights are separate: they come from the station's sniffers."""
+    return "green" if connection_state.get(f"node:{node_id}") == CONNECTED else "red"
 
 
 def stations_snapshot(now: Optional[float] = None) -> list[dict]:
