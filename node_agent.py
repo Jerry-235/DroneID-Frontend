@@ -312,7 +312,7 @@ def main(argv=None) -> int:
                 time.sleep(args.interval)
             pub.send_string(json.dumps(build_status(fix=fix, static=static, sats=sats,
                                                     health=sniffer_health(watches),
-                                                    gps_feed=gps.feed_up if gps else None)))
+                                                    gps_feed=gps.feed_up if gps else False)))
     except KeyboardInterrupt:
         return 0
 
