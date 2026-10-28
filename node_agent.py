@@ -194,7 +194,7 @@ class GpsdClient:
     def __init__(self, host: str, port: int, timeout: float = 2.0):
         self.host, self.port, self.timeout = host, port, timeout
         self._sock = None
-        self._file = None
+        self._buf = b""            # bytes read from gpsd but not yet split into lines
         self._sats: Optional[int] = None
         self._latest: Optional[dict] = None
         self._latest_at: float = 0.0
@@ -207,17 +207,31 @@ class GpsdClient:
         sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
         sock.sendall(b'?WATCH={"enable":true,"json":true}\n')
         self._sock = sock
+        self._buf = b""
         self._warned_down = False
-        self._file = sock.makefile("r", encoding="utf-8", errors="replace")
 
     def close(self):
-        for h in (self._file, self._sock):
-            try:
-                if h is not None:
-                    h.close()
-            except OSError:
-                pass
-        self._file = self._sock = None
+        try:
+            if self._sock is not None:
+                self._sock.close()
+        except OSError:
+            pass
+        self._sock = None
+        self._buf = b""
+
+    def _readline(self) -> str:
+        """One line from gpsd. Reads straight from the socket and keeps its own
+        buffer: a timeout here just raises socket.timeout and leaves the buffer
+        intact, so the next read carries on. (A socket.makefile() reader can't
+        be used after a timeout; it fails for good with "cannot read from timed
+        out object".)"""
+        while b"\n" not in self._buf:
+            chunk = self._sock.recv(4096)
+            if not chunk:
+                raise OSError("gpsd closed the connection")
+            self._buf += chunk
+        line, _, self._buf = self._buf.partition(b"\n")
+        return line.decode("utf-8", "replace")
 
     def poll(self, budget_s: float = 1.5) -> tuple[Optional[dict], Optional[int]]:
         """Reads whatever gpsd has sent within budget_s and returns the newest
@@ -225,18 +239,16 @@ class GpsdClient:
         has no fix — the caller reports that as "no fix"."""
         deadline = time.monotonic() + budget_s
         try:
-            if self._file is None:
+            if self._sock is None:
                 self._connect()
             # Short socket timeout so a quiet gpsd can't hold the loop past the
             # deadline. A timeout just means "nothing new this round".
             self._sock.settimeout(max(0.05, min(0.5, budget_s)))
             while time.monotonic() < deadline:
                 try:
-                    line = self._file.readline()
+                    line = self._readline()
                 except socket.timeout:
                     break
-                if not line:
-                    raise OSError("gpsd closed the connection")
                 rec = parse_gpsd_line(line)
                 if rec is None:
                     continue
@@ -257,7 +269,7 @@ class GpsdClient:
         # The feed is up when the receiver is delivering position records, even
         # with no fix. gpsd answers on its socket even with no receiver behind
         # it, so a connection alone doesn't prove the feed.
-        self.feed_up = (self._file is not None
+        self.feed_up = (self._sock is not None
                         and time.monotonic() - self._tpv_at <= FIX_MAX_AGE_S)
         return self._latest, self._sats
 
