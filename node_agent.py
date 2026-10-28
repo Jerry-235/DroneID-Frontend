@@ -123,6 +123,9 @@ class SnifferWatch:
         import zmq
         from zmq.utils.monitor import parse_monitor_message
         ctx = zmq.Context.instance()
+        # Connected only once the sniffer completes the ZMQ handshake; a bare
+        # TCP connect isn't proof it's running. Older pyzmq lacks the event.
+        up_event = getattr(zmq, "EVENT_HANDSHAKE_SUCCEEDED", zmq.EVENT_CONNECTED)
         while True:
             sock = monitor = None
             try:
@@ -138,9 +141,9 @@ class SnifferWatch:
                     ready = dict(poller.poll(500))
                     if monitor in ready:
                         ev = parse_monitor_message(monitor.recv_multipart())["event"]
-                        if ev == zmq.EVENT_CONNECTED:
+                        if ev == up_event:
                             self.note_connected(True)
-                        elif ev in (zmq.EVENT_DISCONNECTED, zmq.EVENT_CLOSED, zmq.EVENT_CONNECT_RETRIED):
+                        elif ev in (zmq.EVENT_DISCONNECTED, zmq.EVENT_CLOSED):
                             self.note_connected(False)
                     if sock in ready:
                         sock.recv()
