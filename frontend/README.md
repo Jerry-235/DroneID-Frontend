@@ -45,7 +45,7 @@ win over `.env`. Everything is read at startup, so changes need a restart.
 | `DRONEID_SOURCE_RECENT_S` | `15` | How recently a radio must have heard a drone to show as a source |
 | `DRONEID_BROADCAST_TIMEOUT_S` | `5` | Send timeout for a WebSocket client that has stopped reading |
 | `DRONEID_NODES_PATH` | `nodes.json` beside `main.py` | Remote stations file (see `MULTI-NODE.md`) |
-| `DRONEID_NODE_STATUS_STALE_S` | `15` | Silence from a station's `node_agent` before its status counts as old (its link light goes red) |
+| `DRONEID_NODE_STATUS_STALE_S` | `15` | Silence from a station's `node_agent` before its report counts as old (its map icon's Wi-Fi and Bluetooth lights go red) |
 | `DRONEID_ADMIN_NETS` | Tailscale ranges and loopback | Networks allowed to use admin-only endpoints |
 | `DRONEID_MASTER_GPSD` | off | `host:port` of a gpsd that reads a GPS receiver on this machine, e.g. `127.0.0.1:2947` |
 | `DRONEID_TRUST_FORWARDED_FOR` | off | Read the client address from `X-Forwarded-For`. Only behind a proxy that overwrites that header |
@@ -64,16 +64,27 @@ win over `.env`. Everything is read at startup, so changes need a restart.
 The two sniffer ports are subscribed to for liveness only. Nothing is parsed
 from them. The top bar shows one chip per station: the master first, named
 after the station, then each remote node. A chip is green while the master's
-ZMQ link to that feed is up, and red when it isn't. Wi-Fi and Bluetooth are
-shown on the master's map icon and on each node's icon instead:
+ZMQ connection to that station's decoder is up, and red when it isn't. Green
+needs the ZMQ handshake to complete, so a bare TCP connect never flashes it
+green. A quiet decoder, with no drones in range, stays green.
+
+Every connection from the master to a station sends ZMQ heartbeats (every 2
+seconds, 6-second timeout). A link that died without closing, such as a power
+cut or a pulled cable, goes red within about 8 seconds, and the master
+reconnects on its own as soon as the station is back. Each change is logged
+once, for example `node:node-2 link down` and then `node:node-2 link up`.
+
+Wi-Fi and Bluetooth are shown on the master's map icon and on each node's icon
+instead. They're separate from the top-bar chip:
 
 - **green:** that sniffer is sending.
 - **yellow:** connected to the sniffer but quiet for `DRONEID_HEALTH_TIMEOUT_S`.
-- **red:** not connected. This comes from ZMQ's socket-monitor connect and
-  disconnect events, not from silence, so a dead process reads differently from
-  a quiet one. If a sniffer stays red while it's running, check the log for
-  `Could not attach connection monitor`. That means your pyzmq build lacks the
-  monitor API.
+- **red:** not connected, or (for a remote node) its `node_agent` hasn't
+  reported for `DRONEID_NODE_STATUS_STALE_S`. Connection comes from ZMQ's
+  socket-monitor events, not from silence, so a dead process reads differently
+  from a quiet one. If a sniffer stays red while it's running, check the log
+  for `Could not attach a connection monitor`. That means your pyzmq build
+  lacks the monitor API.
 
 ## Marker lifecycle
 

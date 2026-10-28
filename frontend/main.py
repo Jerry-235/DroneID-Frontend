@@ -1038,33 +1038,53 @@ def zmq_ctx():
     return zmq.asyncio.Context.instance()
 
 
+# Which monitor events turn a link green or red. Green needs the ZMTP handshake,
+# not just a TCP connect: a TCP connect can succeed against something that
+# isn't a working ZMQ peer and drop straight away, which made the light flash
+# green on every retry. pyzmq builds without the handshake event fall back to
+# the plain connect event.
+_EVENT_UP = getattr(zmq, "EVENT_HANDSHAKE_SUCCEEDED", zmq.EVENT_CONNECTED)
+_EVENT_DOWN = {zmq.EVENT_DISCONNECTED, zmq.EVENT_CLOSED} | {
+    getattr(zmq, name) for name in ("EVENT_HANDSHAKE_FAILED_NO_DETAIL",
+                                    "EVENT_HANDSHAKE_FAILED_PROTOCOL",
+                                    "EVENT_HANDSHAKE_FAILED_AUTH")
+    if hasattr(zmq, name)
+}
+
+
 async def watch_connection_state(monitor, channel: str):
-    """Reads events off an already-attached ZMQ socket monitor. Must be
-    given the monitor socket itself (from get_monitor_socket(), called
-    synchronously before the owning socket's connect()) rather than
-    attaching it here, since asyncio.create_task() doesn't run its coroutine
-    body until the next loop iteration — too late to guarantee catching the
-    very first CONNECTED event if attached inside the task itself."""
+    """Reads events off an already-attached ZMQ socket monitor and keeps
+    connection_state[channel] up to date. Must be given the monitor socket
+    itself (from get_monitor_socket(), called before the owning socket's
+    connect()), so the very first handshake can't be missed. Logs each change
+    of a station's link once, so an outage shows in the log as one line down
+    and one line up."""
     while True:
         try:
             msg = await monitor.recv_multipart()
-            event = zmq.utils.monitor.parse_monitor_message(msg)
-            ev = event.get("event")
-            if ev == zmq.EVENT_CONNECTED:
-                connection_state[channel] = CONNECTED
-            elif ev in (zmq.EVENT_DISCONNECTED, zmq.EVENT_CLOSED, zmq.EVENT_CONNECT_RETRIED):
-                connection_state[channel] = DISCONNECTED
+            ev = zmq.utils.monitor.parse_monitor_message(msg).get("event")
+            if ev == _EVENT_UP:
+                new = CONNECTED
+            elif ev in _EVENT_DOWN:
+                new = DISCONNECTED
+            else:
+                continue   # connect attempts and retries don't change the light
+            if connection_state.get(channel) != new:
+                connection_state[channel] = new
+                log.info("%s link %s", channel, "up" if new == CONNECTED else "down")
         except zmq.ZMQError:
-            return   # the socket was closed; its replacement has its own monitor
+            return   # the socket was closed
         except Exception:
             log.exception("Error reading connection-monitor events for %s", channel)
             await asyncio.sleep(1)
 
 
-# A station's ZMQ connection can die with no TCP close (a power cut, a pulled
-# cable). Without heartbeats nothing tells the master, the socket stays
-# "connected", and the link never goes red. Heartbeats make ZMQ notice within
-# about 8 seconds, which fires the monitor's DISCONNECTED event.
+# A connection can die with no TCP close (a power cut, a pulled cable). Without
+# heartbeats nothing tells the master: the socket stays "connected", ZMQ never
+# retries, and nothing more arrives until main.py restarts. With them, a dead
+# link is noticed within about 8 seconds and ZMQ reconnects on its own as soon
+# as the station is back. Tested against libzmq with a power-cut simulation:
+# without heartbeats the link never recovered; with them it did, every time.
 ZMQ_HEARTBEAT_IVL_MS = 2000
 ZMQ_HEARTBEAT_TIMEOUT_MS = 6000
 
@@ -1074,23 +1094,29 @@ def set_heartbeat(sock) -> None:
     sock.setsockopt(zmq.HEARTBEAT_TIMEOUT, ZMQ_HEARTBEAT_TIMEOUT_MS)
 
 
-def attach_connection_monitor(sock, channel: str):
-    """Call before sock.connect() so the monitor is guaranteed in place in
-    time to catch the first CONNECTED event. Returns the monitor socket, or
-    None if one could not be attached. If this fails for any reason, the
-    channel just stays "disconnected"/red rather than crashing the app, so
-    check the logs if that happens."""
+def open_sub(addr: str, channel: Optional[str] = None):
+    """A SUB socket for any feed the master listens to: IPv6 allowed (Tailscale
+    addresses may be IPv6), heartbeats on, subscribed to everything. With a
+    channel, a monitor keeps connection_state[channel] current; it is attached
+    before connect() so the first handshake can't be missed."""
+    sock = zmq_ctx().socket(zmq.SUB)
+    sock.setsockopt(zmq.IPV6, 1)
+    sock.setsockopt(zmq.LINGER, 0)
     try:
         set_heartbeat(sock)
     except Exception:
-        log.exception("Could not set ZMQ heartbeats for %s", channel)
-    try:
-        monitor = sock.get_monitor_socket()
-    except Exception:
-        log.exception("Could not attach connection monitor for %s — its health dot will stay red", channel)
-        return None
-    spawn(watch_connection_state(monitor, channel), f"monitor-{channel}")
-    return monitor
+        log.exception("Could not set ZMQ heartbeats for %s", addr)
+    if channel is not None:
+        connection_state[channel] = DISCONNECTED
+        try:
+            monitor = sock.get_monitor_socket()
+        except Exception:
+            log.exception("Could not attach a connection monitor for %s; its light will stay red", channel)
+        else:
+            spawn(watch_connection_state(monitor, channel), f"monitor-{channel}")
+    sock.connect(addr)
+    sock.setsockopt(zmq.SUBSCRIBE, b"")
+    return sock
 
 
 def health_channel(node) -> str:
@@ -1099,89 +1125,43 @@ def health_channel(node) -> str:
     return "zmq" if node.kind == "master" else f"node:{node.id}"
 
 
-# How long a station's decoder link may stay not-connected before the master
-# throws its socket away and opens a fresh one. A new socket always gets its own
-# connection events, so this recovers a link whose events have gone stale,
-# without a restart of main.py.
-DECODER_RECONNECT_S = 15.0
-
-
-def _open_burst_socket(node, channel: str):
-    """A new SUB socket to one station's decoder output, with heartbeats and a
-    connection monitor. Returns (socket, monitor)."""
-    sock = zmq_ctx().socket(zmq.SUB)
-    sock.setsockopt(zmq.IPV6, 1)  # station addresses may be IPv6 (Tailscale)
-    sock.setsockopt(zmq.LINGER, 0)
-    monitor = attach_connection_monitor(sock, channel)
-    sock.connect(node.bursts)
-    sock.setsockopt(zmq.SUBSCRIBE, b"")
-    connection_state[channel] = DISCONNECTED
-    return sock, monitor
-
-
 async def burst_listener(node):
     """Subscribes to one station's decoder output and folds its bursts into
     the shared track store. Every station goes through here, so a drone seen
     by two of them merges into one track by its serial, as it always has for
-    one.
-
-    The connection state comes from ZMQ's connection events. Those can stop
-    reporting after a long offline spell, so a link that stays down for
-    DECODER_RECONNECT_S is rebuilt on a fresh socket. A quiet decoder (no
-    drones in range) is not a fault: the link state decides, not the traffic."""
+    one. The connection's state drives the station's top-bar light; a quiet
+    decoder (no drones in range) still reads as connected."""
     channel = health_channel(node)
-    connection_state.setdefault(channel, DISCONNECTED)
+    sock = open_sub(node.bursts, channel)
+    log.info("Subscribed to %s decoder output at %s", node.id, node.bursts)
     while True:
-        sock, monitor = _open_burst_socket(node, channel)
-        log.info("Subscribed to %s decoder output at %s", node.id, node.bursts)
-        down_since = time.monotonic()
         try:
-            while True:
-                try:
-                    raw = await asyncio.wait_for(sock.recv(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    if connection_state.get(channel) == CONNECTED:
-                        down_since = None
-                    elif down_since is None:
-                        down_since = time.monotonic()
-                    elif time.monotonic() - down_since > DECODER_RECONNECT_S:
-                        log.info("%s decoder link down for %.0fs; reopening it",
-                                 node.id, DECODER_RECONNECT_S)
-                        break
-                    continue
-                try:
-                    now = time.time()
-                    last_message_at[channel] = now
-                    fleet.note_burst(node.id, now)
-                    data = parse_message_payload(raw)
-                    if data is None:
-                        continue
-                    for mac, messages in extract_bursts(data):
-                        track = store.apply_burst(mac, messages, station_id=node.id)
-                        if track is None:
-                            continue   # a MAC with no Remote ID content — not a detection
-                        await persist_update(track)
-                        await manager.broadcast({"type": "update", "drone": track.to_dict()})
-                except Exception:
-                    log.exception("Error in %s burst listener", node.id)
+            raw = await sock.recv()
+            now = time.time()
+            last_message_at[channel] = now
+            fleet.note_burst(node.id, now)
+            data = parse_message_payload(raw)
+            if data is None:
+                continue
+            for mac, messages in extract_bursts(data):
+                track = store.apply_burst(mac, messages, station_id=node.id)
+                if track is None:
+                    continue   # a MAC with no Remote ID content — not a detection
+                await persist_update(track)
+                await manager.broadcast({"type": "update", "drone": track.to_dict()})
         except Exception:
-            log.exception("%s burst socket failed; reopening it", node.id)
-        finally:
-            connection_state[channel] = DISCONNECTED
-            if monitor is not None:
-                monitor.close(linger=0)
-            sock.close(linger=0)
-        await asyncio.sleep(1)
+            log.exception("Error in %s burst listener", node.id)
+            await asyncio.sleep(1)
 
 
 async def status_listener(node):
-    """Position reports from a station's node_agent (fixed or roaming: every
-    external station publishes one). A malformed or unrecognised message is
-    ignored, so it can't move a station on the map."""
-    sock = zmq_ctx().socket(zmq.SUB)
-    sock.setsockopt(zmq.IPV6, 1)  # station addresses may be IPv6 (Tailscale)
-    sock.connect(node.status)
-    sock.setsockopt(zmq.SUBSCRIBE, b"")
+    """Position and sniffer-health reports from a station's node_agent (fixed
+    or roaming: every external station publishes one). A malformed or
+    unrecognised message is ignored, so it can't move a station on the map.
+    Heartbeats keep this link from hanging after a power cut, which is what
+    used to leave a station's Wi-Fi and Bluetooth lights dead until main.py
+    was restarted."""
+    sock = open_sub(node.status)
     log.info("Listening for %s position reports at %s", node.id, node.status)
     while True:
         try:
@@ -1196,9 +1176,10 @@ async def status_listener(node):
 
 
 def _node_link(node_id: str, now: float) -> str:
-    """Green while the master's ZMQ connection to the station's decoder is up,
-    red otherwise. This is the top-bar light and the hover card's title. The
-    map icon's lights are separate: they come from the station's sniffers."""
+    """The station's top-bar light: green while the master's connection to its
+    decoder is up (ZMQ handshake done, heartbeats answered), red otherwise.
+    The map icon's lights are separate: they show the station's Wi-Fi and
+    Bluetooth sniffers, from its node_agent reports."""
     return "green" if connection_state.get(f"node:{node_id}") == CONNECTED else "red"
 
 
@@ -1230,11 +1211,7 @@ async def sniffer_health_listener(addr: str, channel: str):
     receiver.py on 4222, wifi_receiver.py on 4223 by default). Doesn't parse
     content — tracks both the TCP-level connection state (process alive?)
     and message arrival timing (actively sending vs. idle)."""
-    sock = zmq_ctx().socket(zmq.SUB)
-    sock.setsockopt(zmq.IPV6, 1)  # station addresses may be IPv6 (Tailscale)
-    attach_connection_monitor(sock, channel)
-    sock.connect(addr)
-    sock.setsockopt(zmq.SUBSCRIBE, b"")
+    sock = open_sub(addr, channel)
     log.info("Health-monitoring %s sniffer at %s", channel, addr)
     while True:
         try:

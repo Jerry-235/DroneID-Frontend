@@ -156,8 +156,8 @@ recent = []
 nodes.remember_point(recent, "master", 40.0, -100.1, 555, now)
 check("same broadcast from another station is a duplicate",
       nodes.is_cross_station_duplicate(recent, "node-1", 40.0, -100.1, 555, now + 0.3))
-check("same station repeating itself is NOT a duplicate",
-      not nodes.is_cross_station_duplicate(recent, "master", 40.0, -100.1, 555, now + 0.3))
+check("same station repeating a stamped broadcast is a duplicate",
+      nodes.is_cross_station_duplicate(recent, "master", 40.0, -100.1, 555, now + 0.3))
 check("a later Remote ID timestamp is a new point",
       not nodes.is_cross_station_duplicate(recent, "node-1", 40.0, -100.1, 556, now + 0.3))
 check("a different position is a new point",
@@ -241,12 +241,16 @@ def points():
 async def scenario():
     await hear("master", 40.0, -100.1, "1000")
     await hear("node-1", 40.0, -100.1, "1000")      # same broadcast, heard by north
-    await hear("master", 40.0, -100.1, "1000")     # master repeats itself: stored, as before
+    await hear("master", 40.0, -100.1, "1000")     # master repeats itself: not stored again
     await hear("node-1", 40.0005, -100.1005, "1001")  # the drone has moved on
 asyncio.run(scenario())
 pts = points()
-check("a second station's copy of a broadcast is skipped; a station's own repeats are kept",
-      [p["station_id"] for p in pts] == ["master", "master", "node-1"], pts)
+check("each broadcast is stored once, whichever station or repeat it came from",
+      [p["station_id"] for p in pts] == ["master", "node-1"], pts)
+conn = db._require_conn()
+first_stations = conn.execute("SELECT stations FROM track_points ORDER BY id LIMIT 1").fetchone()[0]
+check("the stored point lists both stations that heard it",
+      json.loads(first_stations) == ["master", "node-1"], first_stations)
 t = main.store.tracks["SER-MULTI"]
 check("track remembers every station that heard it", t.seen_by == ["master", "node-1"], t.seen_by)
 check("track's latest station is the last one to report", t.station_id == "node-1", t.station_id)
