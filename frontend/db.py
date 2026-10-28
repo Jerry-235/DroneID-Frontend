@@ -44,6 +44,7 @@ existing deployment for no gain. Free for a future per-drone notes field.
 """
 
 import asyncio
+import json
 import os
 import sqlite3
 import time
@@ -75,6 +76,9 @@ POINT_COLUMNS = [
     # Wi-Fi channel and signal strength (dBm) of the burst behind this point.
     # NULL for Bluetooth and for points recorded before these existed.
     "channel", "rssi",
+    # JSON list of the stations that heard this broadcast. A later station
+    # that hears the same broadcast is added to it rather than storing a copy.
+    "stations",
 ]
 
 _REAL_POINT_COLUMNS = {
@@ -275,12 +279,24 @@ def _start_flight(catalog_key, mac, serial, ts) -> int:
     return cur.lastrowid
 
 
+def _decode_stations(raw) -> list:
+    """The station list stored on a point, as a list of ids. Empty when the
+    point has none (points recorded before this column existed)."""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return [s for s in data if isinstance(s, str)] if isinstance(data, list) else []
+
+
 def _add_point(flight_id, ts, fields: dict):
     conn = _require_conn()
     cols = ["flight_id", "ts"] + POINT_COLUMNS
     vals = [flight_id, ts] + [fields.get(c) for c in POINT_COLUMNS]
     placeholders = ",".join(["?"] * len(cols))
-    conn.execute(
+    cur = conn.execute(
         f"INSERT INTO track_points ({','.join(cols)}) VALUES ({placeholders})",
         vals,
     )
@@ -290,6 +306,22 @@ def _add_point(flight_id, ts, fields: dict):
     conn.execute(
         "UPDATE flights SET point_count = point_count + 1, last_point_at = ? WHERE id = ?",
         (ts, flight_id),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def _add_station_to_point(point_id, station):
+    conn = _require_conn()
+    row = conn.execute("SELECT stations FROM track_points WHERE id = ?", (point_id,)).fetchone()
+    if row is None:
+        return
+    current = _decode_stations(row["stations"])
+    if station in current:
+        return
+    conn.execute(
+        "UPDATE track_points SET stations = ? WHERE id = ?",
+        (json.dumps(sorted(set(current) | {station})), point_id),
     )
     conn.commit()
 
@@ -616,7 +648,15 @@ def _get_flight_points(flight_id):
         f"SELECT {','.join(cols)} FROM track_points WHERE flight_id = ? ORDER BY ts ASC",
         (flight_id,),
     ).fetchall()
-    return [dict(r) for r in rows]
+    points = []
+    for r in rows:
+        p = dict(r)
+        # The UI reads tracked_by, the same field live tracks carry: the
+        # stations that heard this point's broadcast. None falls back to the
+        # single station_id, as for points recorded before this existed.
+        p["tracked_by"] = _decode_stations(p.pop("stations", None)) or None
+        points.append(p)
+    return points
 
 
 # ---- async-facing API ----
@@ -637,8 +677,12 @@ async def start_flight(catalog_key, mac, serial, ts=None) -> int:
     return await run(_start_flight, catalog_key, mac, serial, ts or time.time())
 
 
-async def add_point(flight_id, ts, fields: dict):
-    await run(_add_point, flight_id, ts, fields)
+async def add_point(flight_id, ts, fields: dict) -> int:
+    return await run(_add_point, flight_id, ts, fields)
+
+
+async def add_station_to_point(point_id, station):
+    await run(_add_station_to_point, point_id, station)
 
 
 async def end_flight(flight_id, ts=None):

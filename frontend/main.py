@@ -949,11 +949,19 @@ async def _persist_update_locked(track: DroneTrack):
     )
     # Another station already recorded this exact broadcast for this flight:
     # nothing new to store, and the track is already up to date in memory.
+    match = None
     if (track.station_id and key in active_flights and track.lat is not None
-            and track.lon is not None
-            and node_cfg.is_cross_station_duplicate(
-                track.recent_points, track.station_id, track.lat, track.lon,
-                track.loc_timestamp, track.last_seen)):
+            and track.lon is not None):
+        match = node_cfg.find_duplicate_point(
+            track.recent_points, track.station_id, track.lat, track.lon,
+            track.loc_timestamp, track.last_seen)
+    if match is not None:
+        # Same broadcast as a stored point: nothing new is recorded. The point
+        # gains this station if it isn't already listed, so History shows how
+        # many stations had the drone there. Repeats from the same station add
+        # nothing, so they are dropped here.
+        if match.point_id is not None and match.station != track.station_id:
+            await db.add_station_to_point(match.point_id, track.station_id)
         return
     nickname = catalog_nicknames.get(key)
     is_new = key not in active_flights
@@ -993,11 +1001,13 @@ async def _persist_update_locked(track: DroneTrack):
 
     track.flight_id = active_flights[key]
     point_fields = {c: getattr(track, c, None) for c in db.POINT_COLUMNS}
+    point_fields["stations"] = json.dumps([track.station_id]) if track.station_id else None
     try:
-        await db.add_point(track.flight_id, track.last_seen, point_fields)
+        point_id = await db.add_point(track.flight_id, track.last_seen, point_fields)
         if track.lat is not None and track.lon is not None:
             node_cfg.remember_point(track.recent_points, track.station_id or node_cfg.MASTER_ID,
-                                    track.lat, track.lon, track.loc_timestamp, track.last_seen)
+                                    track.lat, track.lon, track.loc_timestamp, track.last_seen,
+                                    point_id=point_id)
     except Exception:
         # The flight row has gone from under us — merged or deleted from
         # History between this track opening it and this point being written.

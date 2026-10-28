@@ -384,32 +384,41 @@ class SeenPoint:
     lon: float
     loc_ts: Optional[str]
     at: float
+    point_id: Optional[int] = None   # the stored track point this came from
+
+
+def find_duplicate_point(recent: list, station: str, lat: float, lon: float,
+                         loc_ts, now: float) -> Optional["SeenPoint"]:
+    """The stored point that this decode repeats, or None.
+
+    A Remote ID location carries its own timestamp. A drone's beacon is
+    re-sent several times a second, and each receiver can decode the same
+    broadcast more than once, so a decode whose timestamp and position match a
+    stored point is the same broadcast: whichever station or repeat it came
+    from, it is not recorded again. Without a timestamp, only another station's
+    copy within a short window counts, since a station's own repeats can't be
+    told apart from separate reports."""
+    loc_key = None if loc_ts is None else str(loc_ts)
+    for p in recent:
+        if abs(p.lat - lat) > 1e-6 or abs(p.lon - lon) > 1e-6:
+            continue
+        if loc_key is not None and p.loc_ts is not None:
+            # Stamped: the same broadcast, whichever station or repeat it came
+            # from. Only one copy of a broadcast is ever recorded.
+            if p.loc_ts == loc_key:
+                return p
+        elif p.station != station and abs(now - p.at) <= UNSTAMPED_DUPLICATE_WINDOW_S:
+            # Unstamped: only another station's copy is recognisable as a repeat.
+            return p
+    return None
 
 
 def is_cross_station_duplicate(recent: list, station: str, lat: float, lon: float,
                                loc_ts, now: float) -> bool:
-    """True if another station already recorded this same position for this
-    track. Same-station repeats are NOT duplicates here — a drone's beacon is
-    re-sent several times a second with the same timestamp, and that's been
-    stored as-is all along; changing it would alter existing flight data.
-
-    A Remote ID location carries its own timestamp, and two stations hearing
-    the same broadcast report the same one, so that match is exact. Without
-    one, fall back to the same position within a short window."""
-    loc_key = None if loc_ts is None else str(loc_ts)
-    for p in recent:
-        if p.station == station:
-            continue
-        if abs(p.lat - lat) > 1e-6 or abs(p.lon - lon) > 1e-6:
-            continue
-        if loc_key is not None and p.loc_ts is not None:
-            if p.loc_ts == loc_key:
-                return True
-        elif abs(now - p.at) <= UNSTAMPED_DUPLICATE_WINDOW_S:
-            return True
-    return False
+    return find_duplicate_point(recent, station, lat, lon, loc_ts, now) is not None
 
 
-def remember_point(recent: list, station: str, lat: float, lon: float, loc_ts, now: float):
-    recent.append(SeenPoint(station, lat, lon, None if loc_ts is None else str(loc_ts), now))
+def remember_point(recent: list, station: str, lat: float, lon: float, loc_ts, now: float,
+                   point_id: Optional[int] = None):
+    recent.append(SeenPoint(station, lat, lon, None if loc_ts is None else str(loc_ts), now, point_id))
     del recent[:-RECENT_POINTS_KEPT]
