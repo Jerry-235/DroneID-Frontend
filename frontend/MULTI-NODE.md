@@ -64,18 +64,23 @@ not on the node. A fixed node needs no position on the node itself.
 
 ## On the map
 
-Each station is the same ball as the master, with a link dot.
+Each station is drawn with the icon chosen for it on the Station page, with a
+small dot. The dot and the top-bar chip show different things:
 
-- **Link dot:** green means the master is connected to that station's decoder.
-  Red means it isn't.
-- **Hover:** the title (for example `Station A - CONNECTED`) and two lights:
-  Wi-Fi and Bluetooth.
+- **Top-bar chip:** green while the master is connected to that station's
+  decoder, red when it isn't. A quiet decoder stays green.
+- **Map dot:** the station's sniffers. Green when both Wi-Fi and Bluetooth are
+  connected, whether sending or quiet, yellow when one is, red when neither is.
+- **Hover:** the title (for example `Station A - CONNECTED`, which follows the
+  top-bar chip) and two lights: Wi-Fi and Bluetooth.
 - **Sniffer lights:** green means the sniffer is sending, yellow means it's
   connected but quiet for `DRONEID_HEALTH_TIMEOUT_S` (12 seconds by default), and
-  red means it isn't connected, or the agent has stopped reporting.
+  red means it isn't connected, or the agent hasn't reported for
+  `DRONEID_NODE_STATUS_STALE_S` (15 seconds by default).
 
-The map dot is green when both sniffers are connected, whether sending or quiet.
-It's yellow when one is, and red when neither is.
+Both links use ZMQ heartbeats, so a station that loses power or network goes
+red within seconds and comes back on its own when it returns. No restart of
+`main.py` is needed.
 
 ## The master: nodes.json
 
