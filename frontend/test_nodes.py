@@ -271,6 +271,68 @@ check("master sits at the home point", by_id["master"]["lat"] == 40.0 and by_id[
 check("static node sits at its configured point", by_id["node-1"]["lat"] == 40.1 and by_id["node-1"]["stale"] is False)
 check("master link follows the local feed", by_id["master"]["link"] in ("red", "green", "yellow"))
 
+print("\n[health alerts]")
+HN = {"master": "Master", "node-1": "Node 1"}
+H_UP = {"decoder": True, "agent": True, "wifi": True, "bluetooth": True}
+H_MUP = {"decoder": True, "wifi": True, "bluetooth": True}
+H_OFF = {"decoder": False, "agent": False, "wifi": None, "bluetooth": None}
+
+def health_run(timeline, until, grace=0):
+    """Steps a tracker every 5 s like the monitor; returns (time, message) pairs."""
+    tr = main.HealthTracker(60, 10)
+    state = {"master": dict(H_MUP), "node-1": dict(H_UP)}
+    out, tick = [], 0
+    while tick <= until:
+        for at, sid, change in timeline:
+            if at == tick:
+                state[sid].update(change)
+        out += [(tick, m) for m in tr.step({k: dict(v) for k, v in state.items()}, HN, tick, tick >= grace)]
+        tick += 5
+    return out
+
+check("a short blip sends nothing",
+      health_run([(10, "node-1", {"wifi": False}), (30, "node-1", {"wifi": True})], 150) == [])
+msgs = health_run([(10, "node-1", {"wifi": False}), (120, "node-1", {"wifi": True})], 160)
+check("one sniffer down is a warning, then one recovery",
+      [m for _, m in msgs] == [
+          "## \u26a0\ufe0f Node 1 Wi-Fi Sniffer Down\n```Wi-Fi sniffer not reporting - Decoder, agent and Bluetooth sniffer still up```",
+          "## \u2705 Node 1 Wi-Fi Sniffer Online\n```All components reporting```"], msgs)
+check("the warning waits for the debounce", msgs[0][0] == 70, msgs)
+msgs = health_run([(10, "node-1", {"decoder": False}), (20, "node-1", H_OFF),
+                   (200, "node-1", {"decoder": True}), (300, "node-1", H_UP)], 340)
+check("a whole node down is one offline message; a partial return then the rest",
+      [m for _, m in msgs] == [
+          "## \u274c Node 1 Offline\n```Decoder and agent not reporting```",
+          "## \u2705 Node 1 Online\n```Decoder online - Agent offline```",
+          "## \u2705 Node 1 Agent Online\n```All components reporting```"], msgs)
+msgs = health_run([(10, "node-1", H_OFF), (200, "node-1", {"decoder": True, "agent": True, "wifi": True, "bluetooth": False}),
+                   (400, "node-1", {"bluetooth": True})], 440)
+check("a part named offline in a recovery gets only its own online message later",
+      [m for _, m in msgs][1:] == [
+          "## \u2705 Node 1 Online\n```Decoder and agent online - Bluetooth sniffer offline```",
+          "## \u2705 Node 1 Bluetooth Sniffer Online\n```All components reporting```"], msgs)
+msgs = health_run([(0, "node-1", H_OFF)], 150, grace=120)
+check("nothing during the start-up grace; still-down stations reported after it",
+      [t_ for t_, _ in msgs] == [120] and "Offline" in msgs[0][1], msgs)
+check("the master's full outage names all three",
+      health_run([(10, "master", {"decoder": False, "wifi": False, "bluetooth": False})], 90)[0][1]
+      == "## \u274c Master Offline\n```Decoder, Wi-Fi and Bluetooth sniffers not reporting```")
+
+hnow = time.time()
+main.connection_state["zmq"] = main.CONNECTED
+main.connection_state["node:node-1"] = main.DISCONNECTED
+main.fleet.state["node-1"].last_status_at = None
+h = main.station_health(hnow)
+check("a remote station's sniffers are unknown while its agent is silent",
+      h["node-1"] == {"decoder": False, "agent": False, "wifi": None, "bluetooth": None}, h["node-1"])
+main.fleet.note_status("node-1", nodes.parse_status(na.build_status(
+    fix=None, now=hnow, health={"wifi": "green", "bluetooth": "red"})), hnow)
+main.connection_state["node:node-1"] = main.CONNECTED
+h = main.station_health(hnow + 1)
+check("a reporting agent gives real sniffer states",
+      h["node-1"] == {"decoder": True, "agent": True, "wifi": True, "bluetooth": False}, h["node-1"])
+check("the master has a decoder and two sniffers, no agent", set(h["master"]) == {"decoder", "wifi", "bluetooth"}, h["master"])
+
 print()
 if fails:
     print(f"{len(fails)} FAILED: {fails}")

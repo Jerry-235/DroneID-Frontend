@@ -51,6 +51,9 @@ win over `.env`. Everything is read at startup, so changes need a restart.
 | `DRONEID_TRUST_FORWARDED_FOR` | off | Read the client address from `X-Forwarded-For`. Only behind a proxy that overwrites that header |
 | `DRONEID_DISCORD_WEBHOOK` | none | Enables alerts (see *Discord alerts*) |
 | `DRONEID_DISCORD_ROLE_ID` | none | Numeric role ID to ping on each alert |
+| `DRONEID_HEALTH_WEBHOOK` | none | Enables station health alerts, to their own channel (see *Health alerts*) |
+| `DRONEID_HEALTH_ALERT_AFTER_S` | `60` | How long a component must stay down before it's reported |
+| `DRONEID_HEALTH_STARTUP_GRACE_S` | `120` | Quiet period after start-up while every link connects |
 | `DRONEID_LANDMARKS_PATH` | `landmarks.csv` beside `places.py` | Optional local place names. See *Place names* |
 | `DRONEID_LANDMARK_RADIUS_M` | `150` | How close a point must be to a landmark to take its name |
 | `DRONEID_NOMINATIM_URL` | OpenStreetMap's public server | Reverse geocoder used when no landmark matches |
@@ -270,7 +273,7 @@ GPS state shows on each icon's hover card and on the station's top-bar name:
 
 ## Admin view
 
-The admin-only endpoints (drone rename, station location, Discord test, debug drone,
+The admin-only endpoints (drone rename, station location, Discord and health-alert tests, debug drone,
 flight merge and delete) are refused unless the request comes from a network in
 `DRONEID_ADMIN_NETS`. The default is the Tailscale address ranges plus loopback,
 so anyone on your tailnet is an admin and anyone else isn't. `GET /api/access`
@@ -336,6 +339,58 @@ ID on every message, whatever the content. Drone nicknames are user-editable and
 land directly in the alert, so without that lock, naming a drone `@everyone`
 would ping the whole server.
 
+## Health alerts
+
+Station health goes to a second Discord channel, through its own webhook, so it
+never mixes with drone alerts or delays them. Health alerts never ping a role.
+
+What's watched, using the same state the web page shows:
+
+| Station | Components |
+|---|---|
+| Master | decoder, Wi-Fi sniffer, Bluetooth sniffer |
+| Remote node | decoder, agent (`node_agent`), Wi-Fi sniffer, Bluetooth sniffer |
+
+A remote node's sniffer states only reach the master through its agent, so while
+the agent is silent they're unknown rather than down. Yellow (connected but
+quiet) never alerts. GPS is not watched.
+
+When messages are sent:
+
+- **Down:** once a component has been down for `DRONEID_HEALTH_ALERT_AFTER_S`
+  (60 seconds), one message covers everything on that station that's down at
+  that moment. A blip or a service restart stays quiet.
+- **Back:** once a reported component has been back for 10 seconds, one message
+  covers everything on that station that's back, and names anything still down.
+  A part that comes back later gets its own message.
+- **Once per outage:** nothing repeats while a component stays down.
+- **Start-up:** nothing is sent for `DRONEID_HEALTH_STARTUP_GRACE_S` (2 minutes)
+  after `main.py` starts. Anything still down after that is reported.
+
+Examples:
+
+```
+## ❌ Node 2 Offline
+Decoder and agent not reporting
+
+## ⚠️ Node 1 Wi-Fi Sniffer Down
+Wi-Fi sniffer not reporting - Decoder, agent and Bluetooth sniffer still up
+
+## ✅ Node 2 Online
+Decoder online - Agent offline
+
+## ✅ Node 2 Agent Online
+All components reporting
+```
+
+❌ means the whole station is down, ⚠️ that part of it is, and ✅ that something
+came back. As with drone alerts, the second line renders as a code block.
+
+Setup: create a webhook in the health channel the same way as for drone alerts,
+put its URL in `DRONEID_HEALTH_WEBHOOK`, and restart. Settings > Health Alerts
+shows "Configured" and a Send Test button. The master can't report its own
+outage: if `main.py` itself stops, nothing is sent.
+
 ## API
 
 Responses over 1 KB are gzipped. A long flight's point list shrinks about 20×.
@@ -357,6 +412,8 @@ Responses over 1 KB are gzipped. A long flight's point list shrinks about 20×.
 | `PUT /api/station-config/{station_id}` | A station's name, location mode, manual position and map icon (`ball`, `ring`, `hex`, `radio`, `car`). Admin-only |
 | `GET /api/discord_webhook` | `{"configured": true\|false}`. Never the URL |
 | `POST /api/discord_webhook/test` | Sends a test alert, including the role-ping path |
+| `GET /api/health_webhook` | `{"configured": true\|false}`. Never the URL |
+| `POST /api/health_webhook/test` | Sends a test health alert to the health channel. Admin-only |
 | `POST /api/test/drone/start`, `/stop`, `GET /status` | The synthetic test drone |
 
 ## Database

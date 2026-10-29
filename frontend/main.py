@@ -23,6 +23,8 @@ persists every sample to SQLite through db.py, and serves:
   - GET /api/station                  the station ("home point") location
   - GET  /api/discord_webhook         whether an alert webhook is configured
   - POST /api/discord_webhook/test    send a test alert
+  - GET  /api/health_webhook          whether a health-alert webhook is configured
+  - POST /api/health_webhook/test     send a test health alert
 
   debug
   - POST /api/test/drone/start|stop, GET /api/test/drone/status
@@ -1606,7 +1608,8 @@ def build_new_drone_message(track: "DroneTrack", place: "Optional[places.Place]"
     return f"{header}\n```{body}```"
 
 
-def _post_discord_webhook_sync(url: str, content: str) -> tuple[bool, str]:
+def _post_discord_webhook_sync(url: str, content: str,
+                               roles: Optional[list] = None) -> tuple[bool, str]:
     """Returns (success, detail). Never raises — callers decide whether the
     detail matters (the fire-and-forget alert path just logs it; the test
     endpoint surfaces it to the UI)."""
@@ -1616,7 +1619,11 @@ def _post_discord_webhook_sync(url: str, content: str) -> tuple[bool, str]:
     # directly in this string — without this restriction, naming a drone
     # something like "@everyone" would actually ping the whole server. Only
     # the one specific configured role (if any) is ever allowed through.
-    allowed_roles = [DISCORD_ROLE_ID] if DISCORD_ROLE_ID else []
+    # roles=None means the drone-alert default: the configured role, if any.
+    # Health alerts pass [] so they never ping anyone.
+    if roles is None:
+        roles = [DISCORD_ROLE_ID] if DISCORD_ROLE_ID else []
+    allowed_roles = roles
     payload = json.dumps({
         "content": content,
         "allowed_mentions": {"parse": [], "roles": allowed_roles},
@@ -1664,19 +1671,213 @@ async def enqueue_alert(message: str):
         await _alert_queue.put(message)
 
 
-async def alert_worker():
+async def _drain_alerts(queue: asyncio.Queue, url: str, roles: Optional[list], label: str):
+    """Posts a queue's messages one at a time, at most one per ALERT_INTERVAL_S,
+    retrying only on Discord's rate limit."""
     while True:
-        message = await _alert_queue.get()
+        message = await queue.get()
         for attempt in range(1, ALERT_MAX_TRIES + 1):
-            ok, detail = await asyncio.to_thread(_post_discord_webhook_sync, discord_webhook_url, message)
+            ok, detail = await asyncio.to_thread(_post_discord_webhook_sync, url, message, roles)
             if ok:
                 break
             if "HTTP 429" not in detail or attempt == ALERT_MAX_TRIES:
-                log.warning("Discord alert not sent: %s", detail)
+                log.warning("Discord %s alert not sent: %s", label, detail)
                 break
-            log.warning("Discord rate limit hit, retrying alert (%d/%d)", attempt, ALERT_MAX_TRIES)
+            log.warning("Discord rate limit hit, retrying %s alert (%d/%d)", label, attempt, ALERT_MAX_TRIES)
             await asyncio.sleep(ALERT_INTERVAL_S)
         await asyncio.sleep(ALERT_INTERVAL_S)
+
+
+async def alert_worker():
+    await _drain_alerts(_alert_queue, discord_webhook_url, None, "drone")
+
+
+# ---- station health alerts, to their own Discord channel ----
+# A second webhook, so health messages land in a different channel from drone
+# alerts and have their own queue: a burst of health messages can never delay
+# a drone alert. Never pings a role.
+health_webhook_url: Optional[str] = os.environ.get("DRONEID_HEALTH_WEBHOOK") or None
+if health_webhook_url and not health_webhook_url.startswith((
+    "https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/",
+)):
+    log.warning("DRONEID_HEALTH_WEBHOOK is set but doesn't look like a Discord webhook URL "
+                "— health alerts will likely fail to send")
+# A component must stay down this long before it is reported, so a blip or a
+# service restart (a few seconds) stays quiet.
+HEALTH_ALERT_AFTER_S = float(os.environ.get("DRONEID_HEALTH_ALERT_AFTER_S", "60"))
+# After main.py starts, nothing is reported for this long while every link
+# comes up. Anything still down after that is reported as normal.
+HEALTH_STARTUP_GRACE_S = float(os.environ.get("DRONEID_HEALTH_STARTUP_GRACE_S", "120"))
+# A component that was reported down must be back this long before it is
+# reported back, so a link that comes and goes doesn't send a pair each time.
+HEALTH_RECOVER_AFTER_S = 10.0
+HEALTH_CHECK_S = 5.0
+_health_queue: Optional[asyncio.Queue] = None
+
+HEALTH_COMPONENTS = ("decoder", "agent", "wifi", "bluetooth")
+# Names in a heading, and in a sentence.
+HEALTH_TITLE_NAMES = {"decoder": "Decoder", "agent": "Agent",
+                      "wifi": "Wi-Fi Sniffer", "bluetooth": "Bluetooth Sniffer"}
+HEALTH_TEXT_NAMES = {"decoder": "decoder", "agent": "agent",
+                     "wifi": "Wi-Fi sniffer", "bluetooth": "Bluetooth sniffer"}
+
+
+def station_health(now: float) -> dict:
+    """{station id: {component: True (up) / False (down) / None (unknown)}}.
+
+    Reads the same state the web page shows. The master has its decoder and
+    its two sniffers. A remote station also has its node_agent. Its sniffer
+    states only reach the master through the agent's reports, so while the
+    agent is down they are unknown rather than down."""
+    local = compute_health(now)
+    out = {}
+    for sid in fleet.ids():
+        if fleet.config[sid].kind == "master":
+            out[sid] = {"decoder": connection_state.get("zmq") == CONNECTED,
+                        "wifi": local["wifi"] != "red",
+                        "bluetooth": local["bluetooth"] != "red"}
+            continue
+        st = fleet.state[sid]
+        agent_up = st.last_status_at is not None and now - st.last_status_at <= node_cfg.STATUS_STALE_S
+        row = fleet.describe(sid, now, "red")
+        out[sid] = {"decoder": connection_state.get(f"node:{sid}") == CONNECTED,
+                    "agent": agent_up,
+                    "wifi": (row["wifi"] != "red") if agent_up else None,
+                    "bluetooth": (row["bluetooth"] != "red") if agent_up else None}
+    return out
+
+
+def _join_names(items: list) -> str:
+    """["A"] -> "A"; ["A", "B"] -> "A and B"; ["A", "B", "C"] -> "A, B and C".
+    When the last item already has its own "and" ("Wi-Fi and Bluetooth
+    sniffers"), commas join the rest: "Decoder, Wi-Fi and Bluetooth sniffers"."""
+    if len(items) == 1:
+        return items[0]
+    if " and " in items[-1]:
+        return ", ".join(items)
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _component_names(comps: list, names: dict, sniffers: str) -> list:
+    """Names for a list of components, with both sniffers merged into one
+    phrase ("Wi-Fi and Bluetooth sniffers") rather than repeating the word."""
+    out = [names[c] for c in comps if c not in ("wifi", "bluetooth")]
+    if "wifi" in comps and "bluetooth" in comps:
+        out.append(sniffers)
+    else:
+        out += [names[c] for c in comps if c in ("wifi", "bluetooth")]
+    return out
+
+
+def _component_title(comps: list) -> str:
+    """Component names for a heading, e.g. "Wi-Fi and Bluetooth Sniffers"."""
+    return _join_names(_component_names(comps, HEALTH_TITLE_NAMES, "Wi-Fi and Bluetooth Sniffers"))
+
+
+def _component_list(comps: list) -> str:
+    """Component names for a message body, starting with a capital."""
+    text = _join_names(_component_names(comps, HEALTH_TEXT_NAMES, "Wi-Fi and Bluetooth sniffers"))
+    return text[0].upper() + text[1:]
+
+
+class HealthTracker:
+    """Turns component states, checked every few seconds, into Discord messages.
+
+    - Down: once a component has been down for alert_after seconds, every
+      component of that station that is down at that moment is reported in
+      one message. ❌ when the whole station is down (every component whose
+      state is known), ⚠️ when only part of it is.
+    - Back: once a reported component has been back for recover_after
+      seconds, every reported component that is back is announced in one ✅
+      message, naming anything still down. Parts that come back later get
+      their own ✅ message.
+    - Each outage is reported once; nothing repeats while it lasts."""
+
+    def __init__(self, alert_after: float, recover_after: float):
+        self.alert_after, self.recover_after = alert_after, recover_after
+        self.down_since: dict = {}    # (station, component) -> when it went down
+        self.up_since: dict = {}      # (station, component) -> when it came back
+        self.alerted: set = set()     # (station, component) reported down
+        self.full_outage: set = set() # stations reported fully down
+
+    def step(self, health: dict, names: dict, now: float, alerting: bool = True) -> list:
+        messages = []
+        for sid, comps in health.items():
+            for comp, up in comps.items():
+                key = (sid, comp)
+                if up is None:
+                    continue              # unknown: keep whatever was last known
+                if up:
+                    self.down_since.pop(key, None)
+                    self.up_since.setdefault(key, now)
+                else:
+                    self.up_since.pop(key, None)
+                    self.down_since.setdefault(key, now)
+            if alerting:
+                messages += self._station_messages(sid, comps, names.get(sid, sid), now)
+        return messages
+
+    def _station_messages(self, sid, comps, name, now) -> list:
+        order = [c for c in HEALTH_COMPONENTS if c in comps]
+        known = [c for c in order if comps[c] is not None]
+        down_now = [c for c in known if comps[c] is False]
+        up_now = [c for c in known if comps[c] is True]
+        messages = []
+
+        # Back: anything reported down that is up again
+        back = [c for c in order if (sid, c) in self.alerted and comps[c] is True]
+        if back and any(now - self.up_since[(sid, c)] >= self.recover_after for c in back):
+            for c in back:
+                self.alerted.discard((sid, c))
+            if not down_now:
+                body = "All components reporting"
+            else:
+                body = f"{_component_list(back)} online - {_component_list(down_now)} offline"
+                # Named offline here, so they count as reported: when they come
+                # back they get their own ✅ message, not a ⚠️ first.
+                for c in down_now:
+                    self.alerted.add((sid, c))
+            if sid in self.full_outage:
+                self.full_outage.discard(sid)
+                title = f"{name} Online"
+            else:
+                title = f"{name} {_component_title(back)} Online"
+            messages.append(f"## \u2705 {title}\n```{body}```")
+
+        # Down: report every unreported component that is down, once any of
+        # them has been down long enough
+        fresh = [c for c in down_now if (sid, c) not in self.alerted]
+        if fresh and any(now - self.down_since[(sid, c)] >= self.alert_after for c in fresh):
+            for c in fresh:
+                self.alerted.add((sid, c))
+            if known and not up_now:
+                self.full_outage.add(sid)
+                messages.append(f"## \u274c {name} Offline\n```{_component_list(known)} not reporting```")
+            else:
+                body = f"{_component_list(fresh)} not reporting - {_component_list(up_now)} still up"
+                messages.append(f"## \u26a0\ufe0f {name} {_component_title(fresh)} Down\n```{body}```")
+        return messages
+
+
+async def health_monitor():
+    """Checks every station's health every HEALTH_CHECK_S and queues alerts."""
+    tracker = HealthTracker(HEALTH_ALERT_AFTER_S, HEALTH_RECOVER_AFTER_S)
+    started = time.time()
+    while True:
+        await asyncio.sleep(HEALTH_CHECK_S)
+        try:
+            now = time.time()
+            names = {sid: station_display_name(sid) for sid in fleet.ids()}
+            alerting = now - started >= HEALTH_STARTUP_GRACE_S
+            for message in tracker.step(station_health(now), names, now, alerting):
+                log.info("Health alert: %s", message.splitlines()[0].lstrip("# "))
+                await _health_queue.put(message)
+        except Exception:
+            log.exception("Error in the health monitor")
+
+
+async def health_alert_worker():
+    await _drain_alerts(_health_queue, health_webhook_url, [], "health")
 
 
 async def name_new_flight(flight_id, track: "DroneTrack", lat: Optional[float] = None,
@@ -1939,6 +2140,7 @@ def is_admin_request(conn) -> bool:
 # an endpoint can't quietly end up ungated because its decorator was missed.
 ADMIN_ONLY_ROUTES = {
     ("POST", "/api/discord_webhook/test"),
+    ("POST", "/api/health_webhook/test"),
     ("POST", "/api/test/drone/start"),
     ("POST", "/api/test/drone/stop"),
     ("POST", "/api/flights/merge"),
@@ -1963,7 +2165,7 @@ async def lifespan(_app: "FastAPI"):
     has deprecated. Nothing is torn down on the way out: the process exits
     immediately afterwards, the listener tasks die with the loop, and SQLite in
     WAL mode needs no explicit close to stay consistent."""
-    global station_cache, station_config, fleet, _alert_queue
+    global station_cache, station_config, fleet, _alert_queue, _health_queue
     db.init(os.environ.get("DRONEID_DB_PATH", os.path.join(os.path.dirname(__file__), "droneid.db")))
     catalog_nicknames.update(await db.get_catalog())
     station_cache = parse_station(await db.get_setting("station"))
@@ -1980,6 +2182,10 @@ async def lifespan(_app: "FastAPI"):
     if discord_webhook_url:
         _alert_queue = asyncio.Queue()
         spawn(alert_worker(), "discord-alerts")
+    if health_webhook_url:
+        _health_queue = asyncio.Queue()
+        spawn(health_alert_worker(), "health-alerts")
+        spawn(health_monitor(), "health-monitor")
     if MASTER_GPSD:
         host, _, port = MASTER_GPSD.rpartition(":")
         try:
@@ -2135,6 +2341,23 @@ async def api_test_discord_webhook():
     role_ping = f" <@&{DISCORD_ROLE_ID}>" if DISCORD_ROLE_ID else ""
     test_message = f"## DroneID Test Alert{role_ping}\n```If you can see this, the webhook is working.```"
     ok, detail = await asyncio.to_thread(_post_discord_webhook_sync, discord_webhook_url, test_message)
+    if not ok:
+        return JSONResponse({"error": f"Discord rejected the request — {detail}"}, status_code=502)
+    return {"ok": True}
+
+
+@app.get("/api/health_webhook")
+async def api_get_health_webhook():
+    """Status only; the URL itself comes from DRONEID_HEALTH_WEBHOOK."""
+    return {"configured": health_webhook_url is not None}
+
+
+@app.post("/api/health_webhook/test")
+async def api_test_health_webhook():
+    if not health_webhook_url:
+        return JSONResponse({"error": "No health webhook configured."}, status_code=400)
+    test_message = "## \u2705 DroneID Health Alerts Test\n```If you can see this, health alerts are working.```"
+    ok, detail = await asyncio.to_thread(_post_discord_webhook_sync, health_webhook_url, test_message, [])
     if not ok:
         return JSONResponse({"error": f"Discord rejected the request — {detail}"}, status_code=502)
     return {"ok": True}

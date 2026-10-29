@@ -1792,6 +1792,17 @@ function renderSettingsPanel() {
       <div class="station-form-buttons">
         <button id="discord-webhook-test" class="settings-btn settings-btn-ghost">Send Test</button>
       </div>
+    </div>
+    <div class="settings-group-title">Health Alerts</div>
+    <div class="settings-note">
+      Posts to a separate Discord channel when a station's decoder, agent or
+      sniffers stop reporting for a minute, and again when they come back.
+    </div>
+    <div class="station-form">
+      <div class="settings-note" id="health-webhook-status">Checking…</div>
+      <div class="station-form-buttons">
+        <button id="health-webhook-test" class="settings-btn settings-btn-ghost">Send Test</button>
+      </div>
     </div>`;
 
   let html = '<div class="settings-note" style="padding-top:12px;">Choose which fields appear in the details panel shown when you select a drone on the map or scrub through its history. Applies everywhere — not per-drone.</div>';
@@ -1942,6 +1953,39 @@ function renderSettingsPanel() {
     }
   }
   refreshDiscordWebhookStatus();
+
+  async function refreshHealthWebhookStatus() {
+    const statusEl = document.getElementById('health-webhook-status');
+    const testBtn = document.getElementById('health-webhook-test');
+    if (!statusEl || !testBtn) return;
+    try {
+      const res = await fetch('/api/health_webhook');
+      const data = await res.json();
+      statusEl.textContent = data.configured
+        ? 'Configured — health alerts are active.'
+        : 'Not configured — set DRONEID_HEALTH_WEBHOOK on the server and restart.';
+      testBtn.disabled = !data.configured;
+    } catch (e) {
+      statusEl.textContent = 'Could not reach the server.';
+      testBtn.disabled = true;
+    }
+  }
+  refreshHealthWebhookStatus();
+
+  const healthTestBtn = document.getElementById('health-webhook-test');
+  if (healthTestBtn) {
+    healthTestBtn.addEventListener('click', async () => {
+      const statusEl = document.getElementById('health-webhook-status');
+      statusEl.textContent = 'Sending…';
+      try {
+        const res = await fetch('/api/health_webhook/test', { method: 'POST' });
+        const data = await res.json();
+        statusEl.textContent = res.ok ? 'Test sent — check Discord.' : (data.error || 'Test failed.');
+      } catch (e) {
+        statusEl.textContent = 'Could not reach the server.';
+      }
+    });
+  }
 
   document.getElementById('discord-webhook-test').addEventListener('click', async () => {
     const statusEl = document.getElementById('discord-webhook-status');
