@@ -110,20 +110,27 @@ def set_interface_channel(interface, channel):
     return sudo(["iw", "dev", interface, "set", "channel", str(channel)])
 
 def extract_wifi_if_details(interface):
+    """{interface: (phy, type)} from `iw dev`, e.g. {"wlan0": ("phy0", "managed")}.
+
+    Reads line by line and remembers which phy each interface sits under. The
+    old version took the phy from the line just above "Interface", which is
+    only right when a phy has one interface. Cards such as the MT7921 also
+    create p2p0 on the same phy, listed first, and wlan0 then got the end of
+    p2p0's TXQ table as its phy, so `iw <phy> info` failed and the card was
+    wrongly reported as unable to do monitor mode."""
     i2d = {}
-    devl = cexec(["iw", "dev"]).split("\n\t")
-    ptype = ""
-    for i in range(len(devl) - 1):
-        if "Interface" in devl[i + 1]:
-            iface = devl[i + 1].split(" ")[-1]
-            dev = devl[i].split(" ")[-1].replace("#", "")
-            for x in range(i + 2, len(devl), 1):
-                if "type" in devl[x]:
-                    ptype = devl[x].split(" ")[-1]
-                    break
-                elif "Interface" in devl[x]:
-                    break
-            i2d[iface] = (dev, ptype)
+    phy, iface = None, None
+    for line in cexec(["iw", "dev"]).splitlines():
+        words = line.split()
+        if not words:
+            continue
+        if words[0].startswith("phy#"):
+            phy, iface = "phy" + words[0][4:], None
+        elif words[0] == "Interface" and len(words) > 1:
+            iface = words[1]
+            i2d[iface] = (phy, "")
+        elif words[0] == "type" and len(words) > 1 and iface is not None:
+            i2d[iface] = (i2d[iface][0], words[1])
     if interface not in i2d:
         print("Invalid interface chosen.")
         exit(1)
