@@ -1780,6 +1780,20 @@ def _component_list(comps: list) -> str:
     return text[0].upper() + text[1:]
 
 
+def _recovery_body(online: list, down: list, unknown: list) -> str:
+    """What came back and what's still offline. "All components reporting" once
+    nothing is down or unknown. Sniffers that are unknown because the agent is
+    offline aren't named: the agent being offline already says so."""
+    if not down and not unknown:
+        return "All components reporting"
+    parts = []
+    if online:
+        parts.append(f"{_component_list(online)} online")
+    if down:
+        parts.append(f"{_component_list(down)} offline")
+    return " - ".join(parts)
+
+
 class HealthTracker:
     """Turns component states, checked every few seconds, into Discord messages.
 
@@ -1799,6 +1813,10 @@ class HealthTracker:
         self.up_since: dict = {}      # (station, component) -> when it came back
         self.alerted: set = set()     # (station, component) reported down
         self.full_outage: set = set() # stations reported fully down
+        # (station, component) whose state went unknown during an outage that
+        # is still being reported (the sniffers while the agent was silent).
+        # They're named when they come back, alongside the agent.
+        self.was_unknown: set = set()
 
     def step(self, health: dict, names: dict, now: float, alerting: bool = True) -> list:
         messages = []
@@ -1806,7 +1824,10 @@ class HealthTracker:
             for comp, up in comps.items():
                 key = (sid, comp)
                 if up is None:
+                    self.was_unknown.add(key)
                     continue              # unknown: keep whatever was last known
+                if not any(s == sid for s, _ in self.alerted):
+                    self.was_unknown.discard(key)   # no outage being reported: nothing to announce
                 if up:
                     self.down_since.pop(key, None)
                     self.up_since.setdefault(key, now)
@@ -1822,6 +1843,7 @@ class HealthTracker:
         known = [c for c in order if comps[c] is not None]
         down_now = [c for c in known if comps[c] is False]
         up_now = [c for c in known if comps[c] is True]
+        unknown = [c for c in order if comps[c] is None]
         messages = []
 
         # Back: anything reported down that is up again
@@ -1829,14 +1851,17 @@ class HealthTracker:
         if back and any(now - self.up_since[(sid, c)] >= self.recover_after for c in back):
             for c in back:
                 self.alerted.discard((sid, c))
-            if not down_now:
-                body = "All components reporting"
-            else:
-                body = f"{_component_list(back)} online - {_component_list(down_now)} offline"
-                # Named offline here, so they count as reported: when they come
-                # back they get their own ✅ message, not a ⚠️ first.
-                for c in down_now:
-                    self.alerted.add((sid, c))
+            # Name what came back, plus anything that was unknown and is now
+            # known to be up (Wi-Fi and Bluetooth, when the agent returns).
+            online = [c for c in order if c in back
+                      or ((sid, c) in self.was_unknown and comps[c] is True)]
+            for c in known:
+                self.was_unknown.discard((sid, c))
+            body = _recovery_body(online, down_now, unknown)
+            # Anything named offline here counts as reported: when it comes
+            # back it gets its own ✅ message, not a ⚠️ first.
+            for c in down_now:
+                self.alerted.add((sid, c))
             if sid in self.full_outage:
                 self.full_outage.discard(sid)
                 title = f"{name} Online"

@@ -380,11 +380,17 @@ Wi-Fi sniffer not reporting - Decoder, agent and Bluetooth sniffer still up
 Decoder online - Agent offline
 
 ## ✅ Node 2 Agent Online
+Agent and Wi-Fi sniffer online - Bluetooth sniffer offline
+
+## ✅ Node 2 Bluetooth Sniffer Online
 All components reporting
 ```
 
 ❌ means the whole station is down, ⚠️ that part of it is, and ✅ that something
-came back. As with drone alerts, the second line renders as a code block.
+came back. A ✅ message names what came back and what's still offline. While
+the agent is offline the sniffers can't be seen, so its return also names the
+sniffers that are working. A part still offline gets its own ✅ when it returns,
+and the last one back reads "All components reporting". As with drone alerts, the second line renders as a code block.
 
 Setup: create a webhook in the health channel the same way as for drone alerts,
 put its URL in `DRONEID_HEALTH_WEBHOOK`, and restart. Settings > Health Alerts
