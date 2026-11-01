@@ -26,6 +26,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import socket
 import sys
 import threading
@@ -164,10 +165,47 @@ def sniffer_health(watches: dict, now: Optional[float] = None) -> dict:
     return {key: w.status(now) for key, w in watches.items()}
 
 
+# The kernel's thermal zones. Each has a type and a temperature in millidegrees.
+THERMAL_ROOT = "/sys/class/thermal"
+# Zone types that are the CPU, most specific first: Intel and AMD packages, then
+# the names Arm boards (such as the NanoPi R5C) use, then the ACPI zone.
+CPU_ZONE_TYPES = ("x86_pkg_temp", "k10temp", "cpu-thermal", "cpu_thermal",
+                  "soc-thermal", "soc_thermal", "cpu", "acpitz")
+
+
+def read_cpu_temp(root: str = THERMAL_ROOT) -> Optional[float]:
+    """The CPU temperature in °C, or None if this machine doesn't expose one.
+    Uses the CPU's own zone when one is recognised, otherwise the hottest zone.
+    Readings outside -40 to 150 °C are ignored as sensor noise."""
+    zones: dict = {}
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return None
+    for name in names:
+        if not name.startswith("thermal_zone"):
+            continue
+        try:
+            with open(os.path.join(root, name, "type")) as f:
+                kind = f.read().strip()
+            with open(os.path.join(root, name, "temp")) as f:
+                celsius = int(f.read().strip()) / 1000.0
+        except (OSError, ValueError):
+            continue
+        if -40.0 <= celsius <= 150.0:
+            zones.setdefault(kind, []).append(celsius)
+    for kind in CPU_ZONE_TYPES:
+        if kind in zones:
+            return round(max(zones[kind]), 1)
+    readings = [c for cs in zones.values() for c in cs]
+    return round(max(readings), 1) if readings else None
+
+
 def build_status(*, fix: Optional[dict] = None,
                  static: Optional[tuple[float, float]] = None,
                  sats: Optional[int] = None, now: Optional[float] = None,
-                 health: Optional[dict] = None, gps_feed: Optional[bool] = None) -> dict:
+                 health: Optional[dict] = None, gps_feed: Optional[bool] = None,
+                 temp_c: Optional[float] = None) -> dict:
     """The report the master expects. A fixed node always reports its set
     position; a roaming node reports its GPS fix, or no position at all when
     it has none (the master then keeps the last known one)."""
@@ -175,6 +213,8 @@ def build_status(*, fix: Optional[dict] = None,
             "ts": now if now is not None else time.time(), "sats": sats}
     if gps_feed is not None:
         base["gps_feed"] = gps_feed   # whether gpsd answers: tells no feed apart from no fix
+    if temp_c is not None:
+        base["temp_c"] = temp_c       # CPU temperature, °C
     if static is not None:
         return base | {"fix": True, "lat": static[0], "lon": static[1],
                        "alt": None, "speed": None, "track": None, "source": "static"}
@@ -327,7 +367,8 @@ def main(argv=None) -> int:
                 time.sleep(args.interval)
             pub.send_string(json.dumps(build_status(fix=fix, static=static, sats=sats,
                                                     health=sniffer_health(watches),
-                                                    gps_feed=gps.feed_up if gps else False)))
+                                                    gps_feed=gps.feed_up if gps else False,
+                                                    temp_c=read_cpu_temp())))
     except KeyboardInterrupt:
         return 0
 
