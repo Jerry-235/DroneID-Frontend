@@ -209,6 +209,7 @@ def parse_status(raw) -> Optional[dict]:
         "speed": _float_or_none(raw.get("speed")),
         "track": _float_or_none(raw.get("track")),
         "sats": _int_or_none(raw.get("sats")),
+        "temp_c": _float_or_none(raw.get("temp_c")),
         "gps_feed": raw["gps_feed"] if isinstance(raw.get("gps_feed"), bool) else None,
     }
 
@@ -234,6 +235,7 @@ class _NodeState:
     last_status_at: Optional[float] = None
     fix: bool = False
     gps_feed: Optional[bool] = None     # roaming: whether the agent's gpsd answers (None = not said)
+    temp_c: Optional[float] = None      # CPU temperature from the latest report, °C
     lat: Optional[float] = None      # roaming: last reported fix
     lon: Optional[float] = None
     alt: Optional[float] = None
@@ -276,6 +278,7 @@ class NodeRegistry:
         if status.get("health") is not None:
             st.health = status["health"]
             st.last_health_at = now
+        st.temp_c = status.get("temp_c")
         if cfg.kind != "roaming":
             return True
         st.fix = status["fix"]
@@ -311,6 +314,14 @@ class NodeRegistry:
         if st.fix and st.lat is not None and st.lon is not None:
             return st.lat, st.lon
         return None
+
+    def temperature(self, node_id: str, now: float) -> Optional[float]:
+        """The station's CPU temperature in °C from a recent report, or None when
+        the agent is quiet or too old to send one."""
+        st = self.state.get(node_id)
+        if st is None or st.last_status_at is None or now - st.last_status_at > STATUS_STALE_S:
+            return None
+        return st.temp_c
 
     def gps_feed_found(self, node_id: str, now: float) -> bool:
         """Whether a roaming station's GPS feed is up: its node_agent has reported

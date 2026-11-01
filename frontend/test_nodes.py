@@ -258,6 +258,79 @@ snap = t.to_dict()
 check("recent_points stays out of what clients receive", "recent_points" not in snap)
 check("seen_by reaches clients", snap["seen_by"] == ["master", "node-1"], snap.get("seen_by"))
 
+print("\n[station positions on points]")
+main.station_cache = {"lat": 40.0, "lon": -100.1}          # the master's home point
+def burst_pos(loc_ts):
+    return [{"MAC": "11:22:33:44:55:66"},
+            {"Basic ID": {"id": "SER-POS", "id_type": "Serial Number"}},
+            {"Location/Vector Message": {"latitude": 40.05, "longitude": -100.15, "timestamp": loc_ts,
+                                         "geodetic_altitude": "80 m"}}]
+async def hear_pos(station, loc_ts):
+    mac, cleaned = main.extract_bursts(burst_pos(loc_ts))[0]
+    await main.persist_update(main.store.apply_burst(mac, cleaned, station_id=station))
+async def pos_scenario():
+    await hear_pos("master", "2000")
+    await hear_pos("node-1", "2000")          # same broadcast, second station
+asyncio.run(pos_scenario())
+pos_flight = main.store.tracks["SER-POS"].flight_id
+first = asyncio.run(db.get_flight_points(pos_flight))[0]
+check("a point stores where each station that heard it was",
+      first["station_positions"] == {"master": [40.0, -100.1], "node-1": [40.1, -100.2]}, first.get("station_positions"))
+main.station_cache = {"lat": 41.0, "lon": -101.0}          # the master is relocated afterwards
+again = asyncio.run(db.get_flight_points(pos_flight))[0]
+check("relocating a station doesn't change what an old point recorded",
+      again["station_positions"]["master"] == [40.0, -100.1], again.get("station_positions"))
+main.station_cache = {"lat": 40.0, "lon": -100.1}
+
+print("\n[temperature]")
+def fake_zones(zones):
+    """A throwaway /sys/class/thermal with the given (type, millidegrees) zones."""
+    root = tempfile.mkdtemp()
+    for i, (kind, milli) in enumerate(zones):
+        d = os.path.join(root, f"thermal_zone{i}")
+        os.makedirs(d)
+        open(os.path.join(d, "type"), "w").write(kind + "\n")
+        open(os.path.join(d, "temp"), "w").write(f"{milli}\n")
+    return root
+check("Intel: the CPU package zone wins over a hotter Wi-Fi zone",
+      na.read_cpu_temp(fake_zones([("acpitz", 40000), ("iwlwifi_1", 70000), ("x86_pkg_temp", 55500)])) == 55.5)
+check("Arm board: the SoC zone is used",
+      na.read_cpu_temp(fake_zones([("gpu-thermal", 50000), ("soc-thermal", 61200)])) == 61.2)
+check("unknown zone names: the hottest is used",
+      na.read_cpu_temp(fake_zones([("board", 45000), ("other", 52000)])) == 52.0)
+check("no thermal zones: None", na.read_cpu_temp(os.path.join(tempfile.mkdtemp(), "missing")) is None)
+check("nonsense readings are ignored", na.read_cpu_temp(fake_zones([("x86_pkg_temp", 999000)])) is None)
+check("the report carries the temperature",
+      nodes.parse_status(na.build_status(fix=None, now=1.0, temp_c=61.5))["temp_c"] == 61.5)
+check("an older agent's report has no temperature",
+      nodes.parse_status(na.build_status(fix=None, now=1.0))["temp_c"] is None)
+treg = nodes.NodeRegistry(nodes.parse_nodes({"stations": [{"id": 2, "ip": "100.100.10.91"}]}, MASTER_ADDR))
+tnow = time.time()
+treg.note_status("node-2", nodes.parse_status(na.build_status(fix=None, now=tnow, temp_c=72.0)), tnow)
+check("a fresh report's temperature is kept", treg.temperature("node-2", tnow + 1) == 72.0)
+check("a silent agent's temperature is unknown", treg.temperature("node-2", tnow + nodes.STATUS_STALE_S + 1) is None)
+
+def temp_run(readings, until):
+    """readings: [(time, celsius)] for node-1; steps every 5 s like the monitor."""
+    tr = main.TempTracker(90, 5, 60)
+    out, tick, current = [], 0, None
+    while tick <= until:
+        for at, c in readings:
+            if at == tick:
+                current = c
+        out += [(tick, m) for m in tr.step({"node-1": current}, {"node-1": "Node 1"}, tick)]
+        tick += 5
+    return out
+check("a brief spike to 90 C sends nothing", temp_run([(0, 70), (10, 91), (30, 75)], 150) == [])
+msgs = temp_run([(0, 70), (10, 92), (200, 80)], 240)
+check("sustained heat sends one alert, then the all-clear",
+      [m for _, m in msgs] == ["## \U0001F321\ufe0f Node 1 High Temperature\n```92\u00b0 C - limit 90\u00b0 C```",
+                              "## \u2705 Node 1 Temperature Normal\n```80\u00b0 C```"], msgs)
+check("the alert waits a minute", msgs[0][0] == 70, msgs)
+msgs = temp_run([(0, 70), (10, 92), (100, 88), (120, 91), (140, 87), (300, 84)], 320)
+check("hovering near the limit doesn't repeat; clears only 5 C below it",
+      [t_ for t_, _ in msgs] == [70, 300], msgs)
+
 print("\n[schema]")
 cols = {r[1] for r in db._require_conn().execute("PRAGMA table_info(track_points)")}
 check("track_points has station_id", "station_id" in cols)
@@ -309,8 +382,25 @@ msgs = health_run([(10, "node-1", H_OFF), (200, "node-1", {"decoder": True, "age
                    (400, "node-1", {"bluetooth": True})], 440)
 check("a part named offline in a recovery gets only its own online message later",
       [m for _, m in msgs][1:] == [
-          "## \u2705 Node 1 Online\n```Decoder and agent online - Bluetooth sniffer offline```",
+          "## \u2705 Node 1 Online\n```Decoder, agent and Wi-Fi sniffer online - Bluetooth sniffer offline```",
           "## \u2705 Node 1 Bluetooth Sniffer Online\n```All components reporting```"], msgs)
+msgs = health_run([(10, "node-1", H_OFF), (200, "node-1", {"decoder": True}),
+                   (300, "node-1", {"agent": True, "wifi": True, "bluetooth": False}),
+                   (400, "node-1", {"bluetooth": True})], 440)
+check("a recovery names what came back and what's still offline",
+      [m for _, m in msgs][1:] == [
+          "## \u2705 Node 1 Online\n```Decoder online - Agent offline```",
+          "## \u2705 Node 1 Agent Online\n```Agent and Wi-Fi sniffer online - Bluetooth sniffer offline```",
+          "## \u2705 Node 1 Bluetooth Sniffer Online\n```All components reporting```"], msgs)
+msgs = health_run([(10, "node-1", {"agent": False, "wifi": None, "bluetooth": None}), (150, "node-1", H_UP)], 190)
+check("an agent outage names only the agent",
+      msgs[0][1] == "## \u26a0\ufe0f Node 1 Agent Down\n```Agent not reporting - Decoder still up```", msgs)
+msgs = health_run([(10, "node-1", {"agent": False, "wifi": None, "bluetooth": None}), (25, "node-1", H_UP),
+                   (100, "node-1", {"wifi": False}), (220, "node-1", {"wifi": True})], 260)
+check("a short agent blip doesn't leak into a later message",
+      [m for _, m in msgs] == [
+          "## \u26a0\ufe0f Node 1 Wi-Fi Sniffer Down\n```Wi-Fi sniffer not reporting - Decoder, agent and Bluetooth sniffer still up```",
+          "## \u2705 Node 1 Wi-Fi Sniffer Online\n```All components reporting```"], msgs)
 msgs = health_run([(0, "node-1", H_OFF)], 150, grace=120)
 check("nothing during the start-up grace; still-down stations reported after it",
       [t_ for t_, _ in msgs] == [120] and "Offline" in msgs[0][1], msgs)

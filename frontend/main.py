@@ -73,7 +73,7 @@ except ImportError:
 import db
 import places
 import nodes as node_cfg
-from node_agent import GpsdClient
+from node_agent import GpsdClient, read_cpu_temp
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("droneid-frontend")
@@ -963,7 +963,8 @@ async def _persist_update_locked(track: DroneTrack):
         # many stations had the drone there. Repeats from the same station add
         # nothing, so they are dropped here.
         if match.point_id is not None and match.station != track.station_id:
-            await db.add_station_to_point(match.point_id, track.station_id)
+            await db.add_station_to_point(match.point_id, track.station_id,
+                                          station_position(track.station_id))
         return
     nickname = catalog_nicknames.get(key)
     is_new = key not in active_flights
@@ -1004,6 +1005,11 @@ async def _persist_update_locked(track: DroneTrack):
     track.flight_id = active_flights[key]
     point_fields = {c: getattr(track, c, None) for c in db.POINT_COLUMNS}
     point_fields["stations"] = json.dumps([track.station_id]) if track.station_id else None
+    # Where the station was when it heard this, so History's distances stay as
+    # they were even after the station moves or is relocated.
+    here = station_position(track.station_id) if track.station_id in fleet.config else None
+    point_fields["station_positions"] = (json.dumps({track.station_id: [here[0], here[1]]})
+                                         if here else None)
     try:
         point_id = await db.add_point(track.flight_id, track.last_seen, point_fields)
         if track.lat is not None and track.lon is not None:
@@ -1496,6 +1502,7 @@ def _station_row(station_id: str, now: float, link: str) -> dict:
     shown = station_known_position(station_id)
     manual = station_manual_position(station_id)
     cfg = fleet.config[station_id]
+    temp = station_temperature(station_id, now)
     row.update({
         "name": station_display_name(station_id),
         "device": station_device_label(station_id),
@@ -1507,6 +1514,8 @@ def _station_row(station_id: str, now: float, link: str) -> dict:
         "gps_feed": gps_feed_found(station_id, now),
         "gps_state": gps_state(station_id, now),
         "icon": station_entry(station_id).get("icon") or STATION_ICON_DEFAULT,
+        "temp_c": temp,
+        "temp_hot": temp is not None and temp >= TEMP_ALERT_C,
     })
     return row
 
@@ -1884,9 +1893,60 @@ class HealthTracker:
         return messages
 
 
+# ---- station temperature ----
+# A station at or above TEMP_ALERT_C turns red on the Station page and, after
+# HEALTH_ALERT_AFTER_S there, posts a 🌡️ alert to the health channel. The
+# all-clear waits until it's TEMP_CLEAR_MARGIN_C below the limit, so a station
+# hovering at the limit doesn't post a pair of messages every few seconds.
+TEMP_ALERT_C = float(os.environ.get("DRONEID_TEMP_ALERT_C", "90"))
+TEMP_CLEAR_MARGIN_C = 5.0
+
+
+def station_temperature(station_id: str, now: float) -> Optional[float]:
+    """CPU temperature in °C: the master reads its own, a remote station's comes
+    from its node_agent's latest report. None if unknown."""
+    if fleet.config[station_id].kind == "master":
+        return read_cpu_temp()
+    return fleet.temperature(station_id, now)
+
+
+class TempTracker:
+    """Turns station temperatures into health-channel messages: one 🌡️ when a
+    station has been at or above the limit for alert_after seconds, and one ✅
+    once it has cooled to clear_margin below the limit."""
+
+    def __init__(self, limit: float, clear_margin: float, alert_after: float):
+        self.limit, self.clear_margin, self.alert_after = limit, clear_margin, alert_after
+        self.hot_since: dict = {}
+        self.alerted: set = set()
+
+    def step(self, temps: dict, names: dict, now: float, alerting: bool = True) -> list:
+        messages = []
+        for sid, celsius in temps.items():
+            if celsius is None:
+                continue                  # unknown: keep whatever was last known
+            if celsius >= self.limit:
+                self.hot_since.setdefault(sid, now)
+            else:
+                self.hot_since.pop(sid, None)
+            if not alerting:
+                continue
+            name = names.get(sid, sid)
+            if (sid not in self.alerted and sid in self.hot_since
+                    and now - self.hot_since[sid] >= self.alert_after):
+                self.alerted.add(sid)
+                messages.append(f"## \U0001F321\ufe0f {name} High Temperature\n"
+                                f"```{celsius:.0f}\u00b0 C - limit {self.limit:.0f}\u00b0 C```")
+            elif sid in self.alerted and celsius < self.limit - self.clear_margin:
+                self.alerted.discard(sid)
+                messages.append(f"## \u2705 {name} Temperature Normal\n```{celsius:.0f}\u00b0 C```")
+        return messages
+
+
 async def health_monitor():
     """Checks every station's health every HEALTH_CHECK_S and queues alerts."""
     tracker = HealthTracker(HEALTH_ALERT_AFTER_S, HEALTH_RECOVER_AFTER_S)
+    temps = TempTracker(TEMP_ALERT_C, TEMP_CLEAR_MARGIN_C, HEALTH_ALERT_AFTER_S)
     started = time.time()
     while True:
         await asyncio.sleep(HEALTH_CHECK_S)
@@ -1894,7 +1954,10 @@ async def health_monitor():
             now = time.time()
             names = {sid: station_display_name(sid) for sid in fleet.ids()}
             alerting = now - started >= HEALTH_STARTUP_GRACE_S
-            for message in tracker.step(station_health(now), names, now, alerting):
+            messages = tracker.step(station_health(now), names, now, alerting)
+            messages += temps.step({sid: station_temperature(sid, now) for sid in fleet.ids()},
+                                   names, now, alerting)
+            for message in messages:
                 log.info("Health alert: %s", message.splitlines()[0].lstrip("# "))
                 await _health_queue.put(message)
         except Exception:

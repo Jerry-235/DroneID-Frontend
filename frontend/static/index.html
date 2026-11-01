@@ -456,6 +456,8 @@
   .station-icon-btn:hover{ border-color:var(--text-muted); }
   .station-icon-btn.active{ border-color:var(--amber); }
   .station-error{ color:var(--amber); }
+  .station-temp{ font-size:12px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace; }
+  .station-temp.hot{ color:var(--red); font-weight:600; }
   .dp-note{ padding:10px 14px; font-size:11px; color:var(--text-muted); line-height:1.5; }
   .dp-section-head .popup-badge-row{ margin:0; }
 
@@ -1145,11 +1147,30 @@ function stationRangeMeters(s, d) {
   return slantRangeMeters(s.lat, s.lon, d.lat, d.lon, d.height_agl);
 }
 
+// The stations, placed where they were for this data. A History point carries
+// where its detecting stations were when it was recorded, so its distances don't
+// change when a roaming station moves or a fixed one is relocated; a station
+// with no position then has no distance. A station since removed from
+// nodes.json keeps its recorded position, under its id. Live data, and points
+// recorded before positions were stored, use where the stations are now.
+function stationsAsRecorded(d) {
+  const stored = d && d.station_positions;
+  if (!stored) return stationList;
+  const list = stationList.map(s => {
+    const pos = stored[s.id];
+    return Object.assign({}, s, pos ? { lat: pos[0], lon: pos[1] } : { lat: null, lon: null });
+  });
+  Object.keys(stored).forEach(id => {
+    if (!list.some(s => s.id === id)) list.push({ id, name: id, lat: stored[id][0], lon: stored[id][1] });
+  });
+  return list;
+}
+
 // The closest station that detects this drone: { id, name, lat, lon, meters }, or null.
 function closestDetectingStation(d) {
   const heard = detectingStations(d);
   let best = null;
-  stationList.forEach(s => {
+  stationsAsRecorded(d).forEach(s => {
     if (!heard.has(s.id)) return;
     const meters = stationRangeMeters(s, d);
     if (meters !== null && (best === null || meters < best.meters)) {
@@ -1661,6 +1682,13 @@ function stationsSectionHtml() {
     <div class="station-list">${stationList.map(stationCardHtml).join('')}</div>`;
 }
 
+// "Current Temperature: 61° C", or a dash when the station hasn't reported one
+// (its agent is offline, or too old to send it). Red at the server's limit.
+function stationTempText(s) {
+  const t = s && s.temp_c;
+  return `Current Temperature: ${t === null || t === undefined ? '\u2014' : Math.round(t) + '\u00b0 C'}`;
+}
+
 function stationCardHtml(s) {
   const esc = escapeHtml;
   const gpsLine = s.gps_feed
@@ -1703,6 +1731,7 @@ function stationCardHtml(s) {
         <button class="mode-btn station-mode-btn${s.location_mode === 'manual' ? ' active' : ''}" type="button" data-mode="manual">Manual</button>
       </div>
       ${body}
+      <div class="station-temp${s.temp_hot ? ' hot' : ''}">${stationTempText(s)}</div>
     </div>`;
 }
 
@@ -2594,6 +2623,7 @@ function historyPointData(idx) {
     transport: p.transport, channel: p.channel, rssi: p.rssi,
     station_id: p.station_id,
     tracked_by: p.tracked_by,
+    station_positions: p.station_positions,
   };
 }
 
@@ -3302,6 +3332,16 @@ function applyStations(list) {
     if (!live.has(id)) { stationLayer.removeLayer(nodeMarkers.get(id)); nodeMarkers.delete(id); }
   });
   renderNodeChips(list);
+  // Station cards update their temperature in place. Rebuilding a card would
+  // throw away anything being typed into its fields.
+  document.querySelectorAll('.station-card').forEach(card => {
+    const s = list.find(x => x.id === card.dataset.sid);
+    const el = card.querySelector('.station-temp');
+    if (!s || !el) return;
+    const text = stationTempText(s);
+    if (el.textContent !== text) el.textContent = text;
+    el.classList.toggle('hot', !!s.temp_hot);
+  });
 }
 
 // One top-bar item per station: its ZMQ link to the master, green or red,

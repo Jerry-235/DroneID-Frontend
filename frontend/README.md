@@ -54,6 +54,7 @@ win over `.env`. Everything is read at startup, so changes need a restart.
 | `DRONEID_HEALTH_WEBHOOK` | none | Enables station health alerts, to their own channel (see *Health alerts*) |
 | `DRONEID_HEALTH_ALERT_AFTER_S` | `60` | How long a component must stay down before it's reported |
 | `DRONEID_HEALTH_STARTUP_GRACE_S` | `120` | Quiet period after start-up while every link connects |
+| `DRONEID_TEMP_ALERT_C` | `90` | CPU temperature (°C) at which a station turns red and a 🌡️ alert is sent |
 | `DRONEID_LANDMARKS_PATH` | `landmarks.csv` beside `places.py` | Optional local place names. See *Place names* |
 | `DRONEID_LANDMARK_RADIUS_M` | `150` | How close a point must be to a landmark to take its name |
 | `DRONEID_NOMINATIM_URL` | OpenStreetMap's public server | Reverse geocoder used when no landmark matches |
@@ -178,6 +179,13 @@ The BASIC section, in order:
 The AIRCRAFT section starts with Serial Number, UA Type and ID, followed by
 Op Status, Height Type, Direction, speeds, position, altitudes, accuracies and
 distances.
+
+Distances to a station are measured from where that station was when the point
+was recorded. Each point stores the position of every station that heard it, so
+replaying a flight in History gives the same distances even after a roaming
+station drives off or a fixed station is relocated. A station with no position
+at the time shows no distance for that point. Points recorded before positions
+were stored, and live drones, use where the stations are now.
 
 Each row can be toggled in **Settings**. The defaults are in `static/index.html`
 under `FIELD_DEFAULTS`.
@@ -391,6 +399,28 @@ came back. A ✅ message names what came back and what's still offline. While
 the agent is offline the sniffers can't be seen, so its return also names the
 sniffers that are working. A part still offline gets its own ✅ when it returns,
 and the last one back reads "All components reporting". As with drone alerts, the second line renders as a code block.
+
+### Temperature
+
+Each station's CPU temperature shows at the bottom of its card on the Station
+page, as `Current Temperature: 61° C`, updated live. It turns red at
+`DRONEID_TEMP_ALERT_C` (90 °C). The master reads its own, and each node's
+`node_agent` sends its temperature with every report. A node running an older
+agent shows a dash. The reading comes from the kernel's thermal zones
+(`/sys/class/thermal`), using the CPU's own zone when it's recognised.
+
+A station that stays at or above the limit for `DRONEID_HEALTH_ALERT_AFTER_S`
+(60 seconds) posts one alert to the health channel. Once it has cooled to 5 °C
+below the limit, one all-clear follows, so a station hovering at the limit
+doesn't repeat itself:
+
+```
+## 🌡️ Node 2 High Temperature
+92° C - limit 90° C
+
+## ✅ Node 2 Temperature Normal
+80° C
+```
 
 Setup: create a webhook in the health channel the same way as for drone alerts,
 put its URL in `DRONEID_HEALTH_WEBHOOK`, and restart. Settings > Health Alerts

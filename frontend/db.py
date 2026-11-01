@@ -79,6 +79,11 @@ POINT_COLUMNS = [
     # JSON list of the stations that heard this broadcast. A later station
     # that hears the same broadcast is added to it rather than storing a copy.
     "stations",
+    # JSON {station id: [lat, lon]}: where each of those stations was when it
+    # heard this broadcast, so History measures distances from there even after
+    # a roaming station moves or a fixed one is relocated. A station with no
+    # position at the time isn't listed. NULL on points recorded before this.
+    "station_positions",
 ]
 
 _REAL_POINT_COLUMNS = {
@@ -311,17 +316,42 @@ def _add_point(flight_id, ts, fields: dict):
     return cur.lastrowid
 
 
-def _add_station_to_point(point_id, station):
+def _decode_positions(raw) -> dict:
+    """The station positions stored on a point, as {id: [lat, lon]}. Empty when
+    the point has none (points recorded before this column existed)."""
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for sid, pos in data.items():
+        if (isinstance(sid, str) and isinstance(pos, list) and len(pos) == 2
+                and all(isinstance(v, (int, float)) for v in pos)):
+            out[sid] = [float(pos[0]), float(pos[1])]
+    return out
+
+
+def _add_station_to_point(point_id, station, position=None):
+    """Adds a station that heard the same broadcast to a stored point, with
+    where that station was at the time, if it had a position."""
     conn = _require_conn()
-    row = conn.execute("SELECT stations FROM track_points WHERE id = ?", (point_id,)).fetchone()
+    row = conn.execute("SELECT stations, station_positions FROM track_points WHERE id = ?",
+                       (point_id,)).fetchone()
     if row is None:
         return
     current = _decode_stations(row["stations"])
     if station in current:
         return
+    positions = _decode_positions(row["station_positions"])
+    if position is not None:
+        positions[station] = [position[0], position[1]]
     conn.execute(
-        "UPDATE track_points SET stations = ? WHERE id = ?",
-        (json.dumps(sorted(set(current) | {station})), point_id),
+        "UPDATE track_points SET stations = ?, station_positions = ? WHERE id = ?",
+        (json.dumps(sorted(set(current) | {station})), json.dumps(positions) if positions else None, point_id),
     )
     conn.commit()
 
@@ -655,6 +685,9 @@ def _get_flight_points(flight_id):
         # stations that heard this point's broadcast. None falls back to the
         # single station_id, as for points recorded before this existed.
         p["tracked_by"] = _decode_stations(p.pop("stations", None)) or None
+        # Where those stations were at the time; None for older points, which
+        # the UI measures from the stations' current positions as before.
+        p["station_positions"] = _decode_positions(p.get("station_positions")) or None
         points.append(p)
     return points
 
@@ -681,8 +714,8 @@ async def add_point(flight_id, ts, fields: dict) -> int:
     return await run(_add_point, flight_id, ts, fields)
 
 
-async def add_station_to_point(point_id, station):
-    await run(_add_station_to_point, point_id, station)
+async def add_station_to_point(point_id, station, position=None):
+    await run(_add_station_to_point, point_id, station, position)
 
 
 async def end_flight(flight_id, ts=None):
