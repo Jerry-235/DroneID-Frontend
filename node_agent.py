@@ -165,18 +165,64 @@ def sniffer_health(watches: dict, now: Optional[float] = None) -> dict:
     return {key: w.status(now) for key, w in watches.items()}
 
 
-# The kernel's thermal zones. Each has a type and a temperature in millidegrees.
+# Where the kernel exposes temperatures. Hardware-monitor devices (hwmon) carry
+# the CPU's own sensors, such as Intel's coretemp; thermal zones are the
+# fallback. Both report millidegrees.
+HWMON_ROOT = "/sys/class/hwmon"
 THERMAL_ROOT = "/sys/class/thermal"
-# Zone types that are the CPU, most specific first: Intel and AMD packages, then
-# the names Arm boards (such as the NanoPi R5C) use, then the ACPI zone.
-CPU_ZONE_TYPES = ("x86_pkg_temp", "k10temp", "cpu-thermal", "cpu_thermal",
-                  "soc-thermal", "soc_thermal", "cpu", "acpitz")
+# hwmon devices that are the CPU: Intel cores, AMD, and Arm SoCs.
+CPU_HWMON_NAMES = ("coretemp", "k10temp", "zenpower",
+                   "cpu_thermal", "cpu-thermal", "soc_thermal", "soc-thermal")
+# Thermal zones that are the CPU: Intel package, Intel Atom SoC (soc_dts0,
+# soc_dts1, ...), AMD, and the names Arm boards (such as the NanoPi R5C) use.
+# acpitz isn't here on purpose: it's the board's ACPI zone, often an ambient
+# reading far below the CPU's.
+CPU_ZONE_TYPES = ("x86_pkg_temp", "soc_dts", "k10temp",
+                  "cpu-thermal", "cpu_thermal", "soc-thermal", "soc_thermal", "cpu")
 
 
-def read_cpu_temp(root: str = THERMAL_ROOT) -> Optional[float]:
-    """The CPU temperature in °C, or None if this machine doesn't expose one.
-    Uses the CPU's own zone when one is recognised, otherwise the hottest zone.
-    Readings outside -40 to 150 °C are ignored as sensor noise."""
+def _celsius(path: str) -> Optional[float]:
+    """A millidegree reading as °C, or None if missing or outside -40 to 150."""
+    try:
+        with open(path) as f:
+            celsius = int(f.read().strip()) / 1000.0
+    except (OSError, ValueError):
+        return None
+    return celsius if -40.0 <= celsius <= 150.0 else None
+
+
+def _read_text(path: str) -> Optional[str]:
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def _hwmon_cpu_temp(root: str) -> Optional[float]:
+    """The hottest reading of a CPU hwmon device (every core, and the package
+    when it's listed), or None if there's no such device."""
+    try:
+        devices = sorted(os.listdir(root))
+    except OSError:
+        return None
+    for dev in devices:
+        if _read_text(os.path.join(root, dev, "name")) not in CPU_HWMON_NAMES:
+            continue
+        try:
+            files = os.listdir(os.path.join(root, dev))
+        except OSError:
+            continue
+        readings = [c for f in files if f.startswith("temp") and f.endswith("_input")
+                    for c in [_celsius(os.path.join(root, dev, f))] if c is not None]
+        if readings:
+            return round(max(readings), 1)
+    return None
+
+
+def _zone_cpu_temp(root: str) -> Optional[float]:
+    """The CPU's thermal zone when one is recognised, otherwise the hottest
+    zone, or None if there are no zones."""
     zones: dict = {}
     try:
         names = os.listdir(root)
@@ -185,20 +231,24 @@ def read_cpu_temp(root: str = THERMAL_ROOT) -> Optional[float]:
     for name in names:
         if not name.startswith("thermal_zone"):
             continue
-        try:
-            with open(os.path.join(root, name, "type")) as f:
-                kind = f.read().strip()
-            with open(os.path.join(root, name, "temp")) as f:
-                celsius = int(f.read().strip()) / 1000.0
-        except (OSError, ValueError):
-            continue
-        if -40.0 <= celsius <= 150.0:
+        kind = _read_text(os.path.join(root, name, "type"))
+        celsius = _celsius(os.path.join(root, name, "temp"))
+        if kind is not None and celsius is not None:
             zones.setdefault(kind, []).append(celsius)
-    for kind in CPU_ZONE_TYPES:
-        if kind in zones:
-            return round(max(zones[kind]), 1)
+    for wanted in CPU_ZONE_TYPES:
+        matches = [c for kind, cs in zones.items() if kind.startswith(wanted) for c in cs]
+        if matches:
+            return round(max(matches), 1)
     readings = [c for cs in zones.values() for c in cs]
     return round(max(readings), 1) if readings else None
+
+
+def read_cpu_temp(root: str = THERMAL_ROOT, hwmon_root: str = HWMON_ROOT) -> Optional[float]:
+    """The CPU temperature in °C, or None if this machine doesn't expose one.
+    Uses the CPU's own sensor (coretemp and the like) first, then the CPU's
+    thermal zone, then the hottest thermal zone."""
+    temp = _hwmon_cpu_temp(hwmon_root)
+    return temp if temp is not None else _zone_cpu_temp(root)
 
 
 def build_status(*, fix: Optional[dict] = None,
