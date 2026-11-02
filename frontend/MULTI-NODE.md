@@ -62,6 +62,50 @@ A station with no agent still works, but its sniffer lights stay red.
 A station's position is set on the master, in `nodes.json` or the admin page,
 not on the node. A fixed node needs no position on the node itself.
 
+### Front LEDs (NanoPi R5C)
+
+With `--leds`, the agent drives the board's four front LEDs from the node's
+state:
+
+| LED | Shows |
+|---|---|
+| SYS | Solid red while the agent and the node's decoder both run. Otherwise the kernel's normal heartbeat blink, so a stopped agent or decoder looks like a plain board |
+| WAN | On while the master is connected and listening. Off within about 8 seconds of losing it, power cuts included |
+| LAN | On with both sniffers running, slow blink (1 s) with one, off with neither |
+| WL | Fast blink for 10 seconds after each drone detection |
+
+The agent finds the LEDs under `/sys/class/leds` by name. It knows both the
+mainline kernel's names (`red:power`, `green:wan`, `green:lan`, `green:wlan`) and
+FriendlyElec's (`sys_led`, `wan_led`, `lan_led`, `wlan_led`), and leaves any
+other board's LEDs alone. To see the WAN state it watches the master's
+subscription to its report socket, and for SYS and WL it listens to the node's
+decoder output on the `--bind` address, port 4224 (change it with
+`--decoder-zmq`). The master needs nothing new.
+
+One-time setup on the node, so the agent can drive the LEDs without root:
+
+```bash
+sudo groupadd -f leds
+sudo usermod -aG leds jerry
+echo 'SUBSYSTEM=="leds", ACTION=="add", RUN+="/bin/chgrp leds /sys%p/brightness /sys%p/trigger", RUN+="/bin/chmod g+w /sys%p/brightness /sys%p/trigger"' \
+  | sudo tee /etc/udev/rules.d/99-droneid-leds.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger --subsystem-match=leds --action=add
+ls -l /sys/class/leds/*/brightness       # group "leds", group-writable
+```
+
+Then add `--leds` to the agent's service, and a stop hook that puts the LEDs
+back even if the agent crashes:
+
+```
+ExecStart=/home/jerry/DroneID-Frontend/.venv/bin/python node_agent.py --bind 100.100.10.91:4230 --gpsd 127.0.0.1:2947 --leds
+ExecStopPost=/home/jerry/DroneID-Frontend/.venv/bin/python node_agent.py --reset-leds
+```
+
+If the agent can't write an LED, it logs one warning naming the file and
+carries on without LEDs. If an LED keeps changing on its own, something else on
+the board (often a vendor LED script) is also driving it.
+
 ## On the map
 
 Each station is drawn with the icon chosen for it on the Station page, with a

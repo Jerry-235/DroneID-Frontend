@@ -292,14 +292,34 @@ def fake_zones(zones):
         open(os.path.join(d, "type"), "w").write(kind + "\n")
         open(os.path.join(d, "temp"), "w").write(f"{milli}\n")
     return root
+NO_HWMON = os.path.join(tempfile.mkdtemp(), "no-hwmon")    # tests never read this machine's sensors
+def fake_hwmon(devices):
+    """A throwaway /sys/class/hwmon with the given (name, [millidegrees]) devices."""
+    root = tempfile.mkdtemp()
+    for i, (name, millis) in enumerate(devices):
+        d = os.path.join(root, f"hwmon{i}")
+        os.makedirs(d)
+        open(os.path.join(d, "name"), "w").write(name + "\n")
+        for j, milli in enumerate(millis, start=1):
+            open(os.path.join(d, f"temp{j}_input"), "w").write(f"{milli}\n")
+    return root
 check("Intel: the CPU package zone wins over a hotter Wi-Fi zone",
-      na.read_cpu_temp(fake_zones([("acpitz", 40000), ("iwlwifi_1", 70000), ("x86_pkg_temp", 55500)])) == 55.5)
+      na.read_cpu_temp(fake_zones([("acpitz", 40000), ("iwlwifi_1", 70000), ("x86_pkg_temp", 55500)]), NO_HWMON) == 55.5)
 check("Arm board: the SoC zone is used",
-      na.read_cpu_temp(fake_zones([("gpu-thermal", 50000), ("soc-thermal", 61200)])) == 61.2)
+      na.read_cpu_temp(fake_zones([("gpu-thermal", 50000), ("soc-thermal", 61200)]), NO_HWMON) == 61.2)
 check("unknown zone names: the hottest is used",
-      na.read_cpu_temp(fake_zones([("board", 45000), ("other", 52000)])) == 52.0)
-check("no thermal zones: None", na.read_cpu_temp(os.path.join(tempfile.mkdtemp(), "missing")) is None)
-check("nonsense readings are ignored", na.read_cpu_temp(fake_zones([("x86_pkg_temp", 999000)])) is None)
+      na.read_cpu_temp(fake_zones([("board", 45000), ("other", 52000)]), NO_HWMON) == 52.0)
+check("no thermal zones: None", na.read_cpu_temp(os.path.join(tempfile.mkdtemp(), "missing"), NO_HWMON) is None)
+check("nonsense readings are ignored", na.read_cpu_temp(fake_zones([("x86_pkg_temp", 999000)]), NO_HWMON) is None)
+check("your master: coretemp's cores are used, not the cool ACPI zone",
+      na.read_cpu_temp(fake_zones([("acpitz", 26800), ("soc_dts0", 45000), ("soc_dts1", 47000)]),
+                       fake_hwmon([("ath10k_hwmon", [42000]), ("coretemp", [49000, 47000, 49000, 49000])])) == 49.0)
+check("Intel Atom without coretemp: the SoC zones are used, not ACPI",
+      na.read_cpu_temp(fake_zones([("acpitz", 26800), ("soc_dts0", 45000), ("soc_dts1", 47000)]), NO_HWMON) == 47.0)
+check("only non-CPU hwmon devices: falls back to the thermal zones",
+      na.read_cpu_temp(fake_zones([("x86_pkg_temp", 55000)]), fake_hwmon([("nvme", [38000]), ("ath10k_hwmon", [60000])])) == 55.0)
+check("AMD: k10temp is used",
+      na.read_cpu_temp(fake_zones([("acpitz", 30000)]), fake_hwmon([("k10temp", [63500])])) == 63.5)
 check("the report carries the temperature",
       nodes.parse_status(na.build_status(fix=None, now=1.0, temp_c=61.5))["temp_c"] == 61.5)
 check("an older agent's report has no temperature",
@@ -330,6 +350,54 @@ check("the alert waits a minute", msgs[0][0] == 70, msgs)
 msgs = temp_run([(0, 70), (10, 92), (100, 88), (120, 91), (140, 87), (300, 84)], 320)
 check("hovering near the limit doesn't repeat; clears only 5 C below it",
       [t_ for t_, _ in msgs] == [70, 300], msgs)
+
+print("\n[front LEDs]")
+def fake_leds(names):
+    """A throwaway /sys/class/leds with the given LED directories."""
+    root = tempfile.mkdtemp()
+    for n in names:
+        d = os.path.join(root, n)
+        os.makedirs(d)
+        for f, v in (("brightness", "0"), ("max_brightness", "1"), ("trigger", "none")):
+            open(os.path.join(d, f), "w").write(v)
+    return root
+led_file = lambda root, n, f: open(os.path.join(root, n, f)).read()
+check("mainline LED names are found",
+      na.find_leds(fake_leds(["green:lan", "green:wan", "green:wlan", "red:power", "mmc0::"]))
+      == {"lan": "green:lan", "wan": "green:wan", "wl": "green:wlan", "sys": "red:power"})
+check("FriendlyElec LED names are found",
+      na.find_leds(fake_leds(["sys_led", "wan_led", "lan_led", "wlan_led"]))
+      == {"sys": "sys_led", "wan": "wan_led", "lan": "lan_led", "wl": "wlan_led"})
+check("another board's LEDs are left alone", na.find_leds(fake_leds(["ACT", "PWR", "mmc0::"])) == {})
+check("SYS solid with the decoder running, heartbeat without it",
+      na.led_patterns("yellow", False, [])["sys"] == "on" and na.led_patterns("red", False, [])["sys"] == "heartbeat")
+check("WAN follows the master", na.led_patterns("red", True, [])["wan"] == "on"
+      and na.led_patterns("red", False, [])["wan"] == "off")
+check("LAN: both sniffers solid, one blinks slowly, none off",
+      [na.led_patterns("red", False, s)["lan"] for s in (["green", "yellow"], ["green", "red"], ["red", "red"])]
+      == ["on", na.LAN_BLINK, "off"])
+check("WL blinks only after a detection",
+      na.led_patterns("green", False, [])["wl"] == na.WL_BLINK and na.led_patterns("yellow", False, [])["wl"] == "off")
+lroot = fake_leds(["green:lan", "green:wan", "green:wlan", "red:power"])
+panel = na.LedPanel(na.find_leds(lroot), lroot)
+panel.set({"sys": "on", "wan": "off", "lan": na.LAN_BLINK, "wl": "heartbeat"})
+lan = []
+for i in range(40):
+    panel.tick(i * 0.05)
+    lan.append(led_file(lroot, "green:lan", "brightness"))
+check("an LED shows its pattern", led_file(lroot, "red:power", "brightness") == "1"
+      and led_file(lroot, "green:wan", "brightness") == "0" and led_file(lroot, "green:wlan", "trigger") == "heartbeat")
+check("a slow blink is a second on, a second off", "".join(lan) == "1" * 20 + "0" * 20, "".join(lan))
+panel.reset()
+check("stopping puts SYS back on the kernel heartbeat and the rest off",
+      led_file(lroot, "red:power", "trigger") == "heartbeat"
+      and [led_file(lroot, n, "brightness") for n in ("green:lan", "green:wan", "green:wlan")] == ["0", "0", "0"])
+broot = fake_leds(["green:lan"])
+os.remove(os.path.join(broot, "green:lan", "brightness"))
+os.makedirs(os.path.join(broot, "green:lan", "brightness"))     # can't be written
+bpanel = na.LedPanel(na.find_leds(broot), broot)
+bpanel.set({"lan": "on"}); bpanel.tick(0.0); bpanel.tick(0.1)
+check("an LED that can't be written turns LED control off instead of failing", bpanel.ok is False)
 
 print("\n[schema]")
 cols = {r[1] for r in db._require_conn().execute("PRAGMA table_info(track_points)")}
