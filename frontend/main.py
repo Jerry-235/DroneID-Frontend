@@ -1514,6 +1514,11 @@ def _station_row(station_id: str, now: float, link: str) -> dict:
         "gps_feed": gps_feed_found(station_id, now),
         "gps_state": gps_state(station_id, now),
         "icon": station_entry(station_id).get("icon") or STATION_ICON_DEFAULT,
+        # Whether the station's node_agent is reporting. None for the master,
+        # which has no agent.
+        "agent_up": (None if cfg.kind == "master" else
+                     fleet.state[station_id].last_status_at is not None
+                     and now - fleet.state[station_id].last_status_at <= node_cfg.STATUS_STALE_S),
         "temp_c": temp,
         "temp_hot": temp is not None and temp >= TEMP_ALERT_C,
     })

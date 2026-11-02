@@ -96,6 +96,9 @@
   .node-ball.stale{ opacity:0.5; }
   .node-ball.gps-stale{ opacity:0.6; }
   .node-ball.gps-disconnected{ opacity:0.3; filter:grayscale(1); }
+  /* A fixed station that is fully offline: faded the same way, but kept on the
+     map, since its position is set rather than reported. */
+  .node-ball.offline{ opacity:0.3; filter:grayscale(1); }
   .node-ball .link-dot{
     position:absolute; right:-3px; top:-3px; width:9px; height:9px; border-radius:50%;
     border:2px solid #0B121A;
@@ -509,10 +512,8 @@
     <span class="health-item" tabindex="0" id="master-chip">
       <span class="dot" id="health-zmq-dot"></span><span id="master-chip-name">Station</span>
       <div class="health-tooltip">
-        <div class="tt-title" id="master-chip-title">Station — ZMQ</div>
-        <div id="master-chip-gps"></div>
-        <div class="tt-row"><span class="tt-dot" style="background:#34D399;"></span>Green — connected, receiving data</div>
-        <div class="tt-row"><span class="tt-dot" style="background:#E0645A;"></span>Red — not connected to zmq_decoder.py</div>
+        <div class="tt-title" id="master-chip-title">Station Status</div>
+        <div id="master-chip-rows"></div>
       </div>
     </span>
     <span id="nodes-health" style="display:contents"></span>
@@ -806,14 +807,40 @@ function refreshMasterMarker() {
 }
 
 // Top-bar label and ZMQ dropdown title for the master's chip.
+// The rows of a top-bar chip's dropdown: each part of the station, green when
+// it's up and red when it isn't. GPS keeps its own three colours. The master
+// has no agent, and GPS appears only for a station in GPS mode.
+const STATUS_GREEN = '#34D399', STATUS_RED = '#E0645A';
+function statusRowHtml(label, up) {
+  return `<div class="tt-row"><span class="tt-dot" style="background:${up ? STATUS_GREEN : STATUS_RED}"></span>` +
+    `${label} — ${up ? 'online' : 'offline'}</div>`;
+}
+function stationStatusRowsHtml(s, isMaster) {
+  const running = c => c === 'green' || c === 'yellow';
+  const decoderUp = isMaster ? masterLinkState() === 'green' : !!(s && s.link === 'green');
+  let html = statusRowHtml('Decoder', decoderUp);
+  if (!isMaster) html += statusRowHtml('Agent', !!(s && s.agent_up));
+  html += statusRowHtml('Wi-Fi', running(isMaster ? lastHealth.wifi : s && s.wifi));
+  html += statusRowHtml('Bluetooth', running(isMaster ? lastHealth.bluetooth : s && s.bluetooth));
+  const gps = s && s.gps_state;
+  if (gps) {
+    html += `<div class="tt-row"><span class="tt-dot" style="background:${GPS_STATE_COLOUR[gps]}"></span>` +
+      `GPS — ${GPS_STATE_TEXT[gps]}</div>`;
+  }
+  return html;
+}
+
 function refreshMasterChip() {
   const name = masterStationName();
   const nameEl = document.getElementById('master-chip-name');
   const titleEl = document.getElementById('master-chip-title');
   if (nameEl) nameEl.textContent = name;
-  if (titleEl) titleEl.textContent = `${name} — ZMQ`;
-  const gpsEl = document.getElementById('master-chip-gps');
-  if (gpsEl) gpsEl.innerHTML = gpsLineHtml(masterRow());
+  if (titleEl) titleEl.textContent = `${name} Status`;
+  const rowsEl = document.getElementById('master-chip-rows');
+  if (rowsEl) {
+    const html = stationStatusRowsHtml(masterRow(), true);
+    if (rowsEl.innerHTML !== html) rowsEl.innerHTML = html;
+  }
 }
 
 // "Wi-Fi - Name" / "Bluetooth - Name" for each (station, transport) that heard a
@@ -3254,6 +3281,7 @@ function setConnState(connected, label) {
 
 function applyHealth(health) {
   lastHealth = health || {};
+  refreshMasterChip();   // its Wi-Fi and Bluetooth rows come from this
   applyMasterPosition(masterRow());   // the master's icon depends on its link state too
   ['zmq'].forEach(ch => {
     const dot = document.getElementById(`health-${ch}-dot`);
@@ -3278,8 +3306,16 @@ function nodeLightClass(s) {
   return up === 2 ? 'green' : (up === 1 ? 'yellow' : 'red');
 }
 
+// A station not in GPS mode that is fully offline: its decoder link is down
+// and neither sniffer is running (which is also how a silent agent reads).
+// GPS-mode stations have their own rules (gpsIconClass and iconKept).
+function nodeOffline(s) {
+  return s.location_mode !== 'gps' && s.link !== 'green' && nodeLightClass(s) === 'red';
+}
+
 function nodeIconHtml(s) {
-  const cls = ['node-ball', s.stale ? 'stale' : '', gpsIconClass(s)].filter(Boolean).join(' ');
+  const cls = ['node-ball', s.stale ? 'stale' : '', gpsIconClass(s), nodeOffline(s) ? 'offline' : '']
+    .filter(Boolean).join(' ');
   return `<div class="${cls}">${stationIconSvg(s.icon)}<span class="link-dot ${nodeLightClass(s)}"></span></div>`;
 }
 
@@ -3352,10 +3388,8 @@ function nodeChipHtml(s) {
   return `<span class="health-item" tabindex="0" data-node-id="${escapeHtml(s.id)}">` +
     `<span class="dot ${linkCls}"></span>${name}` +
     `<div class="health-tooltip node-chip-tip">` +
-      `<div class="tt-title">${name} — ZMQ</div>` +
-      gpsLineHtml(s) +
-      `<div class="tt-row"><span class="tt-dot" style="background:#34D399;"></span>Green — connected, receiving data</div>` +
-      `<div class="tt-row"><span class="tt-dot" style="background:#E0645A;"></span>Red — not connected to the master</div>` +
+      `<div class="tt-title">${name} Status</div>` +
+      stationStatusRowsHtml(s, false) +
     `</div></span>`;
 }
 
