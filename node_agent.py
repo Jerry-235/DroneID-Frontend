@@ -397,17 +397,31 @@ LED_TICK_S = 0.05
 LED_RECHECK_S = 2.0
 
 
-def find_leds(root: str = LEDS_ROOT) -> dict:
+LED_ROLES = ("sys", "wan", "lan", "wl")
+
+
+def find_leds(root: str = LEDS_ROOT, overrides: Optional[dict] = None) -> dict:
     """{"sys" | "wan" | "lan" | "wl": LED directory name} for the LEDs found.
-    Matches both the mainline kernel's names (red:power, green:wan, green:lan,
-    green:wlan) and FriendlyElec's (sys_led, wan_led, lan_led, wlan_led)."""
+    Matches the mainline kernel's names (red:power, green:wan, green:lan,
+    green:wlan) and FriendlyElec's (sys_led, wan_led, lan_led, wlan_led), with or
+    without a port number (lan1_led counts as LAN; the first one found is used).
+    overrides, from --led-map, sets a role's LED by name, for boards whose names
+    don't say which front LED is which."""
     found: dict = {}
     try:
         names = sorted(os.listdir(root))
     except OSError:
         return found
+    for role, name in (overrides or {}).items():
+        if name in names:
+            found[role] = name
+        else:
+            log.warning("--led-map: no LED named %r under %s", name, root)
+    taken = set(found.values())
     for name in names:
-        words = set(re.split(r"[:_\-.\s]+", name.lower()))
+        if name in taken:
+            continue
+        words = {re.sub(r"\d+$", "", w) for w in re.split(r"[:_\-.\s]+", name.lower())}
         if words & {"wlan", "wl", "wifi"}:
             role = "wl"
         elif "wan" in words:
@@ -602,11 +616,20 @@ def main(argv=None) -> int:
                          "[the --bind address, port 4224]")
     ap.add_argument("--reset-leds", action="store_true",
                     help="put the LEDs back to the board's defaults and exit")
+    ap.add_argument("--led-map", default="",
+                    help="say which LED is which when the names don't, e.g. wl=lan2_led "
+                         "(roles: sys, wan, lan, wl; comma-separated)")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    led_map = {}
+    for item in filter(None, (s.strip() for s in args.led_map.split(","))):
+        role, _, name = item.partition("=")
+        if role.strip() not in LED_ROLES or not name.strip():
+            ap.error(f"--led-map: expected role=led_name with role one of {', '.join(LED_ROLES)}, got {item!r}")
+        led_map[role.strip()] = name.strip()
     if args.reset_leds:
-        LedPanel(find_leds()).reset()
+        LedPanel(find_leds(overrides=led_map)).reset()
         return 0
     if not args.bind:
         ap.error("--bind is required")
@@ -628,7 +651,7 @@ def main(argv=None) -> int:
 
     panel, decoder = None, None
     if args.leds:
-        leds = find_leds()
+        leds = find_leds(overrides=led_map)
         if leds:
             panel = LedPanel(leds)
             panel.start()
