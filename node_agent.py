@@ -392,6 +392,9 @@ DETECTION_LED_S = 10.0          # WL blinks this long after a detection
 LAN_BLINK = ("blink", 1.0, 1.0)  # one sniffer running
 WL_BLINK = ("blink", 0.1, 0.1)   # a drone was just detected
 LED_TICK_S = 0.05
+# How often each LED's trigger is checked, in case something else on the board
+# (a vendor script, or the LED following a network port) has set it back.
+LED_RECHECK_S = 2.0
 
 
 def find_leds(root: str = LEDS_ROOT) -> dict:
@@ -448,6 +451,8 @@ class LedPanel:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._max = {role: self._max_brightness(name) for role, name in leds.items()}
+        self._checked_at = float("-inf")
+        self._warned_taken: set = set()     # roles already reported as taken over
 
     def _max_brightness(self, name: str) -> int:
         try:
@@ -469,6 +474,30 @@ class LedPanel:
                 self.ok = False
             return False
 
+    def active_trigger(self, role: str) -> Optional[str]:
+        """The trigger the kernel is using for an LED, shown in [brackets] in
+        its trigger file, e.g. "none heartbeat [netdev] timer" -> "netdev"."""
+        try:
+            with open(os.path.join(self.root, self.leds[role], "trigger")) as f:
+                text = f.read()
+        except OSError:
+            return None
+        match = re.search(r"\[([^\]]+)\]", text)
+        return match.group(1) if match else text.strip() or None
+
+    def _recheck(self):
+        """Takes back any LED whose trigger something else has changed."""
+        for role, mode in list(self._mode.items()):
+            expected = "heartbeat" if mode == "heartbeat" else "none"
+            active = self.active_trigger(role)
+            if active is not None and active != expected:
+                if role not in self._warned_taken:
+                    log.warning("The %s LED was set to trigger %r by something else on the "
+                                "board; taking it back.", self.leds[role], active)
+                    self._warned_taken.add(role)
+                self._mode.pop(role, None)      # rewritten on this tick
+                self._lit.pop(role, None)
+
     def set(self, patterns: dict):
         with self._lock:
             self._want.update({r: p for r, p in patterns.items() if r in self.leds})
@@ -476,6 +505,9 @@ class LedPanel:
     def tick(self, now: float):
         with self._lock:
             want = dict(self._want)
+        if now - self._checked_at >= LED_RECHECK_S:
+            self._checked_at = now
+            self._recheck()
         for role, pattern in want.items():
             if not self.ok:
                 return
