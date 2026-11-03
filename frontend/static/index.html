@@ -1927,11 +1927,7 @@ function renderSettingsPanel() {
 
   const debugHtml = `
     <div class="settings-group-title">Debug</div>
-    <div class="settings-note">
-      Injects one synthetic drone orbiting the station if set,
-      through the real live pipeline for exercising the map, detail panel, and
-      history without RF hardware.
-    </div>
+    <div class="settings-note">Injects a synthetic drone and operator orbiting the station</div>
     <div class="station-form">
       <div class="station-form-buttons">
         <button id="test-drone-start" class="settings-btn">Start Test Drone</button>
@@ -1944,10 +1940,6 @@ function renderSettingsPanel() {
 
   const discordHtml = `
     <div class="settings-group-title">Discord Alerts</div>
-    <div class="settings-note">
-      Sends a message to a Discord channel whenever a new drone is
-      detected. Send a test alert using the Discord webhook and role ping.
-    </div>
     <div class="station-form">
       <div class="settings-note" id="discord-webhook-status">Checking…</div>
       <div class="station-form-buttons">
@@ -1955,10 +1947,6 @@ function renderSettingsPanel() {
       </div>
     </div>
     <div class="settings-group-title">Health Alerts</div>
-    <div class="settings-note">
-      Posts to a separate Discord channel when a station's decoder, agent or
-      sniffers stop reporting for a minute, and again when they come back.
-    </div>
     <div class="station-form">
       <div class="settings-note" id="health-webhook-status">Checking…</div>
       <div class="station-form-buttons">
@@ -1966,11 +1954,7 @@ function renderSettingsPanel() {
       </div>
     </div>
     <div class="settings-group-title">Drone Models</div>
-    <div class="settings-note">
-      Names each drone's make and model from its serial number, using the FAA's
-      Remote ID Declarations of Compliance. A local copy is refreshed weekly;
-      your own entries go in <code>model_overrides.csv</code>.
-    </div>
+    <div class="settings-note">Sourced from FAA's Remote ID Declarations of Compliance, refreshed weekly.</div>
     <div class="station-form">
       <div class="settings-note" id="models-status">Checking…</div>
       <div class="station-form-buttons">
@@ -2012,9 +1996,9 @@ function renderSettingsPanel() {
     html += `
       <div class="settings-group-title">Access</div>
       <div class="settings-note">
-        Admin controls are on for this connection${clientAddress
-          ? ` — the server sees you as <code>${escapeHtml(clientAddress)}</code>`
-          : ''}. Reaching the app over the other route gives the read-only view.
+        Admin panel enabled${clientAddress
+          ? `, the server sees you as <code>${escapeHtml(clientAddress)}</code>`
+          : ''}
       </div>`;
   }
   if (admin) {
