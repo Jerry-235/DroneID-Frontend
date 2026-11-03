@@ -623,23 +623,130 @@ def _flights_without_location():
         "SELECT id FROM flights WHERE location IS NULL ORDER BY started_at").fetchall()]
 
 
-def _list_flights(limit, offset):
+# History search and filters. Keys of the filters dict _list_flights takes;
+# anything missing or None is not filtered on.
+#   ids          set of flight ids the search matched (main.py does the text
+#                matching, since it needs make and model, which aren't stored)
+#   serial_sets  {name: set of serials}, worked out by the caller (main.py)
+#   make_set     a serial_sets name the flight's serial must be in
+#   make_null    with make_set: a flight with no serial also matches
+#   since/until  started_at >= since, < until (Unix seconds)
+#   station      a station id that heard at least one point
+#   min_points   point count
+#   named        True: only drones with a nickname; False: only without
+#   by_drone     True: group the flights by drone. limit and offset then count
+#                drones, each drone's flights come newest first, and the drones
+#                are ordered by DRONE_SORTS
+#   sort         FLIGHT_SORTS key, or with by_drone a DRONE_SORTS key; "newest"
+#                by default
+_DISPLAY_NAME = "COALESCE(d.nickname, f.serial, f.mac, f.catalog_key)"
+_DURATION = "(COALESCE(f.last_point_at, f.started_at) - f.started_at)"
+# Drones ordered by when they were last seen, or by how many flights match;
+# ties by name.
+_DRONE_NAME = f"LOWER(MIN({_DISPLAY_NAME})), f.catalog_key"
+DRONE_SORTS = {
+    "newest": f"MAX(f.started_at) DESC, {_DRONE_NAME}",
+    "oldest": f"MAX(f.started_at) ASC, {_DRONE_NAME}",
+    "most": f"COUNT(*) DESC, MAX(f.started_at) DESC, {_DRONE_NAME}",
+    "fewest": f"COUNT(*) ASC, MAX(f.started_at) DESC, {_DRONE_NAME}",
+}
+FLIGHT_SORTS = {
+    "newest": "f.started_at DESC",
+    "oldest": "f.started_at ASC",
+    "longest": f"{_DURATION} DESC, f.started_at DESC",
+    "shortest": f"{_DURATION} ASC, f.started_at DESC",
+    "points": "f.point_count DESC, f.started_at DESC",
+    "fewest": "f.point_count ASC, f.started_at DESC",
+}
+
+
+def _like(term: str) -> str:
+    return "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _flight_filter_sql(conn, filters: dict) -> tuple:
+    """(WHERE clause, params) for the filters above. Id and serial sets go into
+    temporary tables, which work on any SQLite version whatever their size."""
+    where, params = [], []
+    sets = filters.get("serial_sets") or {}
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS flight_filter_serials (k TEXT, serial TEXT)")
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS flight_filter_ids (id INTEGER PRIMARY KEY)")
+    conn.execute("DELETE FROM flight_filter_serials")
+    conn.execute("DELETE FROM flight_filter_ids")
+    conn.executemany("INSERT INTO flight_filter_serials VALUES (?, ?)",
+                     [(k, sn) for k, serials in sets.items() for sn in serials])
+    if filters.get("ids") is not None:
+        conn.executemany("INSERT INTO flight_filter_ids VALUES (?)", [(i,) for i in filters["ids"]])
+        where.append("f.id IN (SELECT id FROM flight_filter_ids)")
+    conn.commit()
+    in_set = "f.serial IN (SELECT serial FROM flight_filter_serials WHERE k = ?)"
+    if filters.get("make_set"):
+        if filters.get("make_null"):
+            where.append(f"(f.serial IS NULL OR {in_set})")
+        else:
+            where.append(in_set)
+        params.append(filters["make_set"])
+    if filters.get("since") is not None:
+        where.append("f.started_at >= ?")
+        params.append(filters["since"])
+    if filters.get("until") is not None:
+        where.append("f.started_at < ?")
+        params.append(filters["until"])
+    if filters.get("station"):
+        where.append("EXISTS (SELECT 1 FROM track_points tp WHERE tp.flight_id = f.id"
+                     " AND (tp.station_id = ? OR tp.stations LIKE ? ESCAPE '\\'))")
+        params += [filters["station"], _like(json.dumps(filters["station"]))]
+    if filters.get("min_points"):
+        where.append("f.point_count >= ?")
+        params.append(filters["min_points"])
+    if filters.get("named") is not None:
+        where.append("d.nickname IS NOT NULL" if filters["named"] else "d.nickname IS NULL")
+    return (" WHERE " + " AND ".join(where)) if where else "", params
+
+
+def _list_flights(limit, offset, filters=None):
+    """(flights, how many flights match the filters, how many drones match).
+    All from one call so the counts always describe the same filters as the
+    page. Grouped by drone, a page is limit drones with all their matching
+    flights, so a drone's flights never straddle two pages; each flight then
+    carries drone_flights, its drone's number of matching flights."""
     conn = _require_conn()
+    filters = filters or {}
+    where, params = _flight_filter_sql(conn, filters)
+    by_drone = bool(filters.get("by_drone"))
+    order = "f.started_at DESC" if by_drone else FLIGHT_SORTS.get(filters.get("sort") or "newest", FLIGHT_SORTS["newest"])
+    base = "FROM flights f LEFT JOIN drones d ON d.catalog_key = f.catalog_key" + where
+    total, drones_total = conn.execute(
+        f"SELECT COUNT(*), COUNT(DISTINCT f.catalog_key) {base}", params).fetchone()
+    page_sql, page_params = "LIMIT ? OFFSET ?", [limit, offset]
+    drone_order, counts = {}, {}
+    if by_drone:
+        drones = conn.execute(
+            f"""SELECT f.catalog_key, COUNT(*) {base}
+                GROUP BY f.catalog_key
+                ORDER BY {DRONE_SORTS.get(filters.get("sort"), DRONE_SORTS["newest"])}
+                LIMIT ? OFFSET ?""", params + [limit, offset]).fetchall()
+        drone_order = {k: i for i, (k, _) in enumerate(drones)}
+        counts = dict(drones)
+        keys = list(drone_order) or [None]
+        page_sql = (f"{'AND' if where else 'WHERE'} f.catalog_key IN ({','.join('?' * len(keys))})")
+        page_params = keys
     rows = conn.execute(
-        """
+        f"""
         SELECT f.id, f.catalog_key, f.mac, f.serial, f.started_at, f.ended_at,
                f.last_point_at, f.point_count, f.segment_count, f.merged_count, f.location,
                COALESCE(d.nickname, f.serial, f.mac, f.catalog_key) AS display_name,
                (SELECT GROUP_CONCAT(DISTINCT tp.station_id || '|' || tp.transport)
                   FROM track_points tp
                  WHERE tp.flight_id = f.id AND tp.transport IS NOT NULL) AS source_pairs
-        FROM flights f
-        LEFT JOIN drones d ON d.catalog_key = f.catalog_key
-        ORDER BY f.started_at DESC
-        LIMIT ? OFFSET ?
+        {base} {page_sql if by_drone else ""}
+        ORDER BY {order}
+        {"" if by_drone else page_sql}
         """,
-        (limit, offset),
+        params + page_params,
     ).fetchall()
+    if by_drone:   # stable, so each drone's flights stay newest first
+        rows = sorted(rows, key=lambda r: drone_order[r["catalog_key"]])
     out = []
     for r in rows:
         d = dict(r)
@@ -651,8 +758,25 @@ def _list_flights(limit, offset):
             {"station_id": st, "transport": tr}
             for st, tr in (p.split("|", 1) for p in pairs.split(",") if "|" in p)
         ]
+        if by_drone:
+            d["drone_flights"] = counts.get(d["catalog_key"], 0)
         out.append(d)
-    return out
+    return out, total, drones_total
+
+
+def _flight_search_rows():
+    """(id, nickname, serial, mac, location) for every flight, for the search."""
+    conn = _require_conn()
+    return conn.execute(
+        "SELECT f.id, d.nickname, f.serial, f.mac, f.location FROM flights f "
+        "LEFT JOIN drones d ON d.catalog_key = f.catalog_key").fetchall()
+
+
+def _flight_serial_counts():
+    """[(serial, flights)] for every serial in the flights table, plus
+    (None, n) for flights without one. Feeds the make/model filter lists."""
+    conn = _require_conn()
+    return conn.execute("SELECT serial, COUNT(*) FROM flights GROUP BY serial").fetchall()
 
 
 def _get_flight(flight_id):
@@ -748,8 +872,18 @@ async def delete_flights(flight_ids) -> int:
     return await run(_delete_flights, list(flight_ids))
 
 
-async def list_flights(limit=50, offset=0):
-    return await run(_list_flights, limit, offset)
+async def list_flights(limit=50, offset=0, filters=None):
+    """(flights, matching flights, matching drones). See _flight_filter_sql
+    for the filters."""
+    return await run(_list_flights, limit, offset, filters)
+
+
+async def flight_search_rows():
+    return await run(_flight_search_rows)
+
+
+async def flight_serial_counts():
+    return await run(_flight_serial_counts)
 
 
 def _count_flights():

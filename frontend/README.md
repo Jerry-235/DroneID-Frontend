@@ -148,6 +148,45 @@ open the scrub bar. Drag the slider or press ▶ to walk a marker along the path
 The operator's own trail is solid purple, bold while you're tracking it. The
 only dashed purple on the map is the straight drone-to-operator link.
 
+**Searching and filtering History.** The bar above the list narrows it, and
+covers the whole database rather than just the flights loaded so far:
+
+- **Search** matches as you type against the nickname, serial, MAC, make, model
+  and place name. When the whole search names something exactly, only that is
+  shown: `SpaceX Mavic 4 Pro 5` finds that drone and not `...Pro 50` or the
+  other Mavic 4s, while `SpaceX Mavic 4 Pro` finds all of them. Otherwise each
+  word must match somewhere: the start of a word (`1581FB`, `padre`), part of a
+  serial from three characters on, and a number of one or two digits only as a
+  whole word, so `5` doesn't match `512 GB`. Esc clears it.
+- **View**, beside the Filters button: *Show all flights* or *Sort by drone*.
+- **Filters** opens the rest:
+  - **Make** and **Model** list what's in your history, with flight counts.
+    With no make chosen, Model lists every model grouped by make, and picking
+    one sets its make too. *Unknown* covers flights whose serial gives no make
+    or model, and flights with no serial.
+  - **Station**: only flights a given station heard.
+  - **Name**: any name, named drones only, or unnamed drones only.
+  - **Points**: a minimum point count, to hide one-ping blips.
+  - **Time**: today, the last 24 hours, 7 days or 30 days, or a custom range of
+    days (both ends included). A flight counts by the day it started.
+
+  The badge on the button counts the filters set in here, so one can't hide
+  while the panel is closed.
+- Each active filter shows as a chip with an × to remove it, plus *Clear all*.
+  The count line reads `14 of 310 flights` while anything is filtered.
+- **Sort**, in *Show all flights*: newest or oldest first, longest or shortest
+  first, most or fewest points.
+- *Sort by drone* lists one bar per drone with its make and model, how many of
+  its flights match and when it was last seen, and the count line adds the
+  number of drones. Its sort menu orders the drones: newest or oldest first (by
+  when each was last seen), or most or fewest flights. Bars start closed; click
+  one to show that drone's flights, newest first, and again to hide them. Load
+  more then loads further drones rather than flights. Each view remembers its
+  own sort.
+
+Filters are remembered in the browser across reloads. Merge and Delete work on
+the flights you can see, so filter first, then tick and merge.
+
 **The detail panel** opens when you select a drone or operator, from the list,
 the map or a focus button.
 
@@ -328,7 +367,7 @@ valid entry.
 ## Drone models
 
 Each drone's make and model is worked out from its Remote ID serial. They show
-as two bubbles under the drone's name in the Live list, as *Make* and *Model*
+as two bubbles under the drone's name in the Live and History lists, as *Make* and *Model*
 rows under Serial Number in the details panel's Aircraft section (Live and History), and
 as the Discord alert heading when the drone has no nickname, e.g.
 `DJI Mini 4 Pro Detected`. A nickname always wins.
@@ -349,7 +388,9 @@ is checked against, in order:
 The make is spelled as the manufacturer filed it with the FAA (`PARROT`, `Autel
 Robotics`). Add-on broadcast modules are marked in the model, e.g.
 `Mini (broadcast module)`.
-Drones with no serial (MAC only) show no model.
+Drones with no serial (MAC only) show no model. Nothing about models is stored in
+`droneid.db`: they're looked up from each flight's serial when History loads, so
+flights recorded before this feature show them too, with no backfill.
 
 The table is downloaded from the FAA's public API (`uasdoc.faa.gov`) about 30
 seconds after start-up if it's empty, then refreshed weekly. The first download
@@ -492,7 +533,8 @@ Responses over 1 KB are gzipped. A long flight's point list shrinks about 20×.
 | `GET /api/health` | `{"health": {"zmq": "green\|red", "bluetooth": "green\|yellow\|red", "wifi": ...}}` |
 | `GET /api/stations` | Every station with its position, link state and sniffer states |
 | `GET /api/access` | `{"admin": true\|false, "client": "<address the server sees>"}` |
-| `GET /api/flights?limit=&offset=` | Flights, most recent first, each with its `location`. `limit` caps at 500 |
+| `GET /api/flights?limit=&offset=` | Flights, most recent first, each with its `location`, `make` and `model`. `limit` caps at 500. Returns `total` (matching) and `all_total`. Filters: `q`, `make`, `model` (`__none__` for unknown), `since`, `until` (Unix seconds), `station`, `min_points`, `name` (`named`/`unnamed`), `sort` (`newest`, `oldest`, `longest`, `shortest`, `points`, `fewest`), `group=drone`. Also returns `drones_total`. With `group=drone`, `limit` and `offset` count drones, every matching flight of each drone on the page is returned newest first, each flight carries `drone_flights`, and `sort` orders the drones: `newest`, `oldest` (last seen), `most`, `fewest` (flights) |
+| `GET /api/flights/facets` | The makes in the flight history, each with its models and flight counts, and the stations, for the History filters |
 | `GET /api/flights/{id}` | One flight's metadata and its full point list |
 | `POST /api/flights/merge` | `{"flight_ids": [1,2]}` returns `{"flight_id": <survivor>, "merged": n}`. 400 on fewer than two, 404 for an unknown id, 409 for a mismatch or an in-progress flight |
 | `POST /api/flights/delete` | `{"flight_ids": [1,2]}` returns `{"deleted": n}`. 409 if one is in progress |

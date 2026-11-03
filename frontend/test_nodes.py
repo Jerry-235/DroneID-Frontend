@@ -606,6 +606,113 @@ check("history flights carry their model", main._with_model({"serial": "17445AB1
       and main._with_model({"serial": "1581F6Z9000000000001"})["model"] == "Mini 4 Pro")
 check("model refresh is admin-only", main.route_needs_admin("POST", "/api/models/refresh")
       and not main.route_needs_admin("GET", "/api/models/status"))
+print("\n[history search and filters]")
+db.init(os.path.join(mdir, "history.db"))
+T0 = 1_790_000_000.0
+async def hist_setup():
+    async def flight(serial, mac, start, n, nickname=None, station="master", transport="wifi", op=False,
+                     location=None, ended=True, stations=None):
+        key = serial or mac
+        await db.upsert_catalog(key, mac, serial, None, None, None, start)
+        if nickname:
+            await db.rename_drone(key, nickname)
+        fid = await db.start_flight(key, mac, serial, start)
+        for i in range(n):
+            await db.add_point(fid, start + i * 10, {"lat": 26.0, "lon": -97.2, "station_id": station,
+                "transport": transport, "op_lat": 26.01 if op else None, "op_lon": -97.21 if op else None,
+                "stations": json.dumps(stations) if stations else None})
+        if location:
+            await db.set_flight_location(fid, location)
+        if ended:
+            await db.end_flight(fid, start + n * 10)
+        return fid
+    return [
+        await flight("1581F6Z9000000000001", "aa:01", T0, 30, nickname="Mini One", op=True, location="Port Isabel"),
+        await flight("1581F6Z9000000000002", "aa:02", T0 + 86400, 3, location="South Padre Island"),
+        await flight("1596AABCDEFGHIJ", "bb:01", T0 + 2 * 86400, 12, transport=None, station="node-2"),
+        await flight(None, "cc:dd:ee:ff:00:11", T0 + 3 * 86400, 5, transport="bluetooth", ended=False,
+                     stations=["master", "node-2"]),
+    ]
+hids = asyncio.run(hist_setup())
+async def hist(**kw):
+    args = dict(limit=50, offset=0, q=None, make=None, model=None, since=None, until=None, station=None,
+                min_points=None, name=None, sort=None)
+    args.update(kw)
+    r = await main.api_list_flights(**args)
+    return [f["id"] for f in r["flights"]], r["total"], r["all_total"]
+H = lambda **kw: asyncio.run(hist(**kw))
+check("no filters: every flight, newest first, with totals", H() == (hids[::-1], 4, 4), H())
+check("search matches a nickname", H(q="mini one")[0] == [hids[0]])
+check("search matches part of a serial, case-insensitive", H(q="1581f6z9")[0] == [hids[1], hids[0]])
+check("search matches a MAC and a place name", H(q="cc:dd")[0] == [hids[3]] and H(q="padre")[0] == [hids[1]])
+check("search matches make and model, every word must match",
+      H(q="dji mini")[0] == [hids[1], hids[0]] and H(q="dronetag")[0] == [hids[2]] and H(q="dji dronetag")[0] == [])
+check("search treats % and _ literally", H(q="%")[0] == [] and H(q="_")[0] == [])
+check("make filter", H(make="DJI")[0] == [hids[1], hids[0]] and H(make="dronetag")[0] == [hids[2]])
+check("make and model filter", H(make="Dronetag", model="DRI (broadcast module)")[0] == [hids[2]]
+      and H(make="DJI", model="Air 3")[0] == [])
+check("unknown make includes flights with no serial", H(make=main.UNKNOWN_FILTER)[0] == [hids[3]])
+check("a make with no flights matches nothing", H(make="Parrot") == ([], 0, 4))
+check("date range", H(since=T0 + 3600, until=T0 + 2 * 86400 + 1)[0] == [hids[2], hids[1]])
+check("station filter, including a point another station also heard",
+      H(station="node-2")[0] == [hids[3], hids[2]] and H(station="master")[0] == [hids[3], hids[1], hids[0]])
+check("minimum points", H(min_points=10)[0] == [hids[2], hids[0]])
+check("named and unnamed", H(name="named")[0] == [hids[0]] and hids[0] not in H(name="unnamed")[0]
+      and len(H(name="unnamed")[0]) == 3 and len(H(name="anything")[0]) == 4)
+check("sorts", H(sort="oldest")[0] == hids and H(sort="points")[0][0] == hids[0])
+check("filters combine, and paging keeps the filtered total",
+      H(make="DJI", min_points=1, q="padre") == ([hids[1]], 1, 4) and H(q="1581", limit=1, offset=1) == ([hids[0]], 2, 4))
+async def more_flights():
+    async def fl(serial, nickname, start):
+        await db.upsert_catalog(serial, None, serial, None, None, None, start)
+        await db.rename_drone(serial, nickname)
+        fid = await db.start_flight(serial, None, serial, start)
+        await db.add_point(fid, start, {"lat": 26.0, "lon": -97.2, "station_id": "master"})
+        await db.end_flight(fid, start + 10)
+        return fid
+    return [await fl("1581F6Z90000000000A5", "SpaceX Mavic 4 Pro 5", T0 + 10 * 86400),
+            await fl("1581F6Z90000000000A6", "SpaceX Mavic 4 Pro 50", T0 + 11 * 86400),
+            await fl("1581F6Z90000000000A7", "SpaceX Mavic 4 Pro 6", T0 + 12 * 86400),
+            await fl("1581F6Z90000000000A7", "SpaceX Mavic 4 Pro 6", T0 + 13 * 86400)]
+more = asyncio.run(more_flights())
+check("a search naming one drone exactly finds only that drone", H(q="SpaceX Mavic 4 Pro 5")[0] == [more[0]], H(q="SpaceX Mavic 4 Pro 5"))
+check("a shared phrase finds every drone it names", set(H(q="spacex mavic 4 pro")[0]) == set(more))
+check("a short number is a whole word: '5' doesn't match '50' or '512'",
+      H(q="spacex 5")[0] == [more[0]] and H(q="mavic 50")[0] == [more[1]])
+check("words can still come from different fields", H(q="mini padre")[0] == [hids[1]])
+check("part of a serial from its middle", H(q="0000000a7")[0] == [more[3], more[2]])
+def DR(**kw):
+    args = dict(limit=50, offset=0, q=None, make=None, model=None, since=None, until=None, station=None,
+                min_points=None, name=None, sort=None, group="drone")
+    args.update(kw)
+    return asyncio.run(main.api_list_flights(**args))
+r = DR(q="spacex")
+check("grouped by drone: each drone's flights together, newest first, with the group size",
+      [f["id"] for f in r["flights"]] == [more[3], more[2], more[1], more[0]]
+      and [f["drone_flights"] for f in r["flights"]] == [2, 2, 1, 1], r["flights"])
+order = lambda r: list(dict.fromkeys(f["catalog_key"] for f in r["flights"]))
+A5, A6, A7 = "1581F6Z90000000000A5", "1581F6Z90000000000A6", "1581F6Z90000000000A7"
+check("drones by last seen, newest or oldest first",
+      order(DR(q="spacex", sort="newest")) == [A7, A6, A5] and order(DR(q="spacex", sort="oldest")) == [A5, A6, A7])
+check("drones by most or fewest flights", order(DR(q="spacex", sort="most")) == [A7, A6, A5]
+      and order(DR(q="spacex", sort="fewest")) == [A6, A5, A7])
+check("an unknown drone sort falls back to newest", order(DR(q="spacex", sort="longest")) == [A7, A6, A5])
+r1, r2 = DR(limit=3, offset=0), DR(limit=3, offset=3)
+keys1 = [f["catalog_key"] for f in r1["flights"]]
+check("grouped by drone pages by drone, with every flight of each drone on its page",
+      len(set(keys1)) == 3 and len(r1["flights"]) == 4 and r1["drones_total"] == 7
+      and not set(keys1) & {f["catalog_key"] for f in r2["flights"]} and len(r2["flights"]) == 3, (r1, r2))
+check("without grouping, flights don't carry a group size", all("drone_flights" not in f for f in DR(group=None)["flights"]))
+check("longest, shortest and fewest points",
+      H(sort="longest")[0][0] == hids[0] and H(sort="shortest")[0][-1] == hids[0]
+      and H(sort="fewest")[0][-1] == hids[0] and H(sort="points")[0][0] == hids[0])
+
+facets = asyncio.run(main.api_flight_facets())
+fm_ = {m["make"]: m for m in facets["makes"]}
+check("facets list makes and models with flight counts, unknown last",
+      fm_["DJI"]["count"] == 6 and fm_["DJI"]["models"] == [{"model": "Mini 4 Pro", "count": 6}]
+      and facets["makes"][-1]["make"] == main.UNKNOWN_FILTER and fm_[main.UNKNOWN_FILTER]["count"] == 1, facets)
+
 main.model_catalog = None
 check("no catalog -> lookups quietly return None", main.drone_model("1581F6Z9000000000001") == {"make": None, "model": None})
 

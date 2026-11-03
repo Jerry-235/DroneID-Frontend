@@ -225,6 +225,96 @@
   .sidebar[data-view="history"]{ display:flex; flex-direction:column; }
   .sidebar[data-view="history"] > *{ flex:0 0 auto; }
   .sidebar[data-view="history"] > .bulk-bar{ margin-top:auto; }
+  /* History search and filters. Stays at the top while the list scrolls. */
+  .hf{
+    position:sticky; top:0; z-index:6; background:var(--panel);
+    border-bottom:1px solid var(--hairline); padding:10px 12px 8px;
+    display:flex; flex-direction:column; gap:7px;
+  }
+  /* Open, the extra filters make the bar too tall to pin, so it scrolls away. */
+  .hf.more-open{ position:static; }
+  /* The grid and flex rules below would otherwise beat the hidden attribute. */
+  .hf [hidden]{ display:none !important; }
+  .hf-search{ position:relative; }
+  .hf-search svg{ position:absolute; left:9px; top:50%; transform:translateY(-50%); width:13px; height:13px; color:var(--text-muted); pointer-events:none; }
+  .hf input[type=search], .hf input[type=date], .hf select{
+    width:100%; min-width:0; height:30px; background:var(--bg); color:var(--text);
+    border:1px solid var(--hairline); border-radius:var(--radius);
+    font-family:'Inter',sans-serif; font-size:12px; color-scheme:dark;
+  }
+  .hf input[type=search]{ padding:0 28px 0 28px; }
+  .hf input[type=search]::-webkit-search-cancel-button{ display:none; }
+  .hf input[type=date]{ padding:0 6px; }
+  .hf select{
+    appearance:none; -webkit-appearance:none; padding:0 22px 0 8px; cursor:pointer;
+    text-overflow:ellipsis; white-space:nowrap; overflow:hidden;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%237C8B99' stroke-width='1.5'/%3E%3C/svg%3E");
+    background-repeat:no-repeat; background-position:right 8px center;
+  }
+  /* The open list is drawn by the browser; without these it inherits the
+     light text on its own white background, or a transparent one. */
+  .hf option, .hf optgroup{ background:var(--panel-raised); color:var(--text); }
+  .hf input:focus, .hf select:focus{ outline:none; border-color:var(--text-muted); }
+  .hf select.set, .hf input.set{ border-color:rgba(232,163,61,0.55); }
+  .hf-clear-q{
+    position:absolute; right:4px; top:50%; transform:translateY(-50%);
+    background:none; border:none; color:var(--text-muted); font-size:15px; line-height:1;
+    padding:4px 6px; cursor:pointer;
+  }
+  .hf-clear-q:hover{ color:var(--text); }
+  .hf-row{ display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .hf-more-btn{
+    height:30px; background:var(--bg); color:var(--text-muted); border:1px solid var(--hairline);
+    border-radius:var(--radius); font-family:'Inter',sans-serif; font-size:12px; font-weight:600;
+    cursor:pointer; display:flex; align-items:center; justify-content:center; gap:6px;
+  }
+  .hf-more-btn:hover, .hf-more-btn.open{ color:var(--text); border-color:var(--text-muted); }
+  .hf-more-btn .hf-badge{
+    background:var(--amber); color:#0F1720; border-radius:8px; font-size:10px;
+    padding:0 5px; line-height:15px; min-width:15px;
+  }
+  .hf-more{ display:flex; flex-direction:column; gap:6px; padding:2px 0; }
+  .hf-label{ font-size:10px; color:var(--text-muted); letter-spacing:0.06em; text-transform:uppercase; margin-bottom:-3px; }
+  .hf-chips{ display:flex; flex-wrap:wrap; gap:5px; align-items:center; }
+  .hf-chip{
+    display:inline-flex; align-items:center; gap:4px; max-width:100%;
+    background:rgba(232,163,61,0.12); border:1px solid rgba(232,163,61,0.4); color:var(--text);
+    border-radius:11px; padding:1px 4px 1px 9px; font-size:11px; line-height:18px;
+  }
+  .hf-chip span{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .hf-chip button{
+    background:none; border:none; color:var(--text-muted); cursor:pointer;
+    font-size:13px; line-height:1; padding:0 3px;
+  }
+  .hf-chip button:hover{ color:var(--text); }
+  .hf-clear-all{
+    background:none; border:none; color:var(--amber); cursor:pointer;
+    font-size:11px; font-weight:600; padding:2px 2px;
+  }
+  .hf-count{
+    display:flex; align-items:center; gap:8px; font-family:'IBM Plex Mono',monospace;
+    font-size:11px; color:var(--text-muted);
+  }
+  .hf-count b{ color:var(--text); font-weight:600; }
+  .hf .hf-sort{ margin-left:auto; width:auto; height:24px; font-size:11px; padding-right:20px; }
+  /* "By drone": a bar per drone that opens and closes its flights. */
+  .hf-group{
+    display:flex; flex-direction:column; gap:3px; width:100%; text-align:left;
+    padding:10px 14px; border:none; border-bottom:1px solid var(--hairline);
+    background:var(--bg); color:var(--text); font-family:'Inter',sans-serif; cursor:pointer;
+  }
+  .hf-group:hover{ background:var(--panel-raised); }
+  .hf-group:focus-visible{ outline:1px solid var(--text-muted); outline-offset:-1px; }
+  .hf-group-top{ display:flex; align-items:center; gap:8px; min-width:0; }
+  .hf-chevron{ flex:0 0 12px; color:var(--text-muted); font-size:11px; }
+  .hf-group-name{ font-size:13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+  .hf-group-count{ margin-left:auto; flex:0 0 auto; font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-muted); }
+  .hf-group-sub{ padding-left:20px; font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-muted);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .hf-group[aria-expanded="true"]{ border-bottom-color:transparent; }
+  .hf-group-rows{ border-bottom:1px solid var(--hairline); }
+  .hf-group-rows .track-row{ padding-left:28px; }
+  .hf-group-rows .track-row.selected{ padding-left:26px; }
   .bulk-count{ font-size:12px; font-weight:600; flex:1 1 auto; white-space:nowrap; }
   .bulk-btn{
     background:var(--bg); border:1px solid var(--hairline); color:var(--text-muted);
@@ -2928,19 +3018,388 @@ function historyRawIdLabel(f) {
   return rawIdCopyLabel(f && f.display_name, f);
 }
 
+// ---- History search and filters ----
+//
+// What the filter bar is set to. Sent to /api/flights as query parameters, so
+// filtering covers the whole database, not just the page loaded. Kept in
+// localStorage so a reload comes back to the same view.
+const HISTORY_FILTERS_KEY = 'droneid_history_filters_v1';
+const UNKNOWN_FILTER = '__none__';
+const DATE_CHOICES = [
+  ['all', 'Any time'], ['today', 'Today'], ['24h', 'Last 24 hours'],
+  ['7d', 'Last 7 days'], ['30d', 'Last 30 days'], ['custom', 'Custom dates…'],
+];
+const POINTS_CHOICES = [['', 'Any points'], ['10', '10+ points'], ['50', '50+ points'],
+  ['100', '100+ points'], ['500', '500+ points']];
+const NAME_CHOICES = [['', 'Any name'], ['named', 'Named only'], ['unnamed', 'Unnamed only']];
+const SORT_CHOICES = [['newest', 'Newest first'], ['oldest', 'Oldest first'],
+  ['longest', 'Longest first'], ['shortest', 'Shortest first'],
+  ['points', 'Most points'], ['fewest', 'Fewest points']];
+// Sorting by drone orders the drones themselves: by when each was last seen,
+// or by how many of its flights match.
+const DRONE_SORT_CHOICES = [['newest', 'Newest first'], ['oldest', 'Oldest first'],
+  ['most', 'Most flights'], ['fewest', 'Fewest flights']];
+const VIEW_CHOICES = [['flights', 'Show all flights'], ['drones', 'Sort by drone']];
+
+function defaultHistoryFilters() {
+  return { q: '', make: '', model: '', date: 'all', from: '', to: '', station: '', name: '',
+           minPoints: '', view: 'flights', sort: 'newest',
+           droneSort: 'newest', moreOpen: false };
+}
+
+function loadHistoryFilters() {
+  const f = defaultHistoryFilters();
+  try {
+    const saved = JSON.parse(localStorage.getItem(HISTORY_FILTERS_KEY) || '{}');
+    Object.keys(f).forEach(k => { if (typeof saved[k] === typeof f[k]) f[k] = saved[k]; });
+    if (saved.sort === 'drone') f.view = 'drones';    // saved by the version before the view menu
+    if (saved.unnamed === true && !saved.name) f.name = 'unnamed';   // before the name menu
+    if (!NAME_CHOICES.some(c => c[0] === f.name)) f.name = '';
+    if (!VIEW_CHOICES.some(c => c[0] === f.view)) f.view = 'flights';
+    if (!SORT_CHOICES.some(c => c[0] === f.sort)) f.sort = 'newest';
+    if (!DRONE_SORT_CHOICES.some(c => c[0] === f.droneSort)) f.droneSort = 'newest';
+  } catch (e) { /* unavailable or corrupt: start clear */ }
+  return f;
+}
+
+function saveHistoryFilters() {
+  try { localStorage.setItem(HISTORY_FILTERS_KEY, JSON.stringify(historyFilters)); } catch (e) { /* ignore */ }
+}
+
+let historyFilters = loadHistoryFilters();
+let historyFacets = { makes: [], stations: [] };
+let historyAllTotal = 0;
+
+function localDayStart(yyyyMmDd) {
+  const d = new Date(`${yyyyMmDd}T00:00:00`);
+  return isNaN(d) ? null : d.getTime() / 1000;
+}
+
+// [since, until] in Unix seconds for the date choice; either may be null.
+function historyDateRange(f) {
+  const now = Date.now() / 1000;
+  if (f.date === 'today') { const d = new Date(); d.setHours(0, 0, 0, 0); return [d.getTime() / 1000, null]; }
+  if (f.date === '24h') return [now - 86400, null];
+  if (f.date === '7d') return [now - 7 * 86400, null];
+  if (f.date === '30d') return [now - 30 * 86400, null];
+  if (f.date === 'custom') {
+    const since = f.from ? localDayStart(f.from) : null;
+    const end = f.to ? localDayStart(f.to) : null;
+    // The "to" day is included: the range ends at the start of the next day.
+    return [since, end !== null ? end + 86400 : null];
+  }
+  return [null, null];
+}
+
+function historyQueryString(limit, offset) {
+  const f = historyFilters;
+  const p = new URLSearchParams({ limit, offset });
+  if (f.q.trim()) p.set('q', f.q.trim());
+  if (f.make) p.set('make', f.make);
+  if (f.model) p.set('model', f.model);
+  const [since, until] = historyDateRange(f);
+  if (since !== null) p.set('since', Math.floor(since));
+  if (until !== null) p.set('until', Math.floor(until));
+  if (f.station) p.set('station', f.station);
+  if (f.minPoints) p.set('min_points', f.minPoints);
+  if (f.name) p.set('name', f.name);
+  if (f.view === 'drones') {
+    p.set('group', 'drone');
+    if (f.droneSort !== 'newest') p.set('sort', f.droneSort);
+  } else if (f.sort && f.sort !== 'newest') {
+    p.set('sort', f.sort);
+  }
+  return p.toString();
+}
+
+// The filters in the Filters panel that are set: everything but the search.
+function historyMoreCount(f) {
+  return [f.make, f.model, f.station, f.name, f.minPoints, f.date !== 'all'].filter(Boolean).length;
+}
+
+function historyFiltersActive(f) {
+  return !!(f.q.trim() || historyMoreCount(f));
+}
+
+const unknownLabel = (v, what) => v === UNKNOWN_FILTER ? `Unknown ${what}` : v;
+const choiceLabel = (choices, v) => (choices.find(c => c[0] === v) || [v, v])[1];
+
+function fmtDay(yyyyMmDd) {
+  const t = localDayStart(yyyyMmDd);
+  return t === null ? yyyyMmDd : new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+// [label, what clearing it resets] for each active filter, for the chips.
+function historyChips(f) {
+  const chips = [];
+  if (f.make) chips.push([unknownLabel(f.make, 'make'), { make: '', model: '' }]);
+  if (f.model) chips.push([unknownLabel(f.model, 'model'), { model: '' }]);
+  if (f.date === 'custom' && (f.from || f.to)) {
+    chips.push([f.from && f.to ? `${fmtDay(f.from)} – ${fmtDay(f.to)}` : f.from ? `From ${fmtDay(f.from)}` : `Until ${fmtDay(f.to)}`,
+      { date: 'all', from: '', to: '' }]);
+  } else if (f.date !== 'all' && f.date !== 'custom') {
+    chips.push([choiceLabel(DATE_CHOICES, f.date), { date: 'all' }]);
+  }
+  if (f.station) {
+    const st = historyFacets.stations.find(s => s.id === f.station);
+    chips.push([`Heard by ${st ? st.name : f.station}`, { station: '' }]);
+  }
+  if (f.name) chips.push([choiceLabel(NAME_CHOICES, f.name), { name: '' }]);
+  if (f.minPoints) chips.push([choiceLabel(POINTS_CHOICES, f.minPoints), { minPoints: '' }]);
+  return chips;
+}
+
+const optionsHtml = (choices, value) => choices.map(([v, label]) =>
+  `<option value="${escapeHtml(v)}"${v === value ? ' selected' : ''}>${escapeHtml(label)}</option>`).join('');
+
+function makeOptionsHtml(f) {
+  const makes = historyFacets.makes || [];
+  let html = `<option value="">All makes</option>`;
+  makes.forEach(m => {
+    html += `<option value="${escapeHtml(m.make)}"${m.make === f.make ? ' selected' : ''}>${escapeHtml(unknownLabel(m.make, 'make'))} (${m.count})</option>`;
+  });
+  // A saved choice with no flights left still shows, so it can be seen and cleared.
+  if (f.make && !makes.some(m => m.make === f.make)) {
+    html += `<option value="${escapeHtml(f.make)}" selected>${escapeHtml(unknownLabel(f.make, 'make'))} (0)</option>`;
+  }
+  return html;
+}
+
+// Models of the chosen make; with no make chosen, every model grouped by make
+// (picking one then sets its make too). Values carry the make, as JSON.
+function modelOptionsHtml(f) {
+  const makes = (historyFacets.makes || []).filter(m => !f.make || m.make === f.make);
+  const opt = (make, model, count) => {
+    const v = JSON.stringify([make, model]);
+    const sel = f.model === model && (!f.make || f.make === make);
+    return `<option value="${escapeHtml(v)}"${sel ? ' selected' : ''}>${escapeHtml(unknownLabel(model, 'model'))} (${count})</option>`;
+  };
+  let html = `<option value="">All models</option>`;
+  let found = false;
+  makes.forEach(m => {
+    const opts = m.models.map(x => { if (x.model === f.model) found = true; return opt(m.make, x.model, x.count); }).join('');
+    html += f.make ? opts : `<optgroup label="${escapeHtml(unknownLabel(m.make, 'make'))}">${opts}</optgroup>`;
+  });
+  if (f.model && !found) html += opt(f.make, f.model, 0);
+  return html;
+}
+
+const SEARCH_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="7" cy="7" r="5"/><path d="M11 11l3.5 3.5" stroke-linecap="round"/></svg>';
+
+// Built once and kept: the list below it re-renders on every change, but the
+// bar itself is only updated in place, so typing in the search box never
+// loses focus.
+let historyFilterBar = null;
+
+function buildHistoryFilterBar() {
+  const bar = document.createElement('div');
+  bar.className = 'hf';
+  bar.id = 'history-filters';
+  bar.innerHTML = `
+    <div class="hf-search">
+      ${SEARCH_ICON}
+      <input type="search" id="hf-q" placeholder="Search name, serial, model, place…" autocomplete="off" spellcheck="false" aria-label="Search flights">
+      <button class="hf-clear-q" id="hf-clear-q" type="button" aria-label="Clear search" hidden>×</button>
+    </div>
+    <div class="hf-row">
+      <select id="hf-view" aria-label="Show flights or sort by drone">${optionsHtml(VIEW_CHOICES, 'flights')}</select>
+      <button class="hf-more-btn" id="hf-more-btn" type="button" aria-expanded="false">Filters <span class="hf-badge" id="hf-badge" hidden></span></button>
+    </div>
+    <div class="hf-more" id="hf-more" hidden>
+      <div class="hf-row">
+        <select id="hf-make" aria-label="Make"></select>
+        <select id="hf-model" aria-label="Model"></select>
+      </div>
+      <div class="hf-row">
+        <select id="hf-station" aria-label="Station"></select>
+        <select id="hf-name" aria-label="Name">${optionsHtml(NAME_CHOICES, '')}</select>
+      </div>
+      <div class="hf-row">
+        <select id="hf-points" aria-label="Minimum points">${optionsHtml(POINTS_CHOICES, '')}</select>
+        <select id="hf-date" aria-label="Date">${optionsHtml(DATE_CHOICES, 'all')}</select>
+      </div>
+      <div class="hf-row" id="hf-custom" hidden>
+        <input type="date" id="hf-from" aria-label="From date">
+        <input type="date" id="hf-to" aria-label="To date">
+      </div>
+    </div>
+    <div class="hf-chips" id="hf-chips" hidden></div>
+    <div class="hf-count">
+      <span id="hf-count"></span>
+      <select class="hf-sort" id="hf-sort" aria-label="Sort"></select>
+    </div>`;
+
+  const $ = id => bar.querySelector('#' + id);
+  let searchTimer = null;
+  $('hf-q').addEventListener('input', () => {
+    historyFilters.q = $('hf-q').value;
+    $('hf-clear-q').hidden = !historyFilters.q;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => applyHistoryFilters(), 250);
+  });
+  $('hf-q').addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && historyFilters.q) { e.preventDefault(); setHistoryFilters({ q: '' }); }
+    if (e.key === 'Enter') { clearTimeout(searchTimer); applyHistoryFilters(); }
+  });
+  $('hf-clear-q').addEventListener('click', () => { setHistoryFilters({ q: '' }); $('hf-q').focus(); });
+  $('hf-make').addEventListener('change', () => setHistoryFilters({ make: $('hf-make').value, model: '' }));
+  $('hf-model').addEventListener('change', () => {
+    const v = $('hf-model').value;
+    if (!v) return setHistoryFilters({ model: '' });
+    const [make, model] = JSON.parse(v);
+    setHistoryFilters({ make, model });
+  });
+  $('hf-date').addEventListener('change', () => {
+    const date = $('hf-date').value;
+    const patch = { date };
+    if (date === 'custom' && !historyFilters.from && !historyFilters.to) {
+      // Start from the last week, which is easier to adjust than two blanks.
+      const d = new Date(); const iso = x => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
+      patch.to = iso(d); d.setDate(d.getDate() - 7); patch.from = iso(d);
+    }
+    setHistoryFilters(patch);
+  });
+  $('hf-from').addEventListener('change', () => setHistoryFilters({ from: $('hf-from').value }));
+  $('hf-to').addEventListener('change', () => setHistoryFilters({ to: $('hf-to').value }));
+  $('hf-more-btn').addEventListener('click', () => {
+    historyFilters.moreOpen = !historyFilters.moreOpen;
+    saveHistoryFilters();
+    syncHistoryFilterBar();
+  });
+  $('hf-station').addEventListener('change', () => setHistoryFilters({ station: $('hf-station').value }));
+  $('hf-name').addEventListener('change', () => setHistoryFilters({ name: $('hf-name').value }));
+  $('hf-points').addEventListener('change', () => setHistoryFilters({ minPoints: $('hf-points').value }));
+  $('hf-view').addEventListener('change', () => setHistoryFilters({ view: $('hf-view').value }));
+  $('hf-sort').addEventListener('change', () => setHistoryFilters(
+    historyFilters.view === 'drones' ? { droneSort: $('hf-sort').value } : { sort: $('hf-sort').value }));
+  $('hf-chips').addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    if (btn.dataset.clearAll !== undefined) {
+      const keep = { view: historyFilters.view, sort: historyFilters.sort,
+                     droneSort: historyFilters.droneSort, moreOpen: historyFilters.moreOpen };
+      historyFilters = Object.assign(defaultHistoryFilters(), keep);
+      saveHistoryFilters();
+      syncHistoryFilterBar();
+      applyHistoryFilters();
+      return;
+    }
+    const chip = historyChips(historyFilters)[parseInt(btn.dataset.chip, 10)];
+    if (chip) setHistoryFilters(chip[1]);
+  });
+  return bar;
+}
+
+// Writes historyFilters and the facets into the bar, without rebuilding it.
+function syncHistoryFilterBar() {
+  const bar = historyFilterBar;
+  if (!bar) return;
+  const f = historyFilters;
+  const $ = id => bar.querySelector('#' + id);
+  const setVal = (el, v) => { if (el.value !== v) el.value = v; };
+  if (document.activeElement !== $('hf-q')) setVal($('hf-q'), f.q);
+  $('hf-clear-q').hidden = !f.q;
+  $('hf-make').innerHTML = makeOptionsHtml(f);
+  $('hf-model').innerHTML = modelOptionsHtml(f);
+  setVal($('hf-date'), f.date);
+  $('hf-custom').hidden = f.date !== 'custom';
+  setVal($('hf-from'), f.from);
+  setVal($('hf-to'), f.to);
+  $('hf-station').innerHTML = optionsHtml([['', 'Any station']].concat(
+    (historyFacets.stations || []).map(st => [st.id, st.name])
+      .concat(f.station && !(historyFacets.stations || []).some(st => st.id === f.station) ? [[f.station, f.station]] : [])), f.station);
+  setVal($('hf-name'), f.name);
+  setVal($('hf-points'), f.minPoints);
+  setVal($('hf-view'), f.view);
+  // The sort menu offers what fits the view: flight orders, or drone orders.
+  const drones = f.view === 'drones';
+  const sortChoices = drones ? DRONE_SORT_CHOICES : SORT_CHOICES;
+  const sortSig = drones ? 'drones' : 'flights';
+  if ($('hf-sort').dataset.view !== sortSig) {
+    $('hf-sort').innerHTML = optionsHtml(sortChoices, '');
+    $('hf-sort').dataset.view = sortSig;
+  }
+  setVal($('hf-sort'), drones ? f.droneSort : f.sort);
+  // Set controls get an amber edge, so a filter can't hide in plain sight.
+  [['hf-make', f.make], ['hf-model', f.model], ['hf-date', f.date !== 'all'], ['hf-station', f.station],
+   ['hf-name', f.name], ['hf-points', f.minPoints],
+   ['hf-q', f.q.trim()]].forEach(([id, on]) => $(id).classList.toggle('set', !!on));
+  const more = $('hf-more');
+  more.hidden = !f.moreOpen;
+  bar.classList.toggle('more-open', f.moreOpen);
+  const moreBtn = $('hf-more-btn');
+  moreBtn.classList.toggle('open', f.moreOpen);
+  moreBtn.setAttribute('aria-expanded', String(f.moreOpen));
+  const n = historyMoreCount(f);
+  $('hf-badge').hidden = n === 0;
+  $('hf-badge').textContent = n;
+  const chips = historyChips(f);
+  const chipsEl = $('hf-chips');
+  chipsEl.hidden = chips.length === 0 && !historyFiltersActive(f);
+  chipsEl.innerHTML = chips.map(([label], i) =>
+    `<span class="hf-chip"><span title="${escapeHtml(label)}">${escapeHtml(label)}</span><button type="button" data-chip="${i}" aria-label="Remove ${escapeHtml(label)}">×</button></span>`
+  ).join('') + (historyFiltersActive(f) ? '<button type="button" class="hf-clear-all" data-clear-all>Clear all</button>' : '');
+  syncHistoryCount();
+}
+
+function syncHistoryCount() {
+  if (!historyFilterBar) return;
+  const el = historyFilterBar.querySelector('#hf-count');
+  const filtered = historyFiltersActive(historyFilters);
+  el.innerHTML = (filtered
+    ? `<b>${historyTotal}</b> of ${historyAllTotal} flights`
+    : `<b>${historyTotal}</b> flight${historyTotal === 1 ? '' : 's'}`)
+    + (historyByDrone() ? ` · ${historyDronesTotal} drone${historyDronesTotal === 1 ? '' : 's'}` : '');
+}
+
+function setHistoryFilters(patch) {
+  Object.assign(historyFilters, patch);
+  saveHistoryFilters();
+  syncHistoryFilterBar();
+  applyHistoryFilters();
+}
+
+// A new filter starts the list again from the top.
+function applyHistoryFilters() {
+  saveHistoryFilters();
+  syncHistoryFilterBar();
+  historyFlights = [];
+  const sidebar = document.getElementById('sidebar');
+  if (sidebar) sidebar.scrollTop = 0;
+  loadHistoryList();
+}
+
+async function loadHistoryFacets() {
+  try {
+    const res = await fetch('/api/flights/facets');
+    if (!res.ok) return;
+    const data = await res.json();
+    historyFacets = { makes: data.makes || [], stations: data.stations || [] };
+    syncHistoryFilterBar();
+  } catch (e) { /* the bar works without counts */ }
+}
+
 // The history list shows flights a page at a time. historyFlights holds the
 // pages loaded so far; historyTotal is how many flights exist in all.
 const HISTORY_PAGE = 100;
 let historyFlights = [];
 let historyTotal = 0;
+let historyDronesTotal = 0;
+// Drones whose flights are showing under "By drone". Every drone starts
+// collapsed; this only remembers the ones you've opened, for this visit.
+const historyExpanded = new Set();
+
+const historyByDrone = () => historyFilters.view === 'drones';
+const loadedDroneCount = () => new Set(historyFlights.map(f => f.catalog_key)).size;
 let historyListSeq = 0;
 
 function loadMoreHtml() {
-  const left = historyTotal - historyFlights.length;
+  const drones = historyByDrone();
+  const left = drones ? historyDronesTotal - loadedDroneCount() : historyTotal - historyFlights.length;
   if (left <= 0) return '';
   return `<button class="settings-btn settings-btn-ghost" id="history-load-more" type="button" `
     + `style="margin:10px 12px;width:calc(100% - 24px)">`
-    + `Load ${Math.min(HISTORY_PAGE, left)} more (${left} left)</button>`;
+    + `Load ${Math.min(HISTORY_PAGE, left)} more${drones ? ' drones' : ''} (${left} left)</button>`;
 }
 
 // more: false refreshes the list from the top, keeping as many rows as are
@@ -2957,24 +3416,36 @@ async function loadHistoryList(opts = {}) {
   // flights…" on every refresh meant each re-render flashed the list empty
   // for the length of a round trip; leaving the current list up until the
   // new one is ready makes the swap almost invisible.
-  if (sidebar.dataset.view !== 'history') {
-    sidebar.innerHTML = '<div class="sidebar-empty">Loading flights…</div>';
+  // The filter bar sits above a container for the rows; only the rows are
+  // re-rendered from here on, so the bar keeps its focus and state.
+  if (!historyFilterBar) historyFilterBar = buildHistoryFilterBar();
+  let rowsEl = document.getElementById('history-rows');
+  if (sidebar.dataset.view !== 'history' || !rowsEl || !sidebar.contains(historyFilterBar)) {
+    sidebar.innerHTML = '';
+    rowsEl = document.createElement('div');
+    rowsEl.id = 'history-rows';
+    rowsEl.innerHTML = '<div class="sidebar-empty">Loading flights…</div>';
+    sidebar.append(historyFilterBar, rowsEl);
+    sidebar.dataset.view = 'history';
+    syncHistoryFilterBar();
   }
+  if (!more) loadHistoryFacets();
   let data;
   try {
-    const offset = more ? historyFlights.length : 0;
-    const limit = more ? HISTORY_PAGE : Math.max(HISTORY_PAGE, historyFlights.length);
-    const res = await fetch(`/api/flights?limit=${limit}&offset=${offset}`);
+    // By drone, pages count drones (each with all its flights), not flights.
+    const loaded = historyByDrone() ? loadedDroneCount() : historyFlights.length;
+    const offset = more ? loaded : 0;
+    const limit = more ? HISTORY_PAGE : Math.max(HISTORY_PAGE, loaded);
+    const res = await fetch(`/api/flights?${historyQueryString(limit, offset)}`);
     data = await res.json();
     if (!res.ok || !Array.isArray(data.flights)) throw new Error(`flight list ${res.status}`);
   } catch (e) {
     // Without this the promise rejected into nothing and the sidebar sat on
     // "Loading flights…" forever with no clue why. Nothing retries on its own,
     // so the message says what to do rather than promising it will.
-    if (mode !== 'history') return;
-    sidebar.innerHTML = '<div class="sidebar-empty">Could not reach the server. '
+    if (mode !== 'history' || seq !== historyListSeq) return;
+    rowsEl.innerHTML = '<div class="sidebar-empty">Could not reach the server. '
       + 'Reopen this tab to try again.</div>';
-    sidebar.dataset.view = 'history';
     return;
   }
   // The tab can change while this is in the air — a slow flight list landing
@@ -2987,14 +3458,18 @@ async function loadHistoryList(opts = {}) {
   const fresh = (data.flights || []).filter(f => !seen.has(f.id));
   historyFlights = more ? historyFlights.concat(fresh) : (data.flights || []);
   historyTotal = typeof data.total === 'number' ? data.total : historyFlights.length;
+  historyAllTotal = typeof data.all_total === 'number' ? data.all_total : historyTotal;
+  historyDronesTotal = typeof data.drones_total === 'number' ? data.drones_total : 0;
+  syncHistoryCount();
   const flights = historyFlights;
   document.getElementById('track-count').textContent = historyTotal;
   document.getElementById('count-label').textContent = 'flights';
 
   if (flights.length === 0) {
     pickedFlights.clear();
-    sidebar.innerHTML = '<div class="sidebar-empty">No recorded flights yet.</div>';
-    sidebar.dataset.view = 'history';
+    rowsEl.innerHTML = historyFiltersActive(historyFilters) && historyAllTotal > 0
+      ? '<div class="sidebar-empty">No flights match these filters.</div>'
+      : '<div class="sidebar-empty">No recorded flights yet.</div>';
     // Keeps a message alive even when the rows it referred to are gone —
     // deleting the last flight lands here, and "Deleted 3 flights." should
     // still be readable.
@@ -3008,11 +3483,33 @@ async function loadHistoryList(opts = {}) {
   Array.from(pickedFlights).forEach(id => { if (!liveIds.has(id)) pickedFlights.delete(id); });
 
   const admin = isAdmin();
-  sidebar.innerHTML = flights.map(f => {
+  const byDrone = historyByDrone();
+  rowsEl.innerHTML = flights.map((f, i) => {
+    // By drone: a heading per drone, then its flights in a wrapper that the
+    // heading opens and closes. Flights are grouped together by the server.
+    const first = i === 0 || flights[i - 1].catalog_key !== f.catalog_key;
+    const last = i === flights.length - 1 || flights[i + 1].catalog_key !== f.catalog_key;
+    let groupHead = '', groupTail = '';
+    if (byDrone && first) {
+      const open = historyExpanded.has(f.catalog_key);
+      const n = f.drone_flights || 1;
+      const model = [f.make, f.model].filter(Boolean).join(' ');
+      groupHead = `
+        <button type="button" class="hf-group" data-group="${escapeHtml(f.catalog_key)}" aria-expanded="${open}">
+          <span class="hf-group-top">
+            <span class="hf-chevron" aria-hidden="true">${open ? '▾' : '▸'}</span>
+            <span class="hf-group-name" title="${escapeHtml(f.display_name)}">${escapeHtml(f.display_name)}</span>
+            <span class="hf-group-count">${n} flight${n === 1 ? '' : 's'}</span>
+          </span>
+          <span class="hf-group-sub">${model ? `${escapeHtml(model)} · ` : ''}last ${escapeHtml(fmtDateTime(f.started_at).split(',')[0])}</span>
+        </button>
+        <div class="hf-group-rows" data-group-rows="${escapeHtml(f.catalog_key)}"${open ? '' : ' hidden'}>`;
+    }
+    if (byDrone && last) groupTail = '</div>';
     const sel = f.id === historyState.flightId ? ' selected' : '';
     const picked = pickedFlights.has(f.id);
     const inProgress = !f.ended_at;
-    return `
+    return groupHead + `
       <div class="track-row${sel}${picked ? ' picked' : ''}" tabindex="0" role="button" data-flight="${f.id}" data-key="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">
         <div class="row-top">
           <span class="status-chip" style="${inProgress ? '' : 'background:#3A4A5A'}"></span>
@@ -3032,10 +3529,23 @@ async function loadHistoryList(opts = {}) {
           ${inProgress ? '<span style="color:#E8A33D">in progress</span>' : ''}
           ${admin ? `<input type="checkbox" class="flight-pick" style="margin-left:auto" data-pick="${f.id}" ${picked ? 'checked' : ''} title="Select this flight for merge or delete" aria-label="Select this flight for merge or delete">` : ''}
         </div>
-      </div>`;
+      </div>` + groupTail;
   }).join('') + loadMoreHtml();
 
-  sidebar.querySelectorAll('.track-row').forEach(row => {
+  // Opening and closing a drone only shows or hides its rows: no refetch.
+  rowsEl.querySelectorAll('[data-group]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.group;
+      const open = !historyExpanded.has(key);
+      if (open) historyExpanded.add(key); else historyExpanded.delete(key);
+      btn.setAttribute('aria-expanded', String(open));
+      btn.querySelector('.hf-chevron').textContent = open ? '▾' : '▸';
+      const rows = Array.from(rowsEl.querySelectorAll('[data-group-rows]')).find(r => r.dataset.groupRows === key);
+      if (rows) rows.hidden = !open;
+    });
+  });
+
+  rowsEl.querySelectorAll('.track-row').forEach(row => {
     row.addEventListener('click', (e) => {
       if (e.target.dataset.rename || e.target.dataset.pick) return;
       selectHistoryFlight(parseInt(row.dataset.flight, 10));
@@ -3044,7 +3554,7 @@ async function loadHistoryList(opts = {}) {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); row.click(); }
     });
   });
-  sidebar.querySelectorAll('[data-pick]').forEach(box => {
+  rowsEl.querySelectorAll('[data-pick]').forEach(box => {
     box.addEventListener('click', (e) => {
       // Stops the row's own click handler from also opening the flight —
       // ticking the box is a selection action, not a "show me this" action.
@@ -3052,13 +3562,13 @@ async function loadHistoryList(opts = {}) {
       setFlightPicked(parseInt(box.dataset.pick, 10), box.checked);
     });
   });
-  sidebar.querySelectorAll('[data-rename]').forEach(btn => {
+  rowsEl.querySelectorAll('[data-rename]').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       renameDrone(btn.dataset.rename, btn.dataset.name);
     });
   });
-  const moreBtn = sidebar.querySelector('#history-load-more');
+  const moreBtn = rowsEl.querySelector('#history-load-more');
   if (moreBtn) {
     moreBtn.addEventListener('click', () => {
       moreBtn.disabled = true;

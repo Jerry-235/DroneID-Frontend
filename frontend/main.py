@@ -13,7 +13,8 @@ persists every sample to SQLite through db.py, and serves:
   - WS   /ws                          snapshot on connect, then live push
 
   history
-  - GET  /api/flights                 past + in-progress flights
+  - GET  /api/flights                 past + in-progress flights, searchable and filterable
+  - GET  /api/flights/facets          the makes, models and stations History can filter on
   - GET  /api/flights/{id}            one flight's metadata and full path
   - POST /api/flights/merge           fold several flights into one
   - POST /api/flights/delete          remove flights and their points
@@ -2590,18 +2591,154 @@ async def api_rename_drone(catalog_key: str, body: RenameBody):
 MAX_FLIGHT_PAGE = 500
 
 
+# The make/model filters' "unknown" choice: flights whose serial gives no
+# make (or no model), including flights with no serial at all.
+UNKNOWN_FILTER = "__none__"
+
+
+_SEARCH_SPLIT = re.compile(r"[^a-z0-9]+")
+
+
+def _search_text(value) -> str:
+    return " ".join(str(value or "").lower().split())
+
+
+def _phrase_in(phrase: str, text: str) -> bool:
+    """The phrase appears in text as whole words: "mavic 4 pro 5" is in "spacex
+    mavic 4 pro 5" but not in "spacex mavic 4 pro 50"."""
+    start = text.find(phrase)
+    while start != -1:
+        end = start + len(phrase)
+        if ((start == 0 or not text[start - 1].isalnum())
+                and (end == len(text) or not text[end].isalnum() or not phrase[-1].isalnum())):
+            return True
+        start = text.find(phrase, start + 1)
+    return False
+
+
+def _term_in(term: str, text: str, words: list) -> bool:
+    """One search word against a field. A short number has to be a whole word,
+    so "5" finds "Pro 5" but not "512 GB". Other words match the start of a
+    word ("1581fb", "padre"), and from three characters on, anywhere in a
+    serial or MAC-like run as well ("bq00n")."""
+    if term.isdigit() and len(term) <= 2:
+        return term in words
+    if any(w.startswith(term) for w in words):
+        return True
+    return len(term) >= 3 and term in text
+
+
+def search_flight_ids(q: str, rows: list) -> set:
+    """Flight ids matching a search, from (id, nickname, serial, mac, location,
+    make and model) rows. The whole search as a phrase comes first: if it names
+    something exactly ("SpaceX Mavic 4 Pro 5", "South Padre Island", "Mini 4
+    Pro"), only flights containing that phrase are returned. Otherwise every
+    word must match somewhere in the flight's fields."""
+    phrase = _search_text(q)
+    if not phrase:
+        return {r[0] for r in rows}
+    fields = {r[0]: [_search_text(v) for v in r[1:] if v] for r in rows}
+    hits = {fid for fid, texts in fields.items() if any(_phrase_in(phrase, t) for t in texts)}
+    if hits:
+        return hits
+    terms = [t for t in _SEARCH_SPLIT.split(phrase) if t][:8]
+    if not terms:
+        return set()      # only punctuation, and no field contains it
+    out = set()
+    for fid, texts in fields.items():
+        words = [w for t in texts for w in _SEARCH_SPLIT.split(t) if w]
+        joined = " ".join(texts)
+        if all(_term_in(t, joined, words) for t in terms):
+            out.add(fid)
+    return out
+
+
+async def build_flight_filters(q=None, make=None, model=None, since=None, until=None, station=None,
+                               min_points=None, name=None, sort=None, group=None) -> dict:
+    """The filters dict db.list_flights takes, from the query parameters. Make
+    and model aren't stored, so the serials they match, and the text search,
+    are worked out here, with one cached model lookup per distinct serial."""
+    filters = {
+        "since": since, "until": until,
+        "station": station or None,
+        "min_points": max(0, int(min_points)) if min_points else None,
+        "named": {"named": True, "unnamed": False}.get(name),
+        "by_drone": group == "drone",
+        "serial_sets": {},
+    }
+    sorts = db.DRONE_SORTS if filters["by_drone"] else db.FLIGHT_SORTS
+    filters["sort"] = sort if sort in sorts else "newest"
+    if q and q.strip():
+        rows = []
+        for fid, nickname, serial, mac, location in await db.flight_search_rows():
+            m = drone_model(serial)
+            label = faa_models.label(m) if (m["make"] or m["model"]) else None
+            rows.append((fid, nickname, serial, mac, location, label, m["model"]))
+        filters["ids"] = search_flight_ids(q, rows)
+    if make or model:
+        serials = [sn for sn, _ in await db.flight_serial_counts() if sn]
+        models = {sn: drone_model(sn) for sn in serials}
+        def matches(m):
+            if make and (m["make"] or UNKNOWN_FILTER).lower() != make.lower():
+                return False
+            if model and (m["model"] or UNKNOWN_FILTER).lower() != model.lower():
+                return False
+            return True
+        filters["serial_sets"]["make"] = {sn for sn, m in models.items() if matches(m)}
+        filters["make_set"] = "make"
+        # A flight with no serial has no make or model either.
+        filters["make_null"] = (make or UNKNOWN_FILTER) == UNKNOWN_FILTER and (model or UNKNOWN_FILTER) == UNKNOWN_FILTER
+        if not filters["serial_sets"]["make"]:
+            filters["serial_sets"]["make"] = {""}   # matches nothing, rather than everything
+    return filters
+
+
 @app.get("/api/flights")
-async def api_list_flights(limit: int = 50, offset: int = 0):
-    """Past (and in-progress) flights, most recent first. limit is capped:
-    without it, one mistyped query string could ask for the entire table and
-    hold the single DB lock (and so all ingest) for as long as that took."""
+async def api_list_flights(limit: int = 50, offset: int = 0, q: Optional[str] = None,
+                           make: Optional[str] = None, model: Optional[str] = None,
+                           since: Optional[float] = None, until: Optional[float] = None,
+                           station: Optional[str] = None, min_points: Optional[int] = None,
+                           name: Optional[str] = None, sort: Optional[str] = None,
+                           group: Optional[str] = None):
+    """Past (and in-progress) flights, most recent first unless sorted
+    otherwise, narrowed by any of the search and filter parameters. total is
+    how many match, drones_total how many drones they come from, all_total how
+    many flights exist. With group=drone the flights come grouped by drone,
+    limit and offset count drones, and sort orders the drones. limit is capped: without it, one
+    mistyped query string could ask for the entire table and hold the single
+    DB lock (and so all ingest) for as long as that took."""
     limit = max(1, min(int(limit), MAX_FLIGHT_PAGE))
     offset = max(0, int(offset))
+    filters = await build_flight_filters(q, make, model, since, until, station,
+                                         min_points, name, sort, group)
+    flights, total, drones_total = await db.list_flights(limit, offset, filters)
     return {
-        "flights": [_with_model(f) for f in await db.list_flights(limit, offset)],
-        "total": await db.count_flights(),
+        "flights": [_with_model(f) for f in flights],
+        "total": total,
+        "drones_total": drones_total,
+        "all_total": await db.count_flights(),
         "offset": offset,
     }
+
+
+@app.get("/api/flights/facets")
+async def api_flight_facets():
+    """What the History filters can offer: every make in the flight history
+    with its models and flight counts, and the stations."""
+    makes: dict = {}
+    for serial, n in await db.flight_serial_counts():
+        m = drone_model(serial)
+        make = m["make"] or UNKNOWN_FILTER
+        entry = makes.setdefault(make, {"make": make, "count": 0, "models": {}})
+        entry["count"] += n
+        model_key = m["model"] or UNKNOWN_FILTER
+        entry["models"][model_key] = entry["models"].get(model_key, 0) + n
+    out = sorted(makes.values(), key=lambda e: (e["make"] == UNKNOWN_FILTER, -e["count"], e["make"].lower()))
+    for e in out:
+        e["models"] = [{"model": k, "count": c} for k, c in
+                       sorted(e["models"].items(), key=lambda kv: (kv[0] == UNKNOWN_FILTER, -kv[1], kv[0].lower()))]
+    stations = [{"id": sid, "name": station_display_name(sid)} for sid in fleet.config] if fleet else []
+    return {"makes": out, "stations": stations, "unknown": UNKNOWN_FILTER}
 
 
 @app.get("/api/flights/{flight_id}")
