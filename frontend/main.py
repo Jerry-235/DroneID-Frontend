@@ -25,6 +25,8 @@ persists every sample to SQLite through db.py, and serves:
   - POST /api/discord_webhook/test    send a test alert
   - GET  /api/health_webhook          whether a health-alert webhook is configured
   - POST /api/health_webhook/test     send a test health alert
+  - GET  /api/models/status           the FAA drone-model table: size, last refresh
+  - POST /api/models/refresh          refresh that table from the FAA now
 
   debug
   - POST /api/test/drone/start|stop, GET /api/test/drone/status
@@ -71,9 +73,10 @@ except ImportError:
     pass  # python-dotenv not installed — fine, .env is an optional convenience
 
 import db
+import faa_models
 import places
 import nodes as node_cfg
-from node_agent import GpsdClient
+from node_agent import GpsdClient, read_cpu_temp
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("droneid-frontend")
@@ -91,6 +94,54 @@ def spawn(coro, label: str = ""):
     task.add_done_callback(_background_tasks.discard)
     task.add_done_callback(lambda t: _log_task_error(t, label))
     return task
+
+
+# ---- drone models (FAA Declarations of Compliance) ----
+# Set up in lifespan(). Until then (and in tests that don't set it) lookups
+# just return None.
+model_catalog: "Optional[faa_models.ModelCatalog]" = None
+MODELS_CHECK_EVERY_S = 3600   # how often the refresher checks whether a week has passed
+
+
+def drone_model(serial: Optional[str]) -> dict:
+    """{"make": ..., "model": ...} for a Remote ID serial, from model_overrides.csv
+    and the local copy of the FAA's declarations; either can be None. Lookups
+    are cached in the catalog, so this is cheap enough for every snapshot."""
+    info = None
+    if model_catalog is not None and serial:
+        try:
+            info = model_catalog.lookup(serial)
+        except Exception as e:   # a damaged table must never break the live view
+            log.warning("Model lookup failed for %s: %s", serial, e)
+    return {"make": (info or {}).get("make"), "model": (info or {}).get("model")}
+
+
+def _model_heading(info: dict) -> Optional[str]:
+    """The alert heading's name: "DJI Mini 4 Pro", or "DJI Drone" when only the
+    make is known."""
+    if info.get("make") and not info.get("model"):
+        return f"{info['make']} Drone"
+    return faa_models.label(info)
+
+
+async def models_refresher():
+    """Refreshes the model table when it's a week old (or empty), checking hourly.
+    The refresh itself is blocking network I/O, so it runs in a thread. If the
+    FAA can't be reached, the last good table stays in use and the next check
+    tries again."""
+    await asyncio.sleep(30)   # let startup settle first
+    while True:
+        try:
+            if model_catalog.needs_refresh():
+                await asyncio.to_thread(model_catalog.refresh)
+        except Exception:
+            log.exception("Model table refresh failed")
+        await asyncio.sleep(MODELS_CHECK_EVERY_S)
+
+
+def _with_model(flight: dict) -> dict:
+    flight.update(drone_model(flight.get("serial")))
+    return flight
 
 
 def _log_task_error(task, label: str):
@@ -329,6 +380,7 @@ class DroneTrack:
         # recent_points on every call, and that list is internal anyway.
         d = {f.name: getattr(self, f.name) for f in fields(self)
              if f.name not in _TRACK_INTERNAL_FIELDS}
+        d.update(drone_model(self.serial))
         d["seen_by"] = list(self.seen_by)
         # Snapshot the dicts: the burst handler updates them while this runs.
         heard = dict(self.station_heard)
@@ -963,7 +1015,8 @@ async def _persist_update_locked(track: DroneTrack):
         # many stations had the drone there. Repeats from the same station add
         # nothing, so they are dropped here.
         if match.point_id is not None and match.station != track.station_id:
-            await db.add_station_to_point(match.point_id, track.station_id)
+            await db.add_station_to_point(match.point_id, track.station_id,
+                                          station_position(track.station_id))
         return
     nickname = catalog_nicknames.get(key)
     is_new = key not in active_flights
@@ -1004,6 +1057,11 @@ async def _persist_update_locked(track: DroneTrack):
     track.flight_id = active_flights[key]
     point_fields = {c: getattr(track, c, None) for c in db.POINT_COLUMNS}
     point_fields["stations"] = json.dumps([track.station_id]) if track.station_id else None
+    # Where the station was when it heard this, so History's distances stay as
+    # they were even after the station moves or is relocated.
+    here = station_position(track.station_id) if track.station_id in fleet.config else None
+    point_fields["station_positions"] = (json.dumps({track.station_id: [here[0], here[1]]})
+                                         if here else None)
     try:
         point_id = await db.add_point(track.flight_id, track.last_seen, point_fields)
         if track.lat is not None and track.lon is not None:
@@ -1496,6 +1554,7 @@ def _station_row(station_id: str, now: float, link: str) -> dict:
     shown = station_known_position(station_id)
     manual = station_manual_position(station_id)
     cfg = fleet.config[station_id]
+    temp = station_temperature(station_id, now)
     row.update({
         "name": station_display_name(station_id),
         "device": station_device_label(station_id),
@@ -1507,6 +1566,13 @@ def _station_row(station_id: str, now: float, link: str) -> dict:
         "gps_feed": gps_feed_found(station_id, now),
         "gps_state": gps_state(station_id, now),
         "icon": station_entry(station_id).get("icon") or STATION_ICON_DEFAULT,
+        # Whether the station's node_agent is reporting. None for the master,
+        # which has no agent.
+        "agent_up": (None if cfg.kind == "master" else
+                     fleet.state[station_id].last_status_at is not None
+                     and now - fleet.state[station_id].last_status_at <= node_cfg.STATUS_STALE_S),
+        "temp_c": temp,
+        "temp_hot": temp is not None and temp >= TEMP_ALERT_C,
     })
     return row
 
@@ -1551,8 +1617,10 @@ def build_new_drone_message(track: "DroneTrack", place: "Optional[places.Place]"
     """Builds the alert text for a brand-new (non-test) detection. Uses
     imperial units throughout (feet/mph). Formatted as a Discord ## heading
     (bold, slightly larger) with the role ping (if configured) on that same
-    line, followed by the details in a fenced code block on their own line."""
-    name = track.nickname or "New Drone"
+    line, followed by the details in a fenced code block on their own line.
+    The heading names the drone by its nickname, else its model from the
+    serial, else "New Drone"."""
+    name = track.nickname or _model_heading(drone_model(track.serial)) or "New Drone"
     role_ping = f" <@&{DISCORD_ROLE_ID}>" if DISCORD_ROLE_ID else ""
     at = f" at {place.name}" if place else ""
     header = f"## {name} Detected{at}{role_ping}"
@@ -1780,6 +1848,20 @@ def _component_list(comps: list) -> str:
     return text[0].upper() + text[1:]
 
 
+def _recovery_body(online: list, down: list, unknown: list) -> str:
+    """What came back and what's still offline. "All components reporting" once
+    nothing is down or unknown. Sniffers that are unknown because the agent is
+    offline aren't named: the agent being offline already says so."""
+    if not down and not unknown:
+        return "All components reporting"
+    parts = []
+    if online:
+        parts.append(f"{_component_list(online)} online")
+    if down:
+        parts.append(f"{_component_list(down)} offline")
+    return " - ".join(parts)
+
+
 class HealthTracker:
     """Turns component states, checked every few seconds, into Discord messages.
 
@@ -1799,6 +1881,10 @@ class HealthTracker:
         self.up_since: dict = {}      # (station, component) -> when it came back
         self.alerted: set = set()     # (station, component) reported down
         self.full_outage: set = set() # stations reported fully down
+        # (station, component) whose state went unknown during an outage that
+        # is still being reported (the sniffers while the agent was silent).
+        # They're named when they come back, alongside the agent.
+        self.was_unknown: set = set()
 
     def step(self, health: dict, names: dict, now: float, alerting: bool = True) -> list:
         messages = []
@@ -1806,7 +1892,10 @@ class HealthTracker:
             for comp, up in comps.items():
                 key = (sid, comp)
                 if up is None:
+                    self.was_unknown.add(key)
                     continue              # unknown: keep whatever was last known
+                if not any(s == sid for s, _ in self.alerted):
+                    self.was_unknown.discard(key)   # no outage being reported: nothing to announce
                 if up:
                     self.down_since.pop(key, None)
                     self.up_since.setdefault(key, now)
@@ -1822,6 +1911,7 @@ class HealthTracker:
         known = [c for c in order if comps[c] is not None]
         down_now = [c for c in known if comps[c] is False]
         up_now = [c for c in known if comps[c] is True]
+        unknown = [c for c in order if comps[c] is None]
         messages = []
 
         # Back: anything reported down that is up again
@@ -1829,14 +1919,17 @@ class HealthTracker:
         if back and any(now - self.up_since[(sid, c)] >= self.recover_after for c in back):
             for c in back:
                 self.alerted.discard((sid, c))
-            if not down_now:
-                body = "All components reporting"
-            else:
-                body = f"{_component_list(back)} online - {_component_list(down_now)} offline"
-                # Named offline here, so they count as reported: when they come
-                # back they get their own ✅ message, not a ⚠️ first.
-                for c in down_now:
-                    self.alerted.add((sid, c))
+            # Name what came back, plus anything that was unknown and is now
+            # known to be up (Wi-Fi and Bluetooth, when the agent returns).
+            online = [c for c in order if c in back
+                      or ((sid, c) in self.was_unknown and comps[c] is True)]
+            for c in known:
+                self.was_unknown.discard((sid, c))
+            body = _recovery_body(online, down_now, unknown)
+            # Anything named offline here counts as reported: when it comes
+            # back it gets its own ✅ message, not a ⚠️ first.
+            for c in down_now:
+                self.alerted.add((sid, c))
             if sid in self.full_outage:
                 self.full_outage.discard(sid)
                 title = f"{name} Online"
@@ -1859,9 +1952,60 @@ class HealthTracker:
         return messages
 
 
+# ---- station temperature ----
+# A station at or above TEMP_ALERT_C turns red on the Station page and, after
+# HEALTH_ALERT_AFTER_S there, posts a 🌡️ alert to the health channel. The
+# all-clear waits until it's TEMP_CLEAR_MARGIN_C below the limit, so a station
+# hovering at the limit doesn't post a pair of messages every few seconds.
+TEMP_ALERT_C = float(os.environ.get("DRONEID_TEMP_ALERT_C", "90"))
+TEMP_CLEAR_MARGIN_C = 5.0
+
+
+def station_temperature(station_id: str, now: float) -> Optional[float]:
+    """CPU temperature in °C: the master reads its own, a remote station's comes
+    from its node_agent's latest report. None if unknown."""
+    if fleet.config[station_id].kind == "master":
+        return read_cpu_temp()
+    return fleet.temperature(station_id, now)
+
+
+class TempTracker:
+    """Turns station temperatures into health-channel messages: one 🌡️ when a
+    station has been at or above the limit for alert_after seconds, and one ✅
+    once it has cooled to clear_margin below the limit."""
+
+    def __init__(self, limit: float, clear_margin: float, alert_after: float):
+        self.limit, self.clear_margin, self.alert_after = limit, clear_margin, alert_after
+        self.hot_since: dict = {}
+        self.alerted: set = set()
+
+    def step(self, temps: dict, names: dict, now: float, alerting: bool = True) -> list:
+        messages = []
+        for sid, celsius in temps.items():
+            if celsius is None:
+                continue                  # unknown: keep whatever was last known
+            if celsius >= self.limit:
+                self.hot_since.setdefault(sid, now)
+            else:
+                self.hot_since.pop(sid, None)
+            if not alerting:
+                continue
+            name = names.get(sid, sid)
+            if (sid not in self.alerted and sid in self.hot_since
+                    and now - self.hot_since[sid] >= self.alert_after):
+                self.alerted.add(sid)
+                messages.append(f"## \U0001F321\ufe0f {name} High Temperature\n"
+                                f"```{celsius:.0f}\u00b0 C - limit {self.limit:.0f}\u00b0 C```")
+            elif sid in self.alerted and celsius < self.limit - self.clear_margin:
+                self.alerted.discard(sid)
+                messages.append(f"## \u2705 {name} Temperature Normal\n```{celsius:.0f}\u00b0 C```")
+        return messages
+
+
 async def health_monitor():
     """Checks every station's health every HEALTH_CHECK_S and queues alerts."""
     tracker = HealthTracker(HEALTH_ALERT_AFTER_S, HEALTH_RECOVER_AFTER_S)
+    temps = TempTracker(TEMP_ALERT_C, TEMP_CLEAR_MARGIN_C, HEALTH_ALERT_AFTER_S)
     started = time.time()
     while True:
         await asyncio.sleep(HEALTH_CHECK_S)
@@ -1869,7 +2013,10 @@ async def health_monitor():
             now = time.time()
             names = {sid: station_display_name(sid) for sid in fleet.ids()}
             alerting = now - started >= HEALTH_STARTUP_GRACE_S
-            for message in tracker.step(station_health(now), names, now, alerting):
+            messages = tracker.step(station_health(now), names, now, alerting)
+            messages += temps.step({sid: station_temperature(sid, now) for sid in fleet.ids()},
+                                   names, now, alerting)
+            for message in messages:
                 log.info("Health alert: %s", message.splitlines()[0].lstrip("# "))
                 await _health_queue.put(message)
         except Exception:
@@ -2145,6 +2292,7 @@ ADMIN_ONLY_ROUTES = {
     ("POST", "/api/test/drone/stop"),
     ("POST", "/api/flights/merge"),
     ("POST", "/api/flights/delete"),
+    ("POST", "/api/models/refresh"),
 }
 # Same idea for paths carrying a parameter — matched on the method plus a
 # path prefix instead of the whole path.
@@ -2165,7 +2313,7 @@ async def lifespan(_app: "FastAPI"):
     has deprecated. Nothing is torn down on the way out: the process exits
     immediately afterwards, the listener tasks die with the loop, and SQLite in
     WAL mode needs no explicit close to stay consistent."""
-    global station_cache, station_config, fleet, _alert_queue, _health_queue
+    global station_cache, station_config, fleet, _alert_queue, _health_queue, model_catalog
     db.init(os.environ.get("DRONEID_DB_PATH", os.path.join(os.path.dirname(__file__), "droneid.db")))
     catalog_nicknames.update(await db.get_catalog())
     station_cache = parse_station(await db.get_setting("station"))
@@ -2196,6 +2344,11 @@ async def lifespan(_app: "FastAPI"):
     spawn(health_broadcaster(), "health-broadcast")
     spawn(station_broadcaster(), "station-broadcast")
     spawn(stale_sweeper(), "stale-sweeper")
+    try:
+        model_catalog = faa_models.ModelCatalog()
+        spawn(models_refresher(), "models-refresh")
+    except Exception as e:   # models are a nice-to-have; never block startup
+        log.warning("Drone model lookups disabled: %s", e)
     yield
 
 
@@ -2442,7 +2595,7 @@ async def api_list_flights(limit: int = 50, offset: int = 0):
     limit = max(1, min(int(limit), MAX_FLIGHT_PAGE))
     offset = max(0, int(offset))
     return {
-        "flights": await db.list_flights(limit, offset),
+        "flights": [_with_model(f) for f in await db.list_flights(limit, offset)],
         "total": await db.count_flights(),
         "offset": offset,
     }
@@ -2456,6 +2609,7 @@ async def api_get_flight(flight_id: int):
     flight = await db.get_flight(flight_id)
     if not flight:
         return JSONResponse({"error": "flight not found"}, status_code=404)
+    _with_model(flight)
     points = await db.get_flight_points(flight_id)
     # Serialised here and returned as a finished Response, rather than
     # returning the dict for FastAPI to encode. FastAPI's default path first
@@ -2471,6 +2625,25 @@ async def api_get_flight(flight_id: int):
         ensure_ascii=False, allow_nan=False, separators=(",", ":"),
     )
     return Response(content=body, media_type="application/json")
+
+
+@app.get("/api/models/status")
+async def api_models_status():
+    """The drone-model table: declarations held, last refresh, last error."""
+    if model_catalog is None:
+        return {"available": False}
+    return {"available": True, **await asyncio.to_thread(model_catalog.status)}
+
+
+@app.post("/api/models/refresh")
+async def api_models_refresh():
+    """Starts a refresh from the FAA now (admin). Returns at once; the status
+    endpoint shows "refreshing" until it's done."""
+    if model_catalog is None:
+        return JSONResponse({"error": "model lookups are not available"}, status_code=503)
+    if not model_catalog.status()["refreshing"]:
+        spawn(asyncio.to_thread(model_catalog.refresh), "models-refresh-now")
+    return {"ok": True, "refreshing": True}
 
 
 MISMATCH_MESSAGE = "Cannot merge mismatched info"

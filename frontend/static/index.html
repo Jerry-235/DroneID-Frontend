@@ -96,6 +96,9 @@
   .node-ball.stale{ opacity:0.5; }
   .node-ball.gps-stale{ opacity:0.6; }
   .node-ball.gps-disconnected{ opacity:0.3; filter:grayscale(1); }
+  /* A fixed station that is fully offline: faded the same way, but kept on the
+     map, since its position is set rather than reported. */
+  .node-ball.offline{ opacity:0.3; filter:grayscale(1); }
   .node-ball .link-dot{
     position:absolute; right:-3px; top:-3px; width:9px; height:9px; border-radius:50%;
     border:2px solid #0B121A;
@@ -177,6 +180,9 @@
   .track-pills{
     margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;
   }
+  /* Make and model, between the name and the MAC/SN line. */
+  .track-pills.model-pills{ margin:4px 0 2px; }
+  .track-pill.model-pill{ white-space:normal; overflow-wrap:anywhere; }
   .track-pill{
     background:var(--bg); border:1px solid var(--hairline); color:var(--text);
     font-family:'IBM Plex Mono',monospace; font-size:11px; font-weight:500;
@@ -456,6 +462,8 @@
   .station-icon-btn:hover{ border-color:var(--text-muted); }
   .station-icon-btn.active{ border-color:var(--amber); }
   .station-error{ color:var(--amber); }
+  .station-temp{ font-size:12px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace; }
+  .station-temp.hot{ color:var(--red); font-weight:600; }
   .dp-note{ padding:10px 14px; font-size:11px; color:var(--text-muted); line-height:1.5; }
   .dp-section-head .popup-badge-row{ margin:0; }
 
@@ -507,10 +515,8 @@
     <span class="health-item" tabindex="0" id="master-chip">
       <span class="dot" id="health-zmq-dot"></span><span id="master-chip-name">Station</span>
       <div class="health-tooltip">
-        <div class="tt-title" id="master-chip-title">Station — ZMQ</div>
-        <div id="master-chip-gps"></div>
-        <div class="tt-row"><span class="tt-dot" style="background:#34D399;"></span>Green — connected, receiving data</div>
-        <div class="tt-row"><span class="tt-dot" style="background:#E0645A;"></span>Red — not connected to zmq_decoder.py</div>
+        <div class="tt-title" id="master-chip-title">Station Status</div>
+        <div id="master-chip-rows"></div>
       </div>
     </span>
     <span id="nodes-health" style="display:contents"></span>
@@ -804,14 +810,40 @@ function refreshMasterMarker() {
 }
 
 // Top-bar label and ZMQ dropdown title for the master's chip.
+// The rows of a top-bar chip's dropdown: each part of the station, green when
+// it's up and red when it isn't. GPS keeps its own three colours. The master
+// has no agent, and GPS appears only for a station in GPS mode.
+const STATUS_GREEN = '#34D399', STATUS_RED = '#E0645A';
+function statusRowHtml(label, up) {
+  return `<div class="tt-row"><span class="tt-dot" style="background:${up ? STATUS_GREEN : STATUS_RED}"></span>` +
+    `${label} — ${up ? 'online' : 'offline'}</div>`;
+}
+function stationStatusRowsHtml(s, isMaster) {
+  const running = c => c === 'green' || c === 'yellow';
+  const decoderUp = isMaster ? masterLinkState() === 'green' : !!(s && s.link === 'green');
+  let html = statusRowHtml('Decoder', decoderUp);
+  if (!isMaster) html += statusRowHtml('Agent', !!(s && s.agent_up));
+  html += statusRowHtml('Wi-Fi', running(isMaster ? lastHealth.wifi : s && s.wifi));
+  html += statusRowHtml('Bluetooth', running(isMaster ? lastHealth.bluetooth : s && s.bluetooth));
+  const gps = s && s.gps_state;
+  if (gps) {
+    html += `<div class="tt-row"><span class="tt-dot" style="background:${GPS_STATE_COLOUR[gps]}"></span>` +
+      `GPS — ${GPS_STATE_TEXT[gps]}</div>`;
+  }
+  return html;
+}
+
 function refreshMasterChip() {
   const name = masterStationName();
   const nameEl = document.getElementById('master-chip-name');
   const titleEl = document.getElementById('master-chip-title');
   if (nameEl) nameEl.textContent = name;
-  if (titleEl) titleEl.textContent = `${name} — ZMQ`;
-  const gpsEl = document.getElementById('master-chip-gps');
-  if (gpsEl) gpsEl.innerHTML = gpsLineHtml(masterRow());
+  if (titleEl) titleEl.textContent = `${name} Status`;
+  const rowsEl = document.getElementById('master-chip-rows');
+  if (rowsEl) {
+    const html = stationStatusRowsHtml(masterRow(), true);
+    if (rowsEl.innerHTML !== html) rowsEl.innerHTML = html;
+  }
 }
 
 // "Wi-Fi - Name" / "Bluetooth - Name" for each (station, transport) that heard a
@@ -984,6 +1016,8 @@ const FIELD_DEFS = {
   ],
   'Drone': [
     { key: 'serial',           label: 'Serial Number' },
+    { key: 'make',             label: 'Make' },
+    { key: 'model',            label: 'Model' },
     { key: 'ua_type',          label: 'UA Type' },
     { key: 'id',               label: 'ID' },
     { key: 'op_status',           label: 'Op Status' },
@@ -1019,7 +1053,7 @@ const FIELD_DEFS = {
 const FIELD_DEFAULTS = {
   'Basic': { protocol_version: false, mac: true, status: true, tracked_time: true, last_seen_elapsed: true, tracked_by_count: true, station_distances: true, transport: true, channel: true, rssi: true },
   'Drone': {
-    serial: true, ua_type: false, id: false,
+    make: true, model: true, serial: true, ua_type: false, id: false,
     op_status: true, height_type: true, heading: true, speed: true, vert_speed: true,
     lat: true, lon: true, pressure_altitude: false, alt: true, height_agl: true,
     vertical_accuracy: false, horizontal_accuracy: false, baro_accuracy: false,
@@ -1091,6 +1125,16 @@ let accessState = 'readonly';
 
 function isAdmin() { return adminAllowed; }
 
+// "3 days ago" from a Unix time in seconds.
+function fmtAgo(unixSeconds) {
+  const s = Math.max(0, Date.now() / 1000 - unixSeconds);
+  if (s < 90) return 'just now';
+  if (s < 5400) return `${Math.round(s / 60)} minutes ago`;
+  if (s < 129600) return `${Math.round(s / 3600)} hours ago`;
+  const days = Math.round(s / 86400);
+  return `${days} day${days === 1 ? '' : 's'} ago`;
+}
+
 async function loadAccess() {
   adminAllowed = false;
   clientAddress = null;
@@ -1145,11 +1189,30 @@ function stationRangeMeters(s, d) {
   return slantRangeMeters(s.lat, s.lon, d.lat, d.lon, d.height_agl);
 }
 
+// The stations, placed where they were for this data. A History point carries
+// where its detecting stations were when it was recorded, so its distances don't
+// change when a roaming station moves or a fixed one is relocated; a station
+// with no position then has no distance. A station since removed from
+// nodes.json keeps its recorded position, under its id. Live data, and points
+// recorded before positions were stored, use where the stations are now.
+function stationsAsRecorded(d) {
+  const stored = d && d.station_positions;
+  if (!stored) return stationList;
+  const list = stationList.map(s => {
+    const pos = stored[s.id];
+    return Object.assign({}, s, pos ? { lat: pos[0], lon: pos[1] } : { lat: null, lon: null });
+  });
+  Object.keys(stored).forEach(id => {
+    if (!list.some(s => s.id === id)) list.push({ id, name: id, lat: stored[id][0], lon: stored[id][1] });
+  });
+  return list;
+}
+
 // The closest station that detects this drone: { id, name, lat, lon, meters }, or null.
 function closestDetectingStation(d) {
   const heard = detectingStations(d);
   let best = null;
-  stationList.forEach(s => {
+  stationsAsRecorded(d).forEach(s => {
     if (!heard.has(s.id)) return;
     const meters = stationRangeMeters(s, d);
     if (meters !== null && (best === null || meters < best.meters)) {
@@ -1661,6 +1724,13 @@ function stationsSectionHtml() {
     <div class="station-list">${stationList.map(stationCardHtml).join('')}</div>`;
 }
 
+// "Current Temperature: 61° C", or a dash when the station hasn't reported one
+// (its agent is offline, or too old to send it). Red at the server's limit.
+function stationTempText(s) {
+  const t = s && s.temp_c;
+  return `Current Temperature: ${t === null || t === undefined ? '\u2014' : Math.round(t) + '\u00b0 C'}`;
+}
+
 function stationCardHtml(s) {
   const esc = escapeHtml;
   const gpsLine = s.gps_feed
@@ -1703,6 +1773,7 @@ function stationCardHtml(s) {
         <button class="mode-btn station-mode-btn${s.location_mode === 'manual' ? ' active' : ''}" type="button" data-mode="manual">Manual</button>
       </div>
       ${body}
+      <div class="station-temp${s.temp_hot ? ' hot' : ''}">${stationTempText(s)}</div>
     </div>`;
 }
 
@@ -1802,6 +1873,18 @@ function renderSettingsPanel() {
       <div class="settings-note" id="health-webhook-status">Checking…</div>
       <div class="station-form-buttons">
         <button id="health-webhook-test" class="settings-btn settings-btn-ghost">Send Test</button>
+      </div>
+    </div>
+    <div class="settings-group-title">Drone Models</div>
+    <div class="settings-note">
+      Names each drone's make and model from its serial number, using the FAA's
+      Remote ID Declarations of Compliance. A local copy is refreshed weekly;
+      your own entries go in <code>model_overrides.csv</code>.
+    </div>
+    <div class="station-form">
+      <div class="settings-note" id="models-status">Checking…</div>
+      <div class="station-form-buttons">
+        <button id="models-refresh" class="settings-btn settings-btn-ghost">Refresh Now</button>
       </div>
     </div>`;
 
@@ -1971,6 +2054,52 @@ function renderSettingsPanel() {
     }
   }
   refreshHealthWebhookStatus();
+
+  // Re-checked every few seconds while a refresh runs, until the settings
+  // view is closed (the status element goes away with it).
+  async function refreshModelsStatus() {
+    const statusEl = document.getElementById('models-status');
+    const btn = document.getElementById('models-refresh');
+    if (!statusEl || !btn) return;
+    try {
+      const res = await fetch('/api/models/status');
+      const data = await res.json();
+      if (!data.available) {
+        statusEl.textContent = 'Not available — see the server log.';
+        btn.disabled = true;
+        return;
+      }
+      const overrides = `${data.overrides} override${data.overrides === 1 ? '' : 's'}`;
+      if (data.refreshing) {
+        statusEl.textContent = data.declarations
+          ? `Refreshing from the FAA… (${data.declarations} declarations, ${overrides} in use meanwhile)`
+          : 'Downloading from the FAA… The first download takes about half an hour.';
+      } else if (data.last_refresh) {
+        statusEl.textContent = `${data.declarations} declarations, refreshed ${fmtAgo(data.last_refresh)}, ${overrides}.`
+          + (data.last_error ? ` Last attempt: ${data.last_error}` : '');
+      } else {
+        statusEl.textContent = `Not downloaded yet, ${overrides}.`
+          + (data.last_error ? ` Last attempt: ${data.last_error}` : '');
+      }
+      btn.disabled = !!data.refreshing;
+      if (data.refreshing) setTimeout(refreshModelsStatus, 5000);
+    } catch (e) {
+      statusEl.textContent = 'Could not reach the server.';
+      btn.disabled = true;
+    }
+  }
+  refreshModelsStatus();
+
+  const modelsBtn = document.getElementById('models-refresh');
+  if (modelsBtn) {
+    modelsBtn.addEventListener('click', async () => {
+      modelsBtn.disabled = true;
+      try {
+        await fetch('/api/models/refresh', { method: 'POST' });
+      } catch (e) { /* the status line says so */ }
+      setTimeout(refreshModelsStatus, 500);
+    });
+  }
 
   const healthTestBtn = document.getElementById('health-webhook-test');
   if (healthTestBtn) {
@@ -2462,6 +2591,10 @@ function liveRowShell(d) {
         <span class="stale-tag" data-f="stale" hidden>STALE</span>
         <button class="pencil-btn" aria-label="Rename drone" data-f="pencil" data-rename="${key}" data-name=""${isAdmin() ? '' : ' hidden'}>✎</button>
       </div>
+      <div class="track-pills model-pills" data-f="models" hidden>
+        <span class="track-pill model-pill" data-f="make" title="Make" hidden></span>
+        <span class="track-pill model-pill" data-f="model" title="Model" hidden></span>
+      </div>
       <div class="track-sub">
         <span data-f="mac"></span>
         <span class="track-serial" data-f="sn" hidden></span>
@@ -2520,6 +2653,10 @@ function updateLiveRow(row, entry) {
 
   f('stale').hidden = d.status !== 'stale';
 
+  setPill(f('make'), d.make || null);
+  setPill(f('model'), d.model || null);
+  f('models').hidden = !d.make && !d.model;
+
   setText(f('mac'), d.mac || 'No MAC');
   const sn = f('sn');
   sn.hidden = !d.serial;
@@ -2571,7 +2708,7 @@ function historyPointData(idx) {
     && p.op_lon !== null && p.op_lon !== undefined
     && !(p.op_lat === 0 && p.op_lon === 0);
   return {
-    mac: f.mac, serial: f.serial, ua_type: f.ua_type,
+    mac: f.mac, serial: f.serial, ua_type: f.ua_type, make: f.make, model: f.model,
     protocol_version: p.protocol_version || f.protocol_version,
     registration_id: f.registration_id,
     // no live "status" or ticking "tracked_time" in playback — instead,
@@ -2594,6 +2731,7 @@ function historyPointData(idx) {
     transport: p.transport, channel: p.channel, rssi: p.rssi,
     station_id: p.station_id,
     tracked_by: p.tracked_by,
+    station_positions: p.station_positions,
   };
 }
 
@@ -3224,6 +3362,7 @@ function setConnState(connected, label) {
 
 function applyHealth(health) {
   lastHealth = health || {};
+  refreshMasterChip();   // its Wi-Fi and Bluetooth rows come from this
   applyMasterPosition(masterRow());   // the master's icon depends on its link state too
   ['zmq'].forEach(ch => {
     const dot = document.getElementById(`health-${ch}-dot`);
@@ -3248,8 +3387,16 @@ function nodeLightClass(s) {
   return up === 2 ? 'green' : (up === 1 ? 'yellow' : 'red');
 }
 
+// A station not in GPS mode that is fully offline: its decoder link is down
+// and neither sniffer is running (which is also how a silent agent reads).
+// GPS-mode stations have their own rules (gpsIconClass and iconKept).
+function nodeOffline(s) {
+  return s.location_mode !== 'gps' && s.link !== 'green' && nodeLightClass(s) === 'red';
+}
+
 function nodeIconHtml(s) {
-  const cls = ['node-ball', s.stale ? 'stale' : '', gpsIconClass(s)].filter(Boolean).join(' ');
+  const cls = ['node-ball', s.stale ? 'stale' : '', gpsIconClass(s), nodeOffline(s) ? 'offline' : '']
+    .filter(Boolean).join(' ');
   return `<div class="${cls}">${stationIconSvg(s.icon)}<span class="link-dot ${nodeLightClass(s)}"></span></div>`;
 }
 
@@ -3302,6 +3449,16 @@ function applyStations(list) {
     if (!live.has(id)) { stationLayer.removeLayer(nodeMarkers.get(id)); nodeMarkers.delete(id); }
   });
   renderNodeChips(list);
+  // Station cards update their temperature in place. Rebuilding a card would
+  // throw away anything being typed into its fields.
+  document.querySelectorAll('.station-card').forEach(card => {
+    const s = list.find(x => x.id === card.dataset.sid);
+    const el = card.querySelector('.station-temp');
+    if (!s || !el) return;
+    const text = stationTempText(s);
+    if (el.textContent !== text) el.textContent = text;
+    el.classList.toggle('hot', !!s.temp_hot);
+  });
 }
 
 // One top-bar item per station: its ZMQ link to the master, green or red,
@@ -3312,10 +3469,8 @@ function nodeChipHtml(s) {
   return `<span class="health-item" tabindex="0" data-node-id="${escapeHtml(s.id)}">` +
     `<span class="dot ${linkCls}"></span>${name}` +
     `<div class="health-tooltip node-chip-tip">` +
-      `<div class="tt-title">${name} — ZMQ</div>` +
-      gpsLineHtml(s) +
-      `<div class="tt-row"><span class="tt-dot" style="background:#34D399;"></span>Green — connected, receiving data</div>` +
-      `<div class="tt-row"><span class="tt-dot" style="background:#E0645A;"></span>Red — not connected to the master</div>` +
+      `<div class="tt-title">${name} Status</div>` +
+      stationStatusRowsHtml(s, false) +
     `</div></span>`;
 }
 

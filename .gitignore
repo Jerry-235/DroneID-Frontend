@@ -31,3 +31,8 @@ __pycache__/
 venv/
 .venv/
 
+
+# FAA drone-model table, rebuilt from the FAA's API (frontend/faa_models.py)
+faa_models.db
+faa_models.db-wal
+faa_models.db-shm

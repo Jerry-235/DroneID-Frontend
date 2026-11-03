@@ -54,12 +54,16 @@ win over `.env`. Everything is read at startup, so changes need a restart.
 | `DRONEID_HEALTH_WEBHOOK` | none | Enables station health alerts, to their own channel (see *Health alerts*) |
 | `DRONEID_HEALTH_ALERT_AFTER_S` | `60` | How long a component must stay down before it's reported |
 | `DRONEID_HEALTH_STARTUP_GRACE_S` | `120` | Quiet period after start-up while every link connects |
+| `DRONEID_TEMP_ALERT_C` | `90` | CPU temperature (°C) at which a station turns red and a 🌡️ alert is sent |
 | `DRONEID_LANDMARKS_PATH` | `landmarks.csv` beside `places.py` | Optional local place names. See *Place names* |
 | `DRONEID_LANDMARK_RADIUS_M` | `150` | How close a point must be to a landmark to take its name |
 | `DRONEID_NOMINATIM_URL` | OpenStreetMap's public server | Reverse geocoder used when no landmark matches |
 | `DRONEID_GEOCODER_CONTACT` | none | Contact address sent with geocoder requests, as their usage policy asks |
 | `DRONEID_PLACE_TIMEOUT_S` | `2` | How long a new flight waits for its place name before it stays unnamed |
 | `DRONEID_DB_PATH` | `droneid.db` beside `main.py` | SQLite file |
+| `DRONEID_MODELS_DB` | `faa_models.db` beside `main.py` | Local copy of the FAA's drone declarations (see *Drone models*) |
+| `DRONEID_MODEL_OVERRIDES` | `model_overrides.csv` beside `main.py` | Your own serial-to-model entries |
+| `DRONEID_MODELS_REFRESH_DAYS` | `7` | How old the model table gets before it's refreshed. `0` refreshes only when asked |
 | `HOST` / `PORT` | `0.0.0.0` / `8000` | Where to listen |
 
 ### Sniffer health
@@ -70,6 +74,11 @@ after the station, then each remote node. A chip is green while the master's
 ZMQ connection to that station's decoder is up, and red when it isn't. Green
 needs the ZMQ handshake to complete, so a bare TCP connect never flashes it
 green. A quiet decoder, with no drones in range, stays green.
+
+Hovering a chip opens `<station> Status`, one row per part, green for online
+and red for offline: Decoder, Agent (remote nodes only), Wi-Fi and Bluetooth (a
+connected but quiet sniffer counts as online), and GPS for a station in GPS
+mode, which keeps its own Live, Stale and Disconnected colours.
 
 Every connection from the master to a station sends ZMQ heartbeats (every 2
 seconds, 6-second timeout). A link that died without closing, such as a power
@@ -178,6 +187,13 @@ The BASIC section, in order:
 The AIRCRAFT section starts with Serial Number, UA Type and ID, followed by
 Op Status, Height Type, Direction, speeds, position, altitudes, accuracies and
 distances.
+
+Distances to a station are measured from where that station was when the point
+was recorded. Each point stores the position of every station that heard it, so
+replaying a flight in History gives the same distances even after a roaming
+station drives off or a fixed station is relocated. A station with no position
+at the time shows no distance for that point. Points recorded before positions
+were stored, and live drones, use where the stations are now.
 
 Each row can be toggled in **Settings**. The defaults are in `static/index.html`
 under `FIELD_DEFAULTS`.
@@ -309,6 +325,45 @@ the survivor keeps the oldest flight's catalog key.
 they hold your nicknames, and an aircraft with no flights on record is still a
 valid entry.
 
+## Drone models
+
+Each drone's make and model is worked out from its Remote ID serial and shown
+first in the details panel (Live and History), and as the Discord alert heading
+when the drone has no nickname. A nickname always wins.
+
+Every drone sold for US Remote ID has an FAA Declaration of Compliance naming
+its make and model and the serials it covers. `faa_models.py` keeps a local copy
+of the accepted ones in `faa_models.db`, so a lookup needs no internet. A serial
+is checked against, in order:
+
+1. `model_overrides.csv`: your own `prefix,model` lines, for drones with no FAA
+   declaration. It ships with `1581FB34,DJI Lito X1`. The longest matching prefix
+   wins, and edits are picked up within a few seconds.
+2. The FAA declarations: a listed serial, or a declared serial range.
+3. The manufacturer code (the serial's first four characters): an unmatched
+   serial from a known maker shows as e.g. `DJI (model unknown)`, and the alert
+   heading reads `DJI Drone Detected`.
+
+Add-on broadcast modules are marked, e.g. `Dronetag Mini (broadcast module)`.
+Drones with no serial (MAC only) show no model.
+
+The table is downloaded from the FAA's public API (`uasdoc.faa.gov`) about 30
+seconds after start-up if it's empty, then refreshed weekly. The first download
+makes about a thousand requests, a second apart, so it takes around 20 to 30
+minutes and builds a file of about 200 MB. Later refreshes fetch only
+declarations that changed, usually a handful of requests. If the FAA can't be
+reached, the last good table stays in use and the next hourly check tries again.
+*Settings > Drone Models* shows the table's state and has a *Refresh Now* button
+(admin).
+
+From the command line:
+
+```
+python3 faa_models.py --refresh               # refresh now
+python3 faa_models.py --lookup 1581F6Z9...    # look serials up
+python3 faa_models.py --status
+```
+
 ## Discord alerts
 
 One message per genuinely new detection. The test drone is excluded. The message
@@ -380,11 +435,42 @@ Wi-Fi sniffer not reporting - Decoder, agent and Bluetooth sniffer still up
 Decoder online - Agent offline
 
 ## ✅ Node 2 Agent Online
+Agent and Wi-Fi sniffer online - Bluetooth sniffer offline
+
+## ✅ Node 2 Bluetooth Sniffer Online
 All components reporting
 ```
 
 ❌ means the whole station is down, ⚠️ that part of it is, and ✅ that something
-came back. As with drone alerts, the second line renders as a code block.
+came back. A ✅ message names what came back and what's still offline. While
+the agent is offline the sniffers can't be seen, so its return also names the
+sniffers that are working. A part still offline gets its own ✅ when it returns,
+and the last one back reads "All components reporting". As with drone alerts, the second line renders as a code block.
+
+### Temperature
+
+Each station's CPU temperature shows at the bottom of its card on the Station
+page, as `Current Temperature: 61° C`, updated live. It turns red at
+`DRONEID_TEMP_ALERT_C` (90 °C). The master reads its own, and each node's
+`node_agent` sends its temperature with every report. A node running an older
+agent shows a dash. The reading is the CPU's own sensor, the same one `sensors`
+shows: Intel `coretemp` (the hottest core) or AMD `k10temp`. Without one, it uses
+the CPU's thermal zone (`x86_pkg_temp`, Intel Atom `soc_dts`, or an Arm board's
+`soc-thermal`). The board's ACPI zone (`acpitz`) is never preferred, since it's
+often an ambient reading well below the CPU's.
+
+A station that stays at or above the limit for `DRONEID_HEALTH_ALERT_AFTER_S`
+(60 seconds) posts one alert to the health channel. Once it has cooled to 5 °C
+below the limit, one all-clear follows, so a station hovering at the limit
+doesn't repeat itself:
+
+```
+## 🌡️ Node 2 High Temperature
+92° C - limit 90° C
+
+## ✅ Node 2 Temperature Normal
+80° C
+```
 
 Setup: create a webhook in the health channel the same way as for drone alerts,
 put its URL in `DRONEID_HEALTH_WEBHOOK`, and restart. Settings > Health Alerts
@@ -414,6 +500,8 @@ Responses over 1 KB are gzipped. A long flight's point list shrinks about 20×.
 | `POST /api/discord_webhook/test` | Sends a test alert, including the role-ping path |
 | `GET /api/health_webhook` | `{"configured": true\|false}`. Never the URL |
 | `POST /api/health_webhook/test` | Sends a test health alert to the health channel. Admin-only |
+| `GET /api/models/status` | The drone-model table: `declarations`, `last_refresh`, `last_error`, `refreshing`, `overrides` |
+| `POST /api/models/refresh` | Starts a refresh from the FAA and returns at once. Admin-only |
 | `POST /api/test/drone/start`, `/stop`, `GET /status` | The synthetic test drone |
 
 ## Database
@@ -427,6 +515,9 @@ Responses over 1 KB are gzipped. A long flight's point list shrinks about 20×.
   it, its radio (`transport`), its Wi-Fi channel and RSSI (`channel`, `rssi`), and
   its `segment`.
 - `app_settings`: the station's home point.
+
+Drone models live in a separate file, `faa_models.db`, which can be deleted at
+any time: it's rebuilt from the FAA on the next start.
 
 Columns are added automatically at startup when they're missing, so an older
 database upgrades in place.
@@ -457,6 +548,9 @@ database upgrades in place.
   MAC fallback), flight lifecycle, Discord alerts, REST and WebSocket.
 - `db.py`: SQLite layer. Tables are described under *Database*.
 - `places.py`: place names, from `landmarks.csv` or OpenStreetMap.
+- `faa_models.py`: drone make and model from the serial, from the FAA's
+  declarations. See *Drone models*.
+- `model_overrides.csv`: your own serial-to-model entries.
 - `nodes.py`: the stations file, its validation, and the state each station
   reports.
 - `node_agent.py`: the position beacon each remote node runs. See `MULTI-NODE.md`.
