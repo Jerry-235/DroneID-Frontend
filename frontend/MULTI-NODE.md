@@ -62,13 +62,75 @@ A station with no agent still works, but its sniffer lights stay red.
 A station's position is set on the master, in `nodes.json` or the admin page,
 not on the node. A fixed node needs no position on the node itself.
 
+### Front LEDs (NanoPi R5C)
+
+With `--leds`, the agent drives the board's four front LEDs from the node's
+state:
+
+| LED | Shows |
+|---|---|
+| SYS | Solid red while the agent and the node's decoder both run. Otherwise the kernel's normal heartbeat blink, so a stopped agent or decoder looks like a plain board |
+| WAN | On while the master is connected and listening. Off within about 8 seconds of losing it, power cuts included |
+| LAN | On with both sniffers running, slow blink (1 s) with one, off with neither |
+| WL | Fast blink for 10 seconds after each drone detection |
+
+The agent finds the LEDs under `/sys/class/leds` by name. It knows both the
+mainline kernel's names (`red:power`, `green:wan`, `green:lan`, `green:wlan`) and
+FriendlyElec's (`sys_led`, `wan_led`, `lan_led`, `wlan_led`), with or without a
+port number (`lan1_led` counts as LAN), and leaves any other LEDs alone, such
+as a Wi-Fi card's (`ath9k-phy0`) or storage's (`mmc2::`). The log line
+`Driving LEDs sys=..., wan=..., lan=..., wl=...` shows what it found.
+
+Some images don't name every front LED for what it shows. On one R5C the four
+are `sys_led`, `wan_led`, `lan1_led` and `lan2_led`, with `lan2_led` being the
+LED labelled WL. Say so with `--led-map`, on both the run and the stop lines:
+
+```
+--led-map wl=lan2_led
+```
+
+To find out which front LED a name is, stop the agent and light it by hand:
+`echo none | sudo tee /sys/class/leds/<name>/trigger`, then
+`echo 1 | sudo tee /sys/class/leds/<name>/brightness`. To see the WAN state it watches the master's
+subscription to its report socket, and for SYS and WL it listens to the node's
+decoder output on the `--bind` address, port 4224 (change it with
+`--decoder-zmq`). The master needs nothing new.
+
+One-time setup on the node, so the agent can drive the LEDs without root:
+
+```bash
+sudo groupadd -f leds
+sudo usermod -aG leds jerry
+echo 'SUBSYSTEM=="leds", ACTION=="add", RUN+="/bin/chgrp leds /sys%p/brightness /sys%p/trigger", RUN+="/bin/chmod g+w /sys%p/brightness /sys%p/trigger"' \
+  | sudo tee /etc/udev/rules.d/99-droneid-leds.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger --subsystem-match=leds --action=add
+ls -l /sys/class/leds/*/brightness       # group "leds", group-writable
+```
+
+Then add `--leds` to the agent's service, and a stop hook that puts the LEDs
+back even if the agent crashes:
+
+```
+ExecStart=/home/jerry/DroneID-Frontend/.venv/bin/python node_agent.py --bind 100.100.10.91:4230 --gpsd 127.0.0.1:2947 --leds
+ExecStopPost=/home/jerry/DroneID-Frontend/.venv/bin/python node_agent.py --reset-leds
+```
+
+If the agent can't write an LED, it logs one warning naming the file and
+carries on without LEDs. Images often set the LAN and WAN LEDs to follow their
+network ports. The agent takes them over at start, checks every 2 seconds, and
+takes back any LED something else has set again, logging once which trigger it
+found (for example `netdev`). Check what an LED is following with
+`cat /sys/class/leds/<name>/trigger`; the active one is in brackets.
+
 ## On the map
 
 Each station is drawn with the icon chosen for it on the Station page, with a
 small dot. The dot and the top-bar chip show different things:
 
 - **Top-bar chip:** green while the master is connected to that station's
-  decoder, red when it isn't. A quiet decoder stays green.
+  decoder, red when it isn't. A quiet decoder stays green. Hover it for the
+  station's status: Decoder, Agent, Wi-Fi, Bluetooth and, in GPS mode, GPS.
 - **Map dot:** the station's sniffers. Green when both Wi-Fi and Bluetooth are
   connected, whether sending or quiet, yellow when one is, red when neither is.
 - **Hover:** the title (for example `Station A - CONNECTED`, which follows the
@@ -77,6 +139,10 @@ small dot. The dot and the top-bar chip show different things:
   connected but quiet for `DRONEID_HEALTH_TIMEOUT_S` (12 seconds by default), and
   red means it isn't connected, or the agent hasn't reported for
   `DRONEID_NODE_STATUS_STALE_S` (15 seconds by default).
+
+A station with a set (manual) position that is fully offline, with its decoder
+link down and neither sniffer reporting, is faded into the map but stays where
+it is. A GPS station follows its GPS state instead.
 
 Both links use ZMQ heartbeats, so a station that loses power or network goes
 red within seconds and comes back on its own when it returns. No restart of
