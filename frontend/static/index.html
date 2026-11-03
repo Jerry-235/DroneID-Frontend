@@ -2613,6 +2613,13 @@ function liveRowShell(d) {
     </div>`;
 }
 
+// The make and model bubbles for a History row; nothing when neither is known.
+function modelPillsHtml(d) {
+  if (!d.make && !d.model) return '';
+  const pill = (v, t) => v ? `<span class="track-pill model-pill" title="${t}">${escapeHtml(v)}</span>` : '';
+  return `<div class="track-pills model-pills">${pill(d.make, 'Make')}${pill(d.model, 'Model')}</div>`;
+}
+
 function setText(el, text) {
   if (el && el.textContent !== text) el.textContent = text;
 }
@@ -3012,6 +3019,7 @@ async function loadHistoryList(opts = {}) {
           ${nameLineHtml(f.display_name, historyRawIdLabel(f))}
           ${isAdmin() ? `<button class="pencil-btn" aria-label="Rename flight" data-rename="${escapeHtml(f.catalog_key)}" data-name="${escapeHtml(f.display_name)}">✎</button>` : ''}
         </div>
+        ${modelPillsHtml(f)}
         <div class="track-sub">
           <span class="track-date">${fmtDateTime(f.started_at)}</span>
         </div>

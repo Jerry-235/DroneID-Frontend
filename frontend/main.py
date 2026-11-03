@@ -140,6 +140,9 @@ async def models_refresher():
 
 
 def _with_model(flight: dict) -> dict:
+    """Adds make and model to a stored flight. Worked out from the serial when
+    it's read, so older flights get them too and pick up later corrections to
+    the table; nothing about models is stored in droneid.db."""
     flight.update(drone_model(flight.get("serial")))
     return flight
 
