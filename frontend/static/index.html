@@ -358,11 +358,10 @@
     width:6px; height:6px; border-radius:50%; background:var(--text-muted);
     flex:0 0 auto;
   }
-  .op-dot.op-yes{
-    background:#34D399; box-shadow:0 0 6px #34D399;
-    animation:op-pulse 1.6s ease-in-out infinite;
-  }
-  @keyframes op-pulse{ 0%,100%{opacity:1;} 50%{opacity:0.4;} }
+  /* A live (not stale) drone's dot pulses, in the list and the details panel. */
+  .status-chip.live-pulse{ animation:live-pulse 1.6s ease-in-out infinite; }
+  @keyframes live-pulse{ 0%,100%{opacity:1;} 50%{opacity:0.4;} }
+  @media (prefers-reduced-motion: reduce){ .status-chip.live-pulse{ animation:none; } }
   .track-date{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-muted); }
   /* The wrapper takes the stretch so the name keeps only its text width and
      the copy button sits at the end of the ID, with the pencil pinned right.
@@ -1528,7 +1527,7 @@ function panelView() {
       warn: d.raw_units_warning
         ? 'Altitude, height and speed arrived in an unrecognised raw encoding and are shown unconverted.'
         : null,
-      subHtml: `<span class="status-chip" style="background:${stale ? STALE_COLOR : color};` +
+      subHtml: `<span class="status-chip${stale ? '' : ' live-pulse'}" style="background:${stale ? STALE_COLOR : color};` +
                `box-shadow:${stale ? 'none' : `0 0 6px ${color}`}"></span>${stale ? 'Stale' : 'Live'}`,
       data: d,
       basicColor: color,
@@ -1625,7 +1624,10 @@ function renderDetailPanel() {
   if (!view) { panelState.sig = null; panelState.viewKey = null; panelState.copySig = null; return; }
 
   document.getElementById('dp-name').textContent = view.name;
-  document.getElementById('dp-sub').innerHTML = view.subHtml;
+  // Only when it changes: rewriting it on every update would restart the
+  // live dot's pulse each time.
+  const sub = document.getElementById('dp-sub');
+  if (sub._html !== view.subHtml) { sub.innerHTML = view.subHtml; sub._html = view.subHtml; }
   document.getElementById('dp-rename').style.display = view.renameKey && isAdmin() ? '' : 'none';
 
   // Rebuilt only when what it would copy changes — not on every tick, or
@@ -2726,6 +2728,7 @@ function updateLiveRow(row, entry) {
   const chip = f('chip');
   chip.style.background = chipColor;
   chip.style.boxShadow = isLive ? `0 0 6px ${chipColor}` : 'none';
+  chip.classList.toggle('live-pulse', isLive);
 
   // The one part that still needs new markup — but only when the name or its
   // copy button actually changes, so the button isn't rebuilt under your
