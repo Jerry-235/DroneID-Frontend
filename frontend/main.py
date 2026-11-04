@@ -635,6 +635,16 @@ class TrackStore:
                 old.key = key
                 if old_key != key and self.on_rekey:
                     self.on_rekey(old_key, key)
+        elif mac and key != mac and mac in self.tracks:
+            # This MAC was being followed on its own (location bursts that
+            # arrived before its Basic ID, typically Bluetooth, whose address
+            # differs from the Wi-Fi one) while the aircraft already had a
+            # serial-keyed track. Now that the MAC is known to be this serial,
+            # the stray track goes: otherwise it lingers on the map as a second
+            # aircraft and keeps its own flight open until it times out.
+            self.tracks.pop(mac)
+            if self.on_rekey:
+                self.on_rekey(mac, key)
 
         if mac:
             track.mac = mac
@@ -961,6 +971,58 @@ def extract_bursts(data) -> list[tuple[Optional[str], list[dict]]]:
     return []
 
 
+# ---- new-drone alert de-duplication ----
+# A new flight normally means a new alert, but the same aircraft can open
+# a second flight without having really gone away: it comes back after a
+# gap longer than the merge window, a Bluetooth burst arrives under an
+# address not yet tied to its serial, or a garbled Basic ID decodes as a
+# slightly different serial. So an alert is held back when any identity of
+# the aircraft (serial, MAC or catalog key) was heard on another flight within
+# ALERT_COOLDOWN_S; and a track with no serial yet waits up to
+# ALERT_SERIAL_WAIT_S for one, so it can be recognised before it alerts.
+ALERT_COOLDOWN_S = float(os.environ.get("DRONEID_ALERT_COOLDOWN_MIN", "15")) * 60
+ALERT_SERIAL_WAIT_S = 15.0
+# identity -> (when last heard, the flight that heard it)
+_identity_seen: dict[str, tuple[float, int]] = {}
+
+
+def _identities(key: Optional[str], mac: Optional[str], serial: Optional[str]) -> list[str]:
+    out = []
+    if key:
+        out.append(f"key:{key}")
+    if serial:
+        out.append(f"serial:{serial.upper()}")
+    if mac:
+        out.append(f"mac:{mac.lower()}")
+    return out
+
+
+def _seen_elsewhere(idents: list[str], flight_id: int, now: float) -> Optional[str]:
+    """The first identity heard on a different flight within ALERT_COOLDOWN_S."""
+    for ident in idents:
+        seen = _identity_seen.get(ident)
+        if seen and seen[1] != flight_id and now - seen[0] <= ALERT_COOLDOWN_S:
+            return ident
+    return None
+
+
+async def seed_identity_seen():
+    """After a restart, the flights that ended within ALERT_COOLDOWN_S count as
+    heard, so a drone that was up just before the restart doesn't alert again."""
+    now = time.time()
+    for fid, key, mac, serial, last in await db.recent_flight_identities(now - ALERT_COOLDOWN_S):
+        _note_seen(_identities(key, mac, serial), fid, last)
+
+
+def _note_seen(idents: list[str], flight_id: int, now: float):
+    for ident in idents:
+        _identity_seen[ident] = (now, flight_id)
+    # Bounded: forget anything older than the cooldown now and again.
+    if len(_identity_seen) > 5000:
+        for ident in [i for i, (t, _) in _identity_seen.items() if now - t > ALERT_COOLDOWN_S]:
+            _identity_seen.pop(ident, None)
+
+
 # One lock per aircraft. Two stations can hear the same new aircraft at the same
 # moment; without this both would open a flight and both would send the alert.
 _flight_locks: dict[str, asyncio.Lock] = {}
@@ -1089,11 +1151,25 @@ async def _persist_update_locked(track: DroneTrack):
 
     track.nickname = nickname
 
+    idents = _identities(key, track.mac, track.serial)
+    alert = False
+    if is_new and not resumed and key != TEST_DRONE_SERIAL:
+        # Decided before this flight's own sighting is recorded below.
+        repeat = _seen_elsewhere(idents, track.flight_id, track.last_seen)
+        if repeat:
+            log.info("New flight %s for %s: no alert, %s was heard %.0fs ago on flight %s",
+                     track.flight_id, key, repeat, track.last_seen - _identity_seen[repeat][0],
+                     _identity_seen[repeat][1])
+        else:
+            alert = True
+    _note_seen(idents, track.flight_id, track.last_seen)
+
     if is_new and not resumed and key != TEST_DRONE_SERIAL:
         # Name the flight once, from where the drone was first seen, and use
         # that same name for the Discord alert. Fire-and-forget so a slow
         # geocoder never stalls ingest.
-        spawn(name_new_flight(active_flights[key], track, track.lat, track.lon), "new-flight")
+        spawn(name_new_flight(active_flights[key], track, track.lat, track.lon, alert=alert),
+              "new-flight")
 
 
 def zmq_ctx():
@@ -2035,19 +2111,45 @@ async def health_alert_worker():
 
 
 async def name_new_flight(flight_id, track: "DroneTrack", lat: Optional[float] = None,
-                          lon: Optional[float] = None):
+                          lon: Optional[float] = None, alert: bool = True):
     """Looks up the place name for a new flight's first fix, saves it on the
     flight so History never looks it up again, and posts the Discord alert with
-    it. resolve() never raises and is bounded by its own timeout, so a slow or
-    unreachable geocoder costs the name, nothing more. If no name is found the
-    flight stays unnamed and the backfill script can try again later."""
+    it (unless alert is False: the aircraft was heard recently, see
+    ALERT_COOLDOWN_S). resolve() never raises and is bounded by its own timeout,
+    so a slow or unreachable geocoder costs the name, nothing more. If no name
+    is found the flight stays unnamed and the backfill script can try again."""
     place = await places.resolve(lat, lon)
     if place:
         await db.set_flight_location(flight_id, place.name)
-    if not discord_webhook_url:
+    if not (alert and discord_webhook_url):
+        return
+    if not await _alert_still_wanted(flight_id, track):
         return
     message = build_new_drone_message(track, place)
     await enqueue_alert(message)
+
+
+async def _alert_still_wanted(flight_id: int, track: "DroneTrack") -> bool:
+    """For a track with no serial yet: waits up to ALERT_SERIAL_WAIT_S for its
+    Basic ID, then checks again whether it's an aircraft already being
+    tracked. No alert if its flight was folded into another meanwhile (its
+    address turned out to belong to a serial already on the map), or if the
+    serial it now has was heard on another flight recently."""
+    if track.serial:
+        return True
+    waited = 0.0
+    while not track.serial and waited < ALERT_SERIAL_WAIT_S:
+        step = min(1.0, ALERT_SERIAL_WAIT_S - waited)
+        await asyncio.sleep(step)
+        waited += step
+    if active_flights.get(track.key) != flight_id:
+        log.info("Flight %s: no alert, it was folded into another track", flight_id)
+        return False
+    repeat = _seen_elsewhere(_identities(None, None, track.serial), flight_id, time.time())
+    if repeat:
+        log.info("Flight %s: no alert, %s is already being tracked", flight_id, repeat)
+        return False
+    return True
 
 
 # ---- synthetic test drone, for exercising the real pipeline without RF hardware ----
@@ -2323,6 +2425,7 @@ async def lifespan(_app: "FastAPI"):
     global station_cache, station_config, fleet, _alert_queue, _health_queue, model_catalog
     db.init(os.environ.get("DRONEID_DB_PATH", os.path.join(os.path.dirname(__file__), "droneid.db")))
     catalog_nicknames.update(await db.get_catalog())
+    await seed_identity_seen()
     station_cache = parse_station(await db.get_setting("station"))
     station_config = parse_station_config(await db.get_setting(STATION_CONFIG_KEY))
     # A malformed nodes.json stops startup on purpose: the error names the

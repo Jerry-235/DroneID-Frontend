@@ -371,6 +371,14 @@ def _end_flight(flight_id, ts):
 _LAST_ACTIVITY_SQL = "COALESCE(f.ended_at, f.last_point_at, f.started_at)"
 
 
+def _recent_flight_identities(since_ts):
+    """(id, catalog_key, mac, serial, last activity) of flights active since since_ts."""
+    conn = _require_conn()
+    return conn.execute(
+        f"SELECT f.id, f.catalog_key, f.mac, f.serial, {_LAST_ACTIVITY_SQL} FROM flights f "
+        f"WHERE {_LAST_ACTIVITY_SQL} >= ? ORDER BY {_LAST_ACTIVITY_SQL}", (since_ts,)).fetchall()
+
+
 def _find_resumable_flight(catalog_key, mac, serial, nickname, cutoff_ts, exclude_ids):
     """Most recent flight that plausibly belongs to the same aircraft as the
     track described by (catalog_key, mac, serial, nickname) and that stopped
@@ -850,6 +858,10 @@ async def find_resumable_flight(catalog_key, mac, serial, nickname, cutoff_ts, e
     return await run(
         _find_resumable_flight, catalog_key, mac, serial, nickname, cutoff_ts, list(exclude_ids or [])
     )
+
+
+async def recent_flight_identities(since_ts):
+    return [tuple(r) for r in await run(_recent_flight_identities, since_ts)]
 
 
 async def resume_flight(flight_id, catalog_key, mac, serial) -> int:

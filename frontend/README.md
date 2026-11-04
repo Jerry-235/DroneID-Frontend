@@ -51,6 +51,7 @@ win over `.env`. Everything is read at startup, so changes need a restart.
 | `DRONEID_TRUST_FORWARDED_FOR` | off | Read the client address from `X-Forwarded-For`. Only behind a proxy that overwrites that header |
 | `DRONEID_DISCORD_WEBHOOK` | none | Enables alerts (see *Discord alerts*) |
 | `DRONEID_DISCORD_ROLE_ID` | none | Numeric role ID to ping on each alert |
+| `DRONEID_ALERT_COOLDOWN_MIN` | `15` | No new-drone alert for an aircraft heard within this many minutes (see *Discord alerts*) |
 | `DRONEID_HEALTH_WEBHOOK` | none | Enables station health alerts, to their own channel (see *Health alerts*) |
 | `DRONEID_HEALTH_ALERT_AFTER_S` | `60` | How long a component must stay down before it's reported |
 | `DRONEID_HEALTH_STARTUP_GRACE_S` | `120` | Quiet period after start-up while every link connects |
@@ -415,8 +416,20 @@ python3 faa_models.py --status
 
 ## Discord alerts
 
-One message per genuinely new detection. The test drone is excluded. The message
-gives the distance from the nearest station, whether the drone is landed or
+One message per genuinely new detection. The test drone is excluded.
+
+A drone that was heard within the last `DRONEID_ALERT_COOLDOWN_MIN` minutes (15
+by default) doesn't alert again, even when it starts a new flight: one that
+comes back after a gap longer than the merge window, a Bluetooth burst under an
+address not yet tied to its serial, or a garbled Basic ID that decodes as a
+slightly different serial from the same MAC. It matches on serial, MAC or
+catalog key, and the minutes count from when the drone was last heard, so one
+that has been gone for longer than that alerts again. A track that has no
+serial yet waits up to 15 seconds for one before alerting, so it can be
+recognised first. Skipped alerts are logged with the reason. Flights that
+ended within the cooldown before a restart count too.
+
+The message gives the distance from the nearest station, whether the drone is landed or
 flying, speed, heading and whether an operator position was found:
 
 ```

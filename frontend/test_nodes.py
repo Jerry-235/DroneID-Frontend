@@ -748,6 +748,91 @@ check("facets list makes and models with flight counts, unknown last",
       fm_["DJI"]["count"] == 6 and fm_["DJI"]["models"] == [{"model": "Mini 4 Pro", "count": 6}]
       and facets["makes"][-1]["make"] == main.UNKNOWN_FILTER and fm_[main.UNKNOWN_FILTER]["count"] == 1, facets)
 
+print("\n[new-drone alerts: one per aircraft]")
+db.init(os.path.join(mdir, "alerts.db"))
+for d_ in (main.store.tracks, main.store.mac_to_key, main.active_flights, main.last_status_sent,
+           main.catalog_nicknames, main._identity_seen):
+    d_.clear()
+main.pending_refile.clear()
+sent = []
+async def fake_enqueue(message):
+    sent.append(message)
+async def no_place(lat, lon):
+    return None
+main.enqueue_alert = fake_enqueue
+main.places.resolve = no_place
+main.discord_webhook_url = "https://example.invalid/webhook"
+main.ALERT_SERIAL_WAIT_S = 0.3
+saved_window = main.FLIGHT_MERGE_WINDOW_S
+main.FLIGHT_MERGE_WINDOW_S = 0      # every reappearance is a new flight, as after a long gap
+
+def rid_burst(mac, serial=None, lat=26.0, lon=-97.2, ts="1000"):
+    msgs = [{"MAC": mac}]
+    if serial:
+        msgs.append({"Basic ID": {"id": serial, "id_type": "Serial Number"}})
+    msgs.append({"Location/Vector Message": {"latitude": lat, "longitude": lon, "timestamp": ts,
+                                             "geodetic_altitude": "80 m"}})
+    return msgs
+
+async def heard(mac, serial=None, ts="1000"):
+    m, cleaned = main.extract_bursts(rid_burst(mac, serial, ts=ts))[0]
+    track = main.store.apply_burst(m, cleaned, station_id="master")
+    await main.persist_update(track)
+    return track
+
+async def gone(key):
+    """What the sweeper does when a track has been silent for DROP_AFTER_S."""
+    main.store.tracks.pop(key, None)
+    main.store.forget_mac_for(key)
+    fid = main.active_flights.pop(key, None)
+    if fid:
+        await db.end_flight(fid)
+
+async def settle():
+    await asyncio.sleep(0.5)    # let the alert tasks (and any serial wait) finish
+
+async def alert_scenarios():
+    out = {}
+    await heard("60:60:1f:00:00:01", "1581F6Z9000000000001"); await settle()
+    out["first"] = len(sent)
+    await gone("1581F6Z9000000000001")
+    await heard("60:60:1f:00:00:01", "1581F6Z9000000000001", ts="1100"); await settle()
+    out["back after a gap"] = len(sent)
+    # A garbled Basic ID: same MAC, slightly different serial, while the real one is live.
+    await heard("60:60:1f:00:00:01", "1581F6Z9000000000OO1", ts="1101"); await settle()
+    out["garbled serial"] = len(sent)
+    # Bluetooth location bursts under a new address, then its Basic ID ties it to the serial.
+    stray = await heard("4a:00:00:00:00:02", None, ts="1102")
+    await heard("4a:00:00:00:00:02", "1581F6Z9000000000001", ts="1103"); await settle()
+    out["bluetooth stray"] = len(sent)
+    out["stray gone from the map"] = "4a:00:00:00:00:02" not in main.store.tracks
+    out["stray flight closed"] = "4a:00:00:00:00:02" not in main.active_flights
+    await heard("60:60:1f:00:00:09", "1581F6Z9000000000009", ts="1104"); await settle()
+    out["another drone"] = len(sent)
+    # A MAC-only drone that never sends a Basic ID still alerts, after the wait.
+    await heard("02:aa:bb:cc:dd:ee", None, ts="1105"); await settle()
+    out["never identified"] = len(sent)
+    main.ALERT_COOLDOWN_S = 0
+    await gone("1581F6Z9000000000009")
+    await heard("60:60:1f:00:00:09", "1581F6Z9000000000009", ts="1200"); await settle()
+    out["no cooldown"] = len(sent)
+    return out
+res = asyncio.run(alert_scenarios())
+check("a new drone alerts once", res["first"] == 1, res)
+check("coming back as a new flight within the cooldown doesn't alert again", res["back after a gap"] == 1, res)
+check("a garbled serial from the same MAC doesn't alert", res["garbled serial"] == 1, res)
+check("a Bluetooth address later tied to a live serial doesn't alert, and its track goes",
+      res["bluetooth stray"] == 1 and res["stray gone from the map"] and res["stray flight closed"], res)
+check("a different drone alerts", res["another drone"] == 2, res)
+check("a drone that never sends its serial alerts after the wait", res["never identified"] == 3, res)
+check("with no cooldown, a reappearance alerts again", res["no cooldown"] == 4, res)
+main.ALERT_COOLDOWN_S = 15 * 60
+main.FLIGHT_MERGE_WINDOW_S = saved_window
+main.discord_webhook_url = None
+asyncio.run(main.seed_identity_seen())
+check("after a restart, recently ended flights count as heard",
+      "serial:1581F6Z9000000000001" in main._identity_seen and "mac:60:60:1f:00:00:01" in main._identity_seen)
+
 main.model_catalog = None
 check("no catalog -> lookups quietly return None", main.drone_model("1581F6Z9000000000001") == {"make": None, "model": None})
 
