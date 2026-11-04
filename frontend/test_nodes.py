@@ -581,6 +581,41 @@ faa.down = True
 summary = cat.refresh()
 check("an unreachable FAA keeps the last copy and records the error",
       "error" in summary and M("1581F6Z9ABCDEF123456") == ("DJI", "Mini 4 Pro") and cat.status()["last_error"], summary)
+
+# A connection that drops part way: what was fetched is kept, the refresh time
+# isn't moved (so the next hourly check carries on), and that check only
+# fetches what's still missing.
+cat2 = faa_models.ModelCatalog(os.path.join(mdir, "m2.db"), overrides, fetch=None, pause_s=0)
+faa2 = FakeFaa()
+class DropAfter:
+    def __init__(self, n): self.n = n
+    def __call__(self, url, accept):
+        self.n -= 1
+        if self.n < 0:
+            raise urllib.error.URLError("connection dropped")
+        return faa2(url, accept)
+cat2.fetch = DropAfter(3)      # the list, then one declaration's two requests
+summary = cat2.refresh()
+check("a dropped connection keeps what was fetched and leaves the refresh due",
+      "error" in summary and cat2.status()["declarations"] == 1 and cat2.status()["last_refresh"] is None
+      and cat2.needs_refresh(), (summary, cat2.status()))
+cat2.fetch, faa2.calls = faa2, 0
+summary = cat2.refresh()
+check("the next refresh fetches only what's missing",
+      summary["fetched"] == 2 and summary["unchanged"] == 1 and faa2.calls == 5 and not cat2.needs_refresh(), summary)
+faa2.items = []
+summary = cat2.refresh()
+check("a list that suddenly lost most declarations isn't trusted",
+      "error" in summary and cat2.status()["declarations"] == 3 and M("1581F6Z9ABCDEF123456") == ("DJI", "Mini 4 Pro"), summary)
+faa2.items = [dict(i) for i in FAKE_LIST]
+cat2.pause_s = 0.1      # slow enough that it's still running when checked
+check("start_refresh reports running straight away, and refuses a second",
+      cat2.start_refresh() and cat2.status()["refreshing"] and not cat2.start_refresh())
+for _ in range(100):
+    if not cat2.status()["refreshing"]:
+        break
+    time.sleep(0.02)
+check("a background refresh finishes and frees the lock", not cat2.status()["refreshing"])
 with open(overrides, "a") as f:
     f.write("1581F6Z9ABC,DJI,Mini 4 Pro (mine)\n")
 os.utime(overrides, (time.time() + 10, time.time() + 10))

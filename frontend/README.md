@@ -328,8 +328,9 @@ GPS state shows on each icon's hover card and on the station's top-bar name:
 
 ## Admin view
 
-The admin-only endpoints (drone rename, station location, Discord and health-alert tests, debug drone,
-flight merge and delete) are refused unless the request comes from a network in
+The admin-only endpoints (drone rename, station settings, Discord and
+health-alert tests, debug drone, drone-model refresh, flight merge and delete)
+are refused unless the request comes from a network in
 `DRONEID_ADMIN_NETS`. The default is the Tailscale address ranges plus loopback,
 so anyone on your tailnet is an admin and anyone else isn't. `GET /api/access`
 reports what the server allows for the caller, along with the address it sees.
@@ -396,8 +397,11 @@ The table is downloaded from the FAA's public API (`uasdoc.faa.gov`) about 30
 seconds after start-up if it's empty, then refreshed weekly. The first download
 makes about a thousand requests, a second apart, so it takes around 20 to 30
 minutes and builds a file of about 200 MB. Later refreshes fetch only
-declarations that changed, usually a handful of requests. If the FAA can't be
-reached, the last good table stays in use and the next hourly check tries again.
+declarations that changed, usually a handful of requests. The time of the last
+refresh is kept in `faa_models.db`, so restarting the server doesn't start one.
+If the FAA can't be reached, or the connection drops part way, what was fetched
+is kept, the last good table stays in use, and the next hourly check carries on
+from there.
 *Settings > Drone Models* shows the table's state and has a *Refresh Now* button
 (admin).
 
@@ -538,7 +542,6 @@ Responses over 1 KB are gzipped. A long flight's point list shrinks about 20×.
 | `GET /api/flights/{id}` | One flight's metadata and its full point list |
 | `POST /api/flights/merge` | `{"flight_ids": [1,2]}` returns `{"flight_id": <survivor>, "merged": n}`. 400 on fewer than two, 404 for an unknown id, 409 for a mismatch or an in-progress flight |
 | `POST /api/flights/delete` | `{"flight_ids": [1,2]}` returns `{"deleted": n}`. 409 if one is in progress |
-| `GET /api/drones/catalog` | All catalog-key-to-nickname mappings |
 | `PATCH /api/drones/{catalog_key}/name` | `{"nickname": "Drone 1"}`. An empty string clears it back to serial or MAC. Admin-only |
 | `GET /api/station` | The home point, `{"lat": , "lon": }`. Set it through `station-config` |
 | `PUT /api/station-config/{station_id}` | A station's name, location mode, manual position and map icon (`ball`, `ring`, `hex`, `radio`, `car`). Admin-only |

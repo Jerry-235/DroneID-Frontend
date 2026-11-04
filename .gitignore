@@ -36,3 +36,4 @@ venv/
 faa_models.db
 faa_models.db-wal
 faa_models.db-shm
+model_overrides.csv

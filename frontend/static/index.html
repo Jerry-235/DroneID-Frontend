@@ -182,6 +182,9 @@
   }
   /* Make and model, between the name and the MAC/SN line. */
   .track-pills.model-pills{ margin:4px 0 2px; }
+  /* display:flex above would otherwise beat the hidden attribute, leaving an
+     empty gap under the name of a drone with no known make. */
+  .track-pills[hidden]{ display:none; }
   .track-pill.model-pill{ white-space:normal; overflow-wrap:anywhere; }
   .track-pill{
     background:var(--bg); border:1px solid var(--hairline); color:var(--text);
@@ -274,7 +277,6 @@
     padding:0 5px; line-height:15px; min-width:15px;
   }
   .hf-more{ display:flex; flex-direction:column; gap:6px; padding:2px 0; }
-  .hf-label{ font-size:10px; color:var(--text-muted); letter-spacing:0.06em; text-transform:uppercase; margin-bottom:-3px; }
   .hf-chips{ display:flex; flex-wrap:wrap; gap:5px; align-items:center; }
   .hf-chip{
     display:inline-flex; align-items:center; gap:4px; max-width:100%;
@@ -1214,6 +1216,7 @@ let clientAddress = null;   // how the server sees us — shown in Settings so i
 let accessState = 'readonly';
 
 function isAdmin() { return adminAllowed; }
+let modelsStatusTimer = null;
 
 // "3 days ago" from a Unix time in seconds.
 function fmtAgo(unixSeconds) {
@@ -2130,8 +2133,10 @@ function renderSettingsPanel() {
   refreshHealthWebhookStatus();
 
   // Re-checked every few seconds while a refresh runs, until the settings
-  // view is closed (the status element goes away with it).
+  // view is closed (the status element goes away with it). One timer for the
+  // page, so re-rendering Settings mid-refresh doesn't stack up pollers.
   async function refreshModelsStatus() {
+    clearTimeout(modelsStatusTimer);
     const statusEl = document.getElementById('models-status');
     const btn = document.getElementById('models-refresh');
     if (!statusEl || !btn) return;
@@ -2156,7 +2161,7 @@ function renderSettingsPanel() {
           + (data.last_error ? ` Last attempt: ${data.last_error}` : '');
       }
       btn.disabled = !!data.refreshing;
-      if (data.refreshing) setTimeout(refreshModelsStatus, 5000);
+      if (data.refreshing) modelsStatusTimer = setTimeout(refreshModelsStatus, 5000);
     } catch (e) {
       statusEl.textContent = 'Could not reach the server.';
       btn.disabled = true;
@@ -2171,7 +2176,7 @@ function renderSettingsPanel() {
       try {
         await fetch('/api/models/refresh', { method: 'POST' });
       } catch (e) { /* the status line says so */ }
-      setTimeout(refreshModelsStatus, 500);
+      refreshModelsStatus();
     });
   }
 
@@ -2957,9 +2962,11 @@ async function mergePickedFlights() {
   if (openWasMerged) {
     // Reopen the survivor so the map shows the merged track straight away
     // rather than leaving the old (now deleted) flight drawn on screen.
+    historyFacetsAt = 0;
     clearHistorySelection();
     await selectHistoryFlight(result.data.flight_id);
   } else {
+    historyFacetsAt = 0;
     await loadHistoryList();
   }
 }
@@ -2992,6 +2999,7 @@ async function deletePickedFlights() {
     ok: true,
   };
   if (openWasDeleted) clearHistorySelection();
+  historyFacetsAt = 0;
   await loadHistoryList();
 }
 
@@ -3283,15 +3291,18 @@ function syncHistoryFilterBar() {
   const setVal = (el, v) => { if (el.value !== v) el.value = v; };
   if (document.activeElement !== $('hf-q')) setVal($('hf-q'), f.q);
   $('hf-clear-q').hidden = !f.q;
-  $('hf-make').innerHTML = makeOptionsHtml(f);
-  $('hf-model').innerHTML = modelOptionsHtml(f);
+  // Rebuilt only when their options change: replacing a select's options
+  // closes it if it's open, and the list refreshes when a drone drops.
+  const setOptions = (el, html) => { if (el._html !== html) { el.innerHTML = html; el._html = html; } };
+  setOptions($('hf-make'), makeOptionsHtml(f));
+  setOptions($('hf-model'), modelOptionsHtml(f));
   setVal($('hf-date'), f.date);
   $('hf-custom').hidden = f.date !== 'custom';
   setVal($('hf-from'), f.from);
   setVal($('hf-to'), f.to);
-  $('hf-station').innerHTML = optionsHtml([['', 'Any station']].concat(
+  setOptions($('hf-station'), optionsHtml([['', 'Any station']].concat(
     (historyFacets.stations || []).map(st => [st.id, st.name])
-      .concat(f.station && !(historyFacets.stations || []).some(st => st.id === f.station) ? [[f.station, f.station]] : [])), f.station);
+      .concat(f.station && !(historyFacets.stations || []).some(st => st.id === f.station) ? [[f.station, f.station]] : [])), f.station));
   setVal($('hf-name'), f.name);
   setVal($('hf-points'), f.minPoints);
   setVal($('hf-view'), f.view);
@@ -3353,14 +3364,20 @@ function applyHistoryFilters() {
   loadHistoryList();
 }
 
+// The make, model and station lists. They only change as flights are added,
+// merged or deleted, so they're re-read at most every 30 s (merge and delete
+// reset historyFacetsAt to force it) rather than on every list refresh.
+let historyFacetsAt = 0;
 async function loadHistoryFacets() {
+  if (Date.now() - historyFacetsAt < 30000) return;
+  historyFacetsAt = Date.now();
   try {
     const res = await fetch('/api/flights/facets');
-    if (!res.ok) return;
+    if (!res.ok) { historyFacetsAt = 0; return; }
     const data = await res.json();
     historyFacets = { makes: data.makes || [], stations: data.stations || [] };
     syncHistoryFilterBar();
-  } catch (e) { /* the bar works without counts */ }
+  } catch (e) { historyFacetsAt = 0; /* the bar works without counts */ }
 }
 
 // The history list shows flights a page at a time. historyFlights holds the

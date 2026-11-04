@@ -294,7 +294,20 @@ class ModelCatalog:
         error is recorded for the status display."""
         if not self._refreshing.acquire(blocking=False):
             return {"skipped": "a refresh is already running"}
-        conn = sqlite3.connect(self.db_path)
+        return self._refresh_locked()
+
+    def start_refresh(self) -> bool:
+        """Starts a refresh in a background thread and returns at once: True if
+        it started, False if one was already running. status() reports it as
+        running from the moment this returns."""
+        if not self._refreshing.acquire(blocking=False):
+            return False
+        threading.Thread(target=self._refresh_locked, name="faa-refresh", daemon=True).start()
+        return True
+
+    def _refresh_locked(self) -> dict:
+        """The refresh itself. The caller holds _refreshing; this releases it."""
+        conn = sqlite3.connect(self.db_path, timeout=30)
         summary = {"fetched": 0, "unchanged": 0, "removed": 0, "failed": 0}
         try:
             items = self._listing()
@@ -302,6 +315,12 @@ class ModelCatalog:
                       if i.get("docType") == "rid" and i.get("status") == "accepted"}
             known = {t: (doc_id, key) for doc_id, t, key in
                      conn.execute("SELECT id, tracking, change_key FROM docs").fetchall()}
+            # A list that suddenly lost most of what we hold is far more likely
+            # a glitch on the FAA's side than mass withdrawals; acting on it
+            # would empty the table.
+            if known and len(wanted) < len(known) // 2:
+                raise ValueError(f"the FAA list has {len(wanted)} declarations against "
+                                 f"{len(known)} held; not trusting it")
             for tracking, item in sorted(wanted.items()):
                 change_key = f"{item.get('updatedAt')}|{item.get('revNumber')}"
                 if tracking in known and known[tracking][1] == change_key:
@@ -310,7 +329,11 @@ class ModelCatalog:
                 try:
                     self._refresh_doc(conn, tracking, known.get(tracking, (None,))[0], change_key)
                     summary["fetched"] += 1
-                except (urllib.error.URLError, OSError, ValueError, KeyError, IndexError, TypeError) as e:
+                except (ValueError, KeyError, IndexError, TypeError) as e:
+                    # One declaration the FAA serves in an unexpected shape.
+                    # Network trouble isn't caught here: it stops the whole
+                    # refresh (below), so the next hourly check carries on from
+                    # here rather than the table waiting a week.
                     summary["failed"] += 1
                     log.warning("FAA declaration %s not refreshed: %s", tracking, e)
             for tracking in set(known) - set(wanted):     # rescinded or withdrawn
@@ -326,10 +349,15 @@ class ModelCatalog:
                 conn.execute("INSERT OR REPLACE INTO meta VALUES ('last_error', ?)",
                              (f"{summary['failed']} declarations could not be fetched" if summary["failed"] else "",))
             log.info("FAA model table refreshed: %s", summary)
-        except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as e:
+        except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError, sqlite3.Error) as e:
+            # Whatever was fetched before this is kept. last_refresh isn't
+            # moved, so the next check tries again and skips what it has.
             log.warning("FAA model table not refreshed, keeping the last copy: %s", e)
-            with conn:
-                conn.execute("INSERT OR REPLACE INTO meta VALUES ('last_error', ?)", (str(e)[:300],))
+            try:
+                with conn:
+                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('last_error', ?)", (str(e)[:300],))
+            except sqlite3.Error:
+                pass
             summary["error"] = str(e)
         finally:
             conn.close()

@@ -10,6 +10,8 @@ persists every sample to SQLite through db.py, and serves:
   live view
   - GET  /api/drones                  snapshot of all known tracks
   - GET  /api/health                  ZMQ/Bluetooth/WiFi feed liveness
+  - GET  /api/stations                every station: position, link and sniffer states
+  - GET  /api/access                  whether this client gets the admin controls
   - WS   /ws                          snapshot on connect, then live push
 
   history
@@ -21,7 +23,8 @@ persists every sample to SQLite through db.py, and serves:
 
   catalog / config
   - PATCH /api/drones/{key}/name      rename (applies retroactively)
-  - GET /api/station                  the station ("home point") location
+  - GET  /api/station                 the station ("home point") location
+  - PUT  /api/station-config/{id}     a station's name, location and map icon
   - GET  /api/discord_webhook         whether an alert webhook is configured
   - POST /api/discord_webhook/test    send a test alert
   - GET  /api/health_webhook          whether a health-alert webhook is configured
@@ -2781,8 +2784,9 @@ async def api_models_refresh():
     endpoint shows "refreshing" until it's done."""
     if model_catalog is None:
         return JSONResponse({"error": "model lookups are not available"}, status_code=503)
-    if not model_catalog.status()["refreshing"]:
-        spawn(asyncio.to_thread(model_catalog.refresh), "models-refresh-now")
+    # Started here rather than in a task, so the status call the page makes
+    # straight after already says "refreshing".
+    model_catalog.start_refresh()
     return {"ok": True, "refreshing": True}
 
 

@@ -925,19 +925,9 @@ def _set_setting(key, value):
     conn.commit()
 
 
-def _delete_setting(key):
-    conn = _require_conn()
-    conn.execute("DELETE FROM app_settings WHERE key = ?", (key,))
-    conn.commit()
-
-
 async def get_setting(key):
     return await run(_get_setting, key)
 
 
 async def set_setting(key, value):
     await run(_set_setting, key, value)
-
-
-async def delete_setting(key):
-    await run(_delete_setting, key)
